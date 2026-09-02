@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+const buildScript = await fs.readFile(path.join(root, "scripts", "build-desktop-package.mjs"), "utf8");
+const installer = await fs.readFile(path.join(root, "desktop", "installer.nsh"), "utf8");
+const renderer = await fs.readFile(path.join(root, "scripts", "render-installer-logo.cjs"), "utf8");
+const desktopMain = await fs.readFile(path.join(root, "desktop", "main.cjs"), "utf8");
+
+assert.equal(packageJson.version, "0.1.1");
+assert.match(buildScript, /Meta-Code-Packages/);
+assert.match(buildScript, /assertPackagingPath/);
+assert.match(buildScript, /installerSidebar\.bmp/);
+assert.match(buildScript, /installerHeader\.bmp/);
+assert.match(buildScript, /meta-code-mark\.svg/);
+assert.match(buildScript, /path\.join\(root, "desktop", "installer\.nsh"\)/);
+assert.match(buildScript, /fsp\.rm\(path\.join\(artifacts, "builder-debug\.yml"\)/);
+assert.match(buildScript, /outputDirectory: "artifacts"/);
+assert.match(buildScript, /fsp\.rm\(staging, \{ recursive: true, force: true \}\)/);
+assert.match(installer, /真实的文件写入进度/);
+assert.match(installer, /不会主动删除该目录/);
+assert.match(renderer, /capturePage/);
+assert.match(desktopMain, /\.metacode/);
+assert.match(desktopMain, /app\.setPath\("userData"/);
+assert.doesNotMatch(buildScript, /\.runtime|\.workbench-data/);
+
+console.log("desktop package configuration: ok");

@@ -1,0 +1,33 @@
+.first-run-layer { position: fixed; z-index: 1250; inset: 0; display: grid; padding: 20px; place-items: center; background: color-mix(in srgb, var(--mc-surface, #fff) 82%, transparent); backdrop-filter: blur(10px); }
+.first-run-shell { display: flex; width: min(600px, 100%); max-height: min(720px, calc(100vh - 40px)); overflow: hidden; flex-direction: column; border: 1px solid var(--mc-line); border-radius: 8px; background: var(--mc-surface); color: var(--mc-text); box-shadow: var(--mc-shadow-dialog); }
+.first-run-shell:focus { outline: none; }
+.first-run-shell > header { display: flex; min-height: 58px; padding: 0 16px; align-items: center; gap: 9px; border-bottom: 1px solid var(--mc-line); }
+.first-run-shell > header .product-logo { width: 24px; height: 24px; flex: 0 0 24px; }
+.first-run-shell > header > span { display: grid; gap: 1px; }
+.first-run-shell > header strong { font-size: 13px; }
+.first-run-shell > header small { color: var(--mc-text-tertiary, #777d79); font-size: 10px; }
+.first-run-shell > header button { display: grid; width: 32px; height: 32px; margin-left: auto; padding: 0; place-items: center; border: 0; background: transparent; color: var(--mc-text-secondary, #5f655f); }
+.first-run-progress { display: flex; padding: 16px 20px 2px; align-items: center; justify-content: center; gap: 24px; }
+.first-run-progress span { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--mc-line); border-radius: 50%; color: var(--mc-text-tertiary); font-size: 10px; }
+.first-run-progress span.active { border-color: var(--mc-text); color: var(--mc-text); }
+.first-run-progress span.done { border-color: var(--mc-success, #347d50); color: var(--mc-success, #347d50); }
+.first-run-shell > main { display: grid; min-height: 360px; overflow: auto; padding: 34px 54px 30px; justify-items: center; align-content: start; text-align: center; }
+.first-run-icon { display: grid; width: 54px; height: 54px; margin-bottom: 15px; place-items: center; border: 1px solid var(--mc-line); border-radius: 8px; color: var(--mc-text-secondary); }
+.first-run-shell > main > small { color: var(--mc-text-tertiary, #777d79); font-size: 10px; }
+.first-run-shell h1 { margin: 8px 0 9px; font-size: 23px; letter-spacing: 0; }
+.first-run-shell main > p { max-width: 440px; margin: 0; color: var(--mc-text-secondary, #5f655f); font-size: 13px; line-height: 1.75; }
+.first-run-fact { display: grid; width: 100%; margin-top: 24px; padding-top: 16px; gap: 7px; border-top: 1px solid var(--mc-line); }
+.first-run-fact > span { color: var(--mc-text-tertiary, #777d79); font-size: 10px; }
+.first-run-fact code { overflow: hidden; color: var(--mc-text-secondary, #5f655f); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.first-run-fact > strong { font-size: 13px; }
+.first-run-fact button { display: inline-flex; margin: 5px auto 0; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--mc-text-secondary, #5f655f); font-size: 11px; }
+.first-run-mode-grid { display: grid; width: 100%; margin-top: 24px; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--mc-line); border-bottom: 1px solid var(--mc-line); }
+.first-run-mode-grid span { display: grid; padding: 14px; gap: 3px; }
+.first-run-mode-grid span + span { border-left: 1px solid var(--mc-line); }
+.first-run-mode-grid strong { font-size: 12px; }
+.first-run-mode-grid small { color: var(--mc-text-tertiary, #777d79); font-size: 10px; }
+.first-run-shell main > .first-run-error { margin-top: 16px; color: var(--mc-danger, #b42318); font-size: 11px; }
+.first-run-shell > footer { display: flex; min-height: 60px; padding: 10px 16px; align-items: center; justify-content: space-between; border-top: 1px solid var(--mc-line); }
+.first-run-shell > footer button { display: inline-flex; min-height: 34px; padding: 0 11px; align-items: center; gap: 6px; border: 1px solid var(--mc-line); border-radius: 5px; background: transparent; color: inherit; }
+.first-run-shell > footer button.primary { margin-left: auto; border-color: var(--mc-brand); background: var(--mc-brand); color: var(--mc-brand-inverse); }
+@media (max-width: 620px) { .first-run-layer { padding: 0; } .first-run-shell { width: 100vw; height: 100vh; max-height: none; border: 0; border-radius: 0; } .first-run-shell > main { padding: 30px 22px; } }

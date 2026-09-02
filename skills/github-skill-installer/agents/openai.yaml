@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Skill 安装器"
+  short_description: "将 GitHub Skill 安装或更新到当前工作台内部目录"
+  default_prompt: "使用 $github-skill-installer 将这个 GitHub Skill 安装到当前工作台。"

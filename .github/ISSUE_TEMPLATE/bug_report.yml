@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible Meta Code defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys, personal databases, transcripts, or private project files.
+  - type: input
+    id: version
+    attributes:
+      label: Meta Code version
+      placeholder: 0.1.1 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Task mode
+      options: [Native conversation, Collaborative conversation, Task orchestration, Settings or management, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected behavior and exact reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, Node version, Provider/CLI, transport, and relevant configuration with secrets removed.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      render: shell

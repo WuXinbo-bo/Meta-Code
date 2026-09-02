@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meta Code 管家"
+  short_description: "通过自然语言创建、安装和更新工作台托管 Skill"
+  default_prompt: "Use $metacode-manager to manage a project Skill, MCP server, or Plugin in the active workspace."

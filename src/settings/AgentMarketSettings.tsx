@@ -1,0 +1,208 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Download, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Undo2 } from "lucide-react";
+import { ProviderIcon } from "../branding/ProviderIcon";
+import { realtimeCoordinator } from "../realtimeCoordinator";
+import { ProviderConnectionControl } from "./ProviderConnectionControl";
+
+type MarketRuntimeStatus = {
+  available: boolean;
+  source: "configured" | "bundled" | "runtime" | "system" | "missing";
+  version: string;
+  path: string;
+  message: string;
+  managed: { installed: boolean; activeVersion: string; installedVersions: string[] };
+};
+
+type MarketInstallProgress = {
+  phase: string;
+  message: string;
+  active: boolean;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  bytesPerSecond?: number;
+};
+
+type MarketInstallState = {
+  providerId: string;
+  phase: "installing" | "verifying" | "completed" | "failed";
+  message: string;
+  active: boolean;
+};
+
+type MarketItem = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  repository?: string;
+  website?: string;
+  authors: string[];
+  license: string;
+  icon?: string;
+  accent: string;
+  transport: "native" | "acp";
+  native: boolean;
+  installed: boolean;
+  installable: boolean;
+  installReason: string;
+  distributionTypes: string[];
+};
+
+type MarketResponse = {
+  registryVersion: string;
+  registrySource: "network" | "cache";
+  items: MarketItem[];
+  runtimes: Record<string, MarketRuntimeStatus>;
+  installStates: Record<string, MarketInstallState>;
+};
+
+async function marketApi<T>(url: string, init?: RequestInit) {
+  const response = await fetch(url, {
+    ...init,
+    headers: { ...(init?.body ? { "content-type": "application/json" } : {}), ...(init?.headers || {}) }
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(payload.error || `请求失败（HTTP ${response.status}）`);
+  }
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
+}
+
+function bytes(value = 0) {
+  if (!value) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
+}
+
+function MarketIcon({ item, size = 28 }: { item: MarketItem; size?: number }) {
+  return <ProviderIcon provider={item.id} icon={item.icon} accent={item.accent} size={size} className="agent-market-icon" />;
+}
+
+export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(providerId: "codex" | "claude"): void }) {
+  const [market, setMarket] = useState<MarketResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "installed" | "available" | "native" | "acp">("all");
+  const [selectedId, setSelectedId] = useState("codex");
+  const [actionBusy, setActionBusy] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
+  const [installProgress, setInstallProgress] = useState<Record<string, MarketInstallProgress | null>>({});
+
+  const loadMarket = useCallback(async (refresh = false) => {
+    try {
+      const result = await marketApi<MarketResponse>(`/api/agent-market${refresh ? "?refresh=1" : ""}`);
+      setMarket(result);
+      setError("");
+      if (!result.items.some((item) => item.id === selectedId)) setSelectedId(result.items[0]?.id || "");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
+  }, [selectedId]);
+
+  useEffect(() => { void loadMarket(); }, []);
+  useEffect(() => {
+    const changed = () => void loadMarket();
+    const install = (detail: Record<string, unknown>) => {
+      const state = detail as MarketInstallState;
+      if (state.providerId) {
+        setMarket((current) => current ? { ...current, installStates: { ...current.installStates, [state.providerId]: state } } : current);
+        if (!state.active) void loadMarket();
+      }
+    };
+    const unsubscribeChanged = realtimeCoordinator.subscribe("agent-market.changed", changed);
+    const unsubscribeInstall = realtimeCoordinator.subscribe("agent-market.install", install);
+    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => void loadMarket());
+    return () => { unsubscribeChanged(); unsubscribeInstall(); unsubscribeReconcile(); };
+  }, [loadMarket]);
+
+  const selected = market?.items.find((item) => item.id === selectedId) || null;
+  const selectedInstall = selected ? market?.installStates[selected.id] : undefined;
+
+  useEffect(() => {
+    const activeIds = Object.values(market?.installStates || {}).filter((state) => state.active).map((state) => state.providerId);
+    if (!activeIds.length) return;
+    let disposed = false;
+    const sync = async () => {
+      await Promise.all(activeIds.map(async (id) => {
+        try {
+          const result = await marketApi<{ state: MarketInstallState | null; progress: MarketInstallProgress | null }>(`/api/agent-market/${encodeURIComponent(id)}/install-status`);
+          if (disposed) return;
+          setInstallProgress((current) => ({ ...current, [id]: result.progress }));
+          if (result.state) setMarket((current) => current ? { ...current, installStates: { ...current.installStates, [id]: result.state! } } : current);
+          if (result.state && !result.state.active) void loadMarket();
+        } catch { /* SSE remains the primary path. */ }
+      }));
+    };
+    void sync();
+    const timer = window.setInterval(sync, 1_000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [Object.values(market?.installStates || {}).filter((state) => state.active).map((state) => state.providerId).join("|")]);
+
+  const visibleItems = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return (market?.items || []).filter((item) => {
+      if (filter === "installed" && !item.installed) return false;
+      if (filter === "available" && (item.installed || !item.installable)) return false;
+      if (filter === "native" && !item.native) return false;
+      if (filter === "acp" && item.transport !== "acp") return false;
+      return !normalized || `${item.name} ${item.id} ${item.description}`.toLowerCase().includes(normalized);
+    });
+  }, [market?.items, filter, query]);
+
+  const runAction = async (action: "install" | "update" | "rollback") => {
+    if (!selected) return;
+    setActionBusy(action);
+    setActionNotice("");
+    try {
+      await marketApi(`/api/agent-market/${encodeURIComponent(selected.id)}/${action}`, { method: "POST", body: "{}" });
+      setActionNotice(action === "rollback" ? "已回退到上一版本" : action === "update" ? "更新任务已开始" : "安装任务已开始");
+      await loadMarket();
+    } catch (cause) { setActionNotice(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setActionBusy(""); }
+  };
+
+  const progress = selected ? installProgress[selected.id] : null;
+  const percent = progress?.totalBytes ? Math.min(100, Math.round((progress.downloadedBytes || 0) / progress.totalBytes * 100)) : null;
+
+  return <div className="agent-market-settings">
+    <header className="agent-market-heading">
+      <div><h2>Agent 市场</h2><span>{market ? `${market.items.filter((item) => item.installed).length} 已安装 · ${market.items.length} 可查看` : "加载中"}</span></div>
+      <button type="button" title="刷新市场" onClick={() => void loadMarket(true)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={15} /></button>
+    </header>
+    <div className="agent-market-toolbar">
+      <label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Agent" /></label>
+      <div role="group" aria-label="筛选 Agent">
+        {([['all', '全部'], ['installed', '已安装'], ['available', '可安装'], ['native', '原生'], ['acp', 'ACP']] as const).map(([value, label]) => <button type="button" key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{label}</button>)}
+      </div>
+    </div>
+    {error && <div className="agent-market-error">{error}</div>}
+    <div className="agent-market-layout">
+      <div className="agent-market-list" aria-busy={loading}>
+        {loading && !market ? <div className="agent-market-loading"><LoaderCircle className="spin" size={18} />正在读取市场</div> : visibleItems.map((item) => {
+          const install = market?.installStates[item.id];
+          return <button type="button" key={item.id} className={`agent-market-card ${selectedId === item.id ? "selected" : ""}`} onClick={() => { setSelectedId(item.id); setActionNotice(""); }}>
+            <MarketIcon item={item} />
+            <span className="agent-market-card-copy"><strong>{item.name}</strong><small>{item.description || item.id}</small><i>{item.native ? "原生" : "ACP"} · {item.version || "版本未知"}</i></span>
+            <span className={`agent-market-state ${install?.active ? "working" : item.installed ? "installed" : ""}`}>{install?.active ? <LoaderCircle className="spin" size={12} /> : item.installed ? <Check size={12} /> : null}{install?.active ? "处理中" : item.installed ? "已安装" : item.installable ? "可安装" : "不可用"}</span>
+          </button>;
+        })}
+        {!loading && !visibleItems.length && <div className="agent-market-empty">没有匹配的 Agent</div>}
+      </div>
+      {selected && <aside className="agent-market-detail">
+        <header><MarketIcon item={selected} size={34} /><div><strong>{selected.name}</strong><span>{selected.native ? "原生增强" : "ACP 标准接入"}</span></div><i className={selected.installed ? "installed" : ""}>{selected.installed ? "已安装" : selected.installable ? "未安装" : "不可用"}</i></header>
+        <p>{selected.description}</p>
+        <dl><div><dt>版本</dt><dd>{selected.version || "未知"}</dd></div><div><dt>许可</dt><dd>{selected.license}</dd></div><div><dt>分发</dt><dd>{selected.distributionTypes.join(" / ")}</dd></div><div><dt>运行时</dt><dd>{market?.runtimes[selected.id]?.source || (selected.installed ? "待检测" : "未安装")}</dd></div></dl>
+        {(selected.repository || selected.website) && <div className="agent-market-links">{selected.repository && <a href={selected.repository} target="_blank" rel="noreferrer"><ExternalLink size={12} />源码</a>}{selected.website && <a href={selected.website} target="_blank" rel="noreferrer"><ExternalLink size={12} />官网</a>}</div>}
+        {selectedInstall?.active && <div className="agent-market-progress"><div><span>{selectedInstall.message}</span>{percent !== null && <b>{percent}%</b>}</div><i>{percent !== null ? <span style={{ width: `${percent}%` }} /> : <span className="indeterminate" />}</i>{progress?.downloadedBytes ? <small>{bytes(progress.downloadedBytes)}{progress.totalBytes ? ` / ${bytes(progress.totalBytes)}` : ""}{progress.bytesPerSecond ? ` · ${bytes(progress.bytesPerSecond)}/s` : ""}</small> : null}</div>}
+        {selectedInstall?.phase === "failed" && <div className="agent-market-error">{selectedInstall.message}</div>}
+        <div className="agent-market-actions">
+          {selected.native ? <button type="button" onClick={() => onNativeConfigure(selected.id as "codex" | "claude")}><Settings2 size={14} />配置</button> : !selected.installed ? <button type="button" className="primary" disabled={!selected.installable || Boolean(selectedInstall?.active) || Boolean(actionBusy)} title={selected.installReason} onClick={() => void runAction("install")}><Download size={14} />{actionBusy === "install" ? "提交中" : "安装"}</button> : <><button type="button" disabled={Boolean(selectedInstall?.active) || Boolean(actionBusy)} onClick={() => void runAction("update")}><RefreshCw className={actionBusy === "update" ? "spin" : ""} size={14} />检查更新</button>{(market?.runtimes[selected.id]?.managed.installedVersions.length || 0) > 1 && <button type="button" disabled={Boolean(actionBusy)} onClick={() => void runAction("rollback")}><Undo2 size={14} />回退</button>}</>}
+        </div>
+        {!selected.native && !selected.installed && <small className="agent-market-reason">{selected.installReason}</small>}
+        {!selected.native && selected.installed && <ProviderConnectionControl providerId={selected.id} />}
+        {actionNotice && <div className="agent-market-notice">{actionNotice}</div>}
+      </aside>}
+    </div>
+  </div>;
+}

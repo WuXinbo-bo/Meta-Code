@@ -1,0 +1,87 @@
+name: Release Meta Code
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      METACODE_PACKAGE_ROOT: ${{ github.workspace }}\release-artifacts
+      METACODE_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify release version
+        shell: pwsh
+        run: |
+          $packageVersion = node -p "require('./package.json').version"
+          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tagVersion -ne $packageVersion) {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run release checks
+        shell: pwsh
+        run: |
+          npm run typecheck
+          npm run test:desktop-package
+          npm run test:release-manifest
+          npm run test:app-update
+          npm run test:repository
+
+      - name: Build desktop packages
+        run: npm run desktop:package
+
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $artifactRoot = Join-Path $env:METACODE_PACKAGE_ROOT $version
+          $artifactDirectory = Join-Path $artifactRoot 'artifacts'
+          $installerName = "Meta-Code-Setup-$version-x64.exe"
+          $installer = Join-Path $artifactDirectory $installerName
+          $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$env:GITHUB_REF_NAME"
+          $assetUrl = "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/$installerName"
+          npm run release:prepare -- --asset $installer --release-url $releaseUrl --asset-url $assetUrl --platform win32 --arch x64 --out $artifactRoot
+          $manifest = Join-Path $artifactRoot "meta-code-$version\stable\latest.json"
+          Copy-Item -LiteralPath $manifest -Destination (Join-Path $artifactDirectory 'latest.json')
+          $checksumFile = Join-Path $artifactDirectory 'SHA256SUMS.txt'
+          Get-ChildItem -LiteralPath $artifactDirectory -File |
+            Where-Object Name -ne 'SHA256SUMS.txt' |
+            Sort-Object Name |
+            ForEach-Object { "$(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName | Select-Object -ExpandProperty Hash)  $($_.Name)" } |
+            Set-Content -LiteralPath $checksumFile -Encoding utf8NoBOM
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $artifactDirectory = Join-Path (Join-Path $env:METACODE_PACKAGE_ROOT $version) 'artifacts'
+          gh release create $env:GITHUB_REF_NAME `
+            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe") `
+            (Join-Path $artifactDirectory "Meta-Code-Portable-$version-x64.exe") `
+            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe.blockmap") `
+            (Join-Path $artifactDirectory 'latest.json') `
+            (Join-Path $artifactDirectory 'SHA256SUMS.txt') `
+            --title "Meta Code $version" `
+            --generate-notes `
+            --verify-tag

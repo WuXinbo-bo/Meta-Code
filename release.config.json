@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "productId": "meta-code",
+  "productName": "Meta Code",
+  "dataSchemaVersion": 1,
+  "launcherProtocolVersion": 1,
+  "githubRepository": "WuXinbo-bo/Meta-Code",
+  "manifestUrls": {
+    "stable": "https://github.com/WuXinbo-bo/Meta-Code/releases/latest/download/latest.json",
+    "beta": ""
+  },
+  "defaultChannel": "stable",
+  "defaultCheckIntervalHours": 6
+}
