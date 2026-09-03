@@ -7,6 +7,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { BackendRecoveryPolicy } = require("./backend-recovery.cjs");
 
 const PRODUCT_NAME = "Meta Code";
 const PRODUCT_ID = "meta-code";
@@ -28,6 +29,8 @@ let backendPort = 0;
 let backendLog = null;
 let allowQuit = false;
 let quitStarted = false;
+let recoveryInFlight = false;
+const recoveryPolicy = new BackendRecoveryPolicy();
 
 function runtimeRoot() {
   return app.isPackaged ? path.join(process.resourcesPath, "workbench") : path.resolve(__dirname, "..");
@@ -84,10 +87,10 @@ function health(port) {
   });
 }
 
-async function waitForBackend(port) {
+async function waitForBackend(processHandle, port) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < START_TIMEOUT_MS) {
-    if (!backend || backend.exitCode !== null) throw new Error(`后端提前退出（${backend?.exitCode ?? "unknown"}）`);
+    if (processHandle.exitCode !== null) throw new Error(`后端提前退出（${processHandle.exitCode ?? "unknown"}）`);
     try { return await health(port); } catch { await new Promise((resolve) => setTimeout(resolve, 250)); }
   }
   throw new Error("后端启动超时，请查看工作台日志");
@@ -100,9 +103,11 @@ async function startBackend() {
   if (!fs.existsSync(entry) || !fs.existsSync(frontend)) throw new Error("桌面运行时不完整，请重新安装 Meta Code");
   await fsp.mkdir(logDir, { recursive: true });
   rotateLog(path.join(logDir, "desktop-backend.log"));
-  backendLog = fs.createWriteStream(path.join(logDir, "desktop-backend.log"), { flags: "a", mode: 0o600 });
   backendPort = await allocatePort();
-  backend = spawn(process.execPath, [entry], {
+  backendLog?.end();
+  const processLog = fs.createWriteStream(path.join(logDir, "desktop-backend.log"), { flags: "a", mode: 0o600 });
+  backendLog = processLog;
+  const processHandle = spawn(process.execPath, [entry], {
     cwd: root,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -119,19 +124,23 @@ async function startBackend() {
       METACODE_API_TOKEN: apiToken
     }
   });
-  backend.stdout.pipe(backendLog, { end: false });
-  backend.stderr.pipe(backendLog, { end: false });
-  backend.once("exit", (code, signal) => {
-    backendLog?.write(`\n[launcher] backend exited: code=${code} signal=${signal}\n`);
-    if (!quitStarted && mainWindow && !mainWindow.isDestroyed()) void showFailure(new Error("Meta Code 后端意外退出，请重新启动应用"));
+  backend = processHandle;
+  processHandle.stdout.pipe(processLog, { end: false });
+  processHandle.stderr.pipe(processLog, { end: false });
+  processHandle.once("exit", (code, signal) => {
+    processLog.write(`\n[launcher] backend exited: code=${code} signal=${signal}\n`);
+    processLog.end();
+    if (backendLog === processLog) backendLog = null;
+    if (backend === processHandle) backend = null;
+    if (!quitStarted && !recoveryInFlight && mainWindow && !mainWindow.isDestroyed()) void recoverBackend(new Error("Meta Code 后端意外退出"));
   });
-  const status = await waitForBackend(backendPort);
+  const status = await waitForBackend(processHandle, backendPort);
   await writeJsonAtomic(runtimeStateFile, {
     schemaVersion: 1,
     productId: PRODUCT_ID,
     version: status.version,
     launcherPid: process.pid,
-    backendPid: backend.pid,
+    backendPid: processHandle.pid,
     port: backendPort,
     startedAt: new Date().toISOString(),
     runtimeRoot: root
@@ -141,6 +150,14 @@ async function startBackend() {
 
 function loadingHtml() {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>html,body{height:100%;margin:0;background:#fff;color:#171918;font-family:"Segoe UI",sans-serif}body{display:grid;place-items:center}.loading{display:grid;justify-items:center;gap:14px}.mark{display:grid;width:48px;height:48px;place-items:center;border:1px solid #d7d9d7;border-radius:10px;font-size:11px;font-weight:700}.copy{display:grid;gap:4px;text-align:center}.copy strong{font-size:15px}.copy span{color:#777d79;font-size:11px}.line{width:120px;height:2px;overflow:hidden;background:#eceeed}.line:after{display:block;width:38%;height:100%;background:#252927;content:"";animation:load 1.8s ease-in-out infinite}@keyframes load{from{transform:translateX(-110%)}to{transform:translateX(365%)}}</style></head><body><div class="loading"><div class="mark">MC</div><div class="copy"><strong>Meta Code</strong><span id="status">正在启动工作台</span></div><div class="line"></div></div></body></html>`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]);
+}
+
+function recoveryHtml(message) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>html,body{height:100%;margin:0;background:#fff;color:#171918;font-family:"Segoe UI",sans-serif}body{display:grid;place-items:center}.recovery{display:grid;width:min(420px,calc(100vw - 48px));gap:14px}.mark{display:grid;width:48px;height:48px;place-items:center;border:1px solid #d7d9d7;border-radius:10px;font-size:11px;font-weight:700}.copy{display:grid;gap:6px}.copy strong{font-size:17px}.copy span{color:#686e6a;font-size:12px;line-height:1.6}.actions{display:flex;gap:8px;flex-wrap:wrap}button{min-height:34px;padding:0 12px;border:1px solid #d5d9d6;border-radius:6px;background:#fff;color:#343936;cursor:pointer}button.primary{border-color:#252927;background:#252927;color:#fff}</style></head><body><main class="recovery"><div class="mark">MC</div><div class="copy"><strong>工作台服务暂时不可用</strong><span>${escapeHtml(message)}</span></div><div class="actions"><button class="primary" onclick="location.href='metacode-recovery://retry'">重新连接</button><button onclick="location.href='metacode-recovery://logs'">打开日志</button><button onclick="location.href='metacode-recovery://quit'">退出</button></div></main></body></html>`;
 }
 
 function createWindow() {
@@ -181,6 +198,9 @@ function createWindow() {
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (url.startsWith(`http://127.0.0.1:${backendPort}/`) || url.startsWith("data:text/html")) return;
     event.preventDefault();
+    if (url.startsWith("metacode-recovery://retry")) void retryBackendRecovery();
+    else if (url.startsWith("metacode-recovery://logs")) void shell.openPath(logDir);
+    else if (url.startsWith("metacode-recovery://quit")) app.quit();
     if (/^https?:/i.test(url)) void shell.openExternal(url);
   });
   mainWindow.on("close", () => {
@@ -194,12 +214,60 @@ function createWindow() {
 async function showFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   if (mainWindow && !mainWindow.isDestroyed()) {
-    await mainWindow.webContents.executeJavaScript(`document.getElementById("status").textContent=${JSON.stringify(message)}`).catch(() => undefined);
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(recoveryHtml(message))}`).catch(() => undefined);
     if (!TEST_HEADLESS) mainWindow.show();
   }
   await fsp.mkdir(logDir, { recursive: true });
   await fsp.appendFile(path.join(logDir, "desktop-launcher.log"), `${new Date().toISOString()} ${message}\n`, "utf8");
-  if (!TEST_HEADLESS) void dialog.showErrorBox("Meta Code 启动失败", `${message}\n\n日志：${logDir}`);
+  if (!TEST_HEADLESS && !mainWindow) void dialog.showErrorBox("Meta Code 启动失败", `${message}\n\n日志：${logDir}`);
+}
+
+async function showRecovering(attempt) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
+  await mainWindow.webContents.executeJavaScript(`document.getElementById("status").textContent=${JSON.stringify(`正在恢复工作台服务（第 ${attempt} 次）`)}`).catch(() => undefined);
+  if (!TEST_HEADLESS) mainWindow.show();
+}
+
+async function discardFailedBackend() {
+  const failed = backend;
+  backend = null;
+  const failedLog = backendLog;
+  backendLog = null;
+  if (failed && failed.exitCode === null) failed.kill();
+  if (!failed) failedLog?.end();
+}
+
+async function recoverBackend(cause) {
+  if (recoveryInFlight || quitStarted) return;
+  recoveryInFlight = true;
+  let lastError = cause;
+  try {
+    while (recoveryPolicy.recordAttempt()) {
+      const attempt = 2 - recoveryPolicy.remaining();
+      await showRecovering(attempt);
+      await discardFailedBackend();
+      try {
+        await startBackend();
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`);
+        return;
+      } catch (error) {
+        lastError = error;
+        await fsp.appendFile(path.join(logDir, "desktop-launcher.log"), `${new Date().toISOString()} recovery failed: ${error instanceof Error ? error.message : String(error)}\n`, "utf8");
+        await discardFailedBackend();
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+    }
+    await showFailure(new Error(`${lastError instanceof Error ? lastError.message : String(lastError)}。自动恢复已停止，可手动重试或打开日志。`));
+  } finally {
+    recoveryInFlight = false;
+  }
+}
+
+async function retryBackendRecovery() {
+  recoveryPolicy.reset();
+  await recoverBackend(new Error("正在按用户请求重新连接"));
 }
 
 async function requestBackendShutdown() {
@@ -235,10 +303,13 @@ async function boot() {
     await startBackend();
     await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`);
     if (!TEST_HEADLESS) mainWindow.show();
+    const testCrashMs = Number(process.env.METACODE_DESKTOP_TEST_CRASH_BACKEND_MS || 0);
+    if (TEST_HEADLESS && testCrashMs > 0) setTimeout(() => backend?.kill("SIGKILL"), testCrashMs).unref();
     const testExitMs = Number(process.env.METACODE_DESKTOP_TEST_EXIT_MS || 0);
     if (testExitMs > 0) setTimeout(() => app.quit(), testExitMs).unref();
   } catch (error) {
-    await showFailure(error);
+    if (TEST_HEADLESS) await showFailure(error);
+    else await recoverBackend(error);
     if (TEST_HEADLESS) app.quit();
   }
 }

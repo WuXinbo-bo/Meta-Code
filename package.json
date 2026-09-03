@@ -99,6 +99,8 @@
     "test:data-owner": "node --import tsx scripts/test-data-owner-lease.mjs",
     "test:data-compatibility": "node scripts/test-data-compatibility-snapshot.mjs",
     "test:backend-recovery": "npm run build && node scripts/test-backend-recovery.mjs",
+    "test:desktop-recovery-policy": "node scripts/test-desktop-recovery-policy.mjs",
+    "test:desktop-launcher-recovery": "node scripts/test-desktop-launcher-recovery.mjs",
     "test:ci": "npm run build && node scripts/run-ci-tests.mjs",
     "desktop:run": "electron desktop/main.cjs",
     "desktop:package": "node scripts/build-desktop-package.mjs",

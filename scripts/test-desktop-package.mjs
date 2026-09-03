@@ -10,6 +10,7 @@ const installer = await fs.readFile(path.join(root, "desktop", "installer.nsh"),
 const renderer = await fs.readFile(path.join(root, "scripts", "render-installer-logo.cjs"), "utf8");
 const desktopMain = await fs.readFile(path.join(root, "desktop", "main.cjs"), "utf8");
 const desktopPreload = await fs.readFile(path.join(root, "desktop", "preload.cjs"), "utf8");
+const backendRecovery = await fs.readFile(path.join(root, "desktop", "backend-recovery.cjs"), "utf8");
 
 assert.equal(packageJson.version, "0.1.1");
 assert.match(buildScript, /Meta-Code-Packages/);
@@ -17,6 +18,7 @@ assert.match(buildScript, /assertPackagingPath/);
 assert.match(buildScript, /installerSidebar\.bmp/);
 assert.match(buildScript, /installerHeader\.bmp/);
 assert.match(buildScript, /meta-code-mark\.svg/);
+assert.match(buildScript, /backend-recovery\.cjs/);
 assert.match(buildScript, /path\.join\(root, "desktop", "installer\.nsh"\)/);
 assert.match(buildScript, /fsp\.rm\(path\.join\(artifacts, "builder-debug\.yml"\)/);
 assert.match(buildScript, /outputDirectory: "artifacts"/);
@@ -30,6 +32,9 @@ assert.match(desktopMain, /\.metacode/);
 assert.match(desktopMain, /app\.setPath\("userData"/);
 assert.match(desktopMain, /preload\.cjs/);
 assert.match(desktopPreload, /webUtils\.getPathForFile/);
+assert.match(desktopMain, /recoverBackend/);
+assert.match(desktopMain, /metacode-recovery:\/\/retry/);
+assert.match(backendRecovery, /maxAutomaticRestarts = 2/);
 assert.doesNotMatch(buildScript, /\.runtime|\.workbench-data/);
 
 console.log("desktop package configuration: ok");
