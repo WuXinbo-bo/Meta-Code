@@ -39,3 +39,17 @@ npm run release:prepare -- --asset <package.zip> --asset-url <https-url> --relea
 检查请求使用系统代理环境并对超时、限流和服务端错误进行有限退避重试。当前检查失败时，设置页会把错误与“上次成功结果”分开显示，避免把缓存公告误报成刚刚检查成功。同一 SemVer 的紧急资源替换由 build ID 识别，正式发布仍应优先递增补丁版本。
 
 当前 `0.1.1` 只开放 `check` 能力；`download`、`apply` 和 `launcher` 能力均为关闭状态。后续 Launcher 接入时通过能力协商开放，而不是在 UI 中伪造进度。
+
+## 发布不变量
+
+- 旧程序只能读取其明确声明可读的数据版本，不能猜测新版 Schema。
+- 数据迁移先创建完整校验备份，再运行可重复迁移；失败时原数据库保持不变。
+- `writesTo` 表示新程序完成迁移后的写入版本，不等于安装前数据必须已经处于该版本。
+- 更新清单签名、资产 SHA-256、产品 ID、平台、Launcher 协议和数据兼容范围必须全部通过后才能进入切换阶段。
+- CLI 更新与应用更新是两套独立事务。CLI 切换还必须通过 Provider/ACP、委派和编排能力认证，不能只以 `--version` 成功作为依据。
+- 发布工作流可以幂等重跑同一标签，但正式修复应提升 SemVer；build ID 只用于识别同版本不同构建，不替代版本治理。
+- 发布密钥、个人数据、开发 API token、安装包中间产物均不得进入 Git 历史。
+
+## 本地 API 边界
+
+桌面启动器为每次启动生成随机 API token，并由 Electron 请求层注入；开发版由后端和 Vite 代理共享 `.metacode-development/security/api-token`。除健康检查和已有独立桥接令牌的内部端点外，所有 `/api/*` 请求都必须满足 loopback Host、允许端口和 token 校验。浏览器写请求还要通过 Origin 与 `Sec-Fetch-Site` 检查，从而阻止恶意网页和 DNS rebinding 直接控制本地工作台，而不引入登录界面或多用户系统。

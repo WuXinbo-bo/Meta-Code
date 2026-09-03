@@ -24,8 +24,11 @@ not covered by ACP, currently Codex and Claude.
 
 Managed versions live below `runtimes/<id>/versions/<version>`. `current.json`
 is atomically replaced to activate a version. Downloads install into a staging
-directory, must pass an executable probe, and only then become active. Previous
-versions remain available for rollback.
+directory, must pass an executable probe and provider compatibility
+certification, and only then become active. Activation, verification, and
+rollback form one transaction: any post-switch failure restores the previous
+pointer and configuration. The active version and one rollback version are
+retained; versions referenced by running or resumable work are never pruned.
 
 Binary distributions require HTTPS and an exact SHA-256. Npm distributions use
 npm's package integrity verification and install into the same versioned layout.
@@ -40,3 +43,20 @@ npm's package integrity verification and install into the same versioned layout.
 The API exposes detection, install/update, diagnostics, version activation, and
 rollback. Install phases are published as `runtime.install` events and terminal
 changes as `runtime.changed`.
+
+## Execution identity
+
+Every main session, delegated task, workflow planner, workflow node attempt,
+integrator, and validator captures a versioned runtime binding:
+
+- runtime/provider/adapter IDs;
+- transport source and absolute executable path;
+- CLI version and adapter SDK version;
+- a capability fingerprint.
+
+Resume is allowed only when the current capability fingerprint matches the
+captured identity. If a CLI update changes the adapter, path, version, or
+negotiated capabilities, the old engine thread is not silently reused. Workflow
+attempt history remains readable, while the affected attempt is marked
+abandoned and a fresh context is required. This prevents an apparently
+successful CLI update from corrupting delegation or orchestration state.

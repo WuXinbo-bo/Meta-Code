@@ -15,7 +15,7 @@ Meta Code separates product UI, workbench domain services, Agent transports, and
 
 ```text
 UI command
-  -> local API
+  -> loopback API + per-install transport token
   -> Provider Host capability check
   -> native or ACP transport
   -> normalized session/activity events
@@ -31,5 +31,10 @@ Unknown activity types must degrade to a generic event rather than fail renderin
 - `~/.metacode`: mutable personal state, credentials, managed runtimes, logs, backups.
 - Workspace directories: user project source and `.claude-codex` task artifacts.
 - Desktop Launcher: application process lifecycle and future atomic version switching.
+
+The local API is not treated as trusted merely because it listens on
+`127.0.0.1`. Host, origin, fetch-site, and a private transport token protect it
+from unrelated browser pages. This is a single-user desktop boundary, not an
+account or multi-tenant authorization layer.
 
 See also [CLI runtime](cli-runtime.md), [data layout](data-and-runtime.md), [task orchestration](task-orchestration.md), and [Codex native link](codex-native-link.md).
