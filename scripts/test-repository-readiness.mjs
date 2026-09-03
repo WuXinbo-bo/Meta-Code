@@ -69,6 +69,10 @@ const releaseConfig = JSON.parse(await readFile(path.join(root, "release.config.
 assert.equal(releaseConfig.githubRepository, "WuXinbo-bo/Meta-Code");
 assert.equal(releaseConfig.manifestUrls.stable, "https://github.com/WuXinbo-bo/Meta-Code/releases/latest/download/latest.json");
 assert.equal(releaseConfig.manifestUrls.beta, "");
+assert.equal(releaseConfig.schemaVersion, 2);
+assert.equal(releaseConfig.dataCompatibility.writesTo, releaseConfig.dataSchemaVersion);
+assert.equal(releaseConfig.manifestSigning.required, true);
+assert.ok(releaseConfig.manifestSigning.trustedKeys["meta-code-release-2026"]);
 
 const gitignore = await readFile(path.join(root, ".gitignore"), "utf8");
 for (const entry of [".claude-codex/", ".local-release-notes/", ".runtime/", "*.db", "*.key"]) assert.match(gitignore, new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

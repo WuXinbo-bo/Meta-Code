@@ -8,28 +8,44 @@ export type AppUpdateAsset = {
   url: string;
   sha256: string;
   size?: number;
-  signature?: string;
+};
+
+export type AppDataCompatibility = {
+  readsFrom: { min: number; max: number };
+  writesTo: number;
+  migratesFrom: { min: number; max: number };
+  migrationProtocolVersion: number;
+  downgradePolicy: "blocked";
+};
+
+export type AppUpdateManifestSignature = {
+  algorithm: "Ed25519";
+  keyId: string;
+  value: string;
 };
 
 export type AppUpdateManifest = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   productId: string;
   productName: string;
   version: string;
+  buildId: string;
   channel: AppUpdateChannel;
   publishedAt: string;
   releaseNotes: string;
   releaseUrl: string;
   compatibility: {
-    minDataSchemaVersion: number;
-    maxDataSchemaVersion: number;
-    launcherProtocolVersion: number;
+    data: AppDataCompatibility;
+    launcherProtocol: { min: number; max: number };
   };
   assets: AppUpdateAsset[];
+  signature: AppUpdateManifestSignature;
 };
 
 export type AppUpdateRelease = {
   version: string;
+  buildId: string;
+  manifestDigest: string;
   channel: AppUpdateChannel;
   publishedAt: string;
   releaseNotes: string;
@@ -50,7 +66,7 @@ export type AppUpdatePreferences = {
 };
 
 export type AppUpdatePersistedState = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   revision: number;
   preferences: AppUpdatePreferences;
   lastCheckedAt: string | null;
@@ -58,18 +74,24 @@ export type AppUpdatePersistedState = {
   lastError: string;
   release: AppUpdateRelease | null;
   checkedByVersion: string;
+  checkedByBuildId: string;
+  lastSuccessfulSourceState: Exclude<AppUpdateSourceState, "error">;
+  lastSuccessfulSourceLabel: string;
 };
 
 export type AppUpdateStatus = {
   schemaVersion: 1;
   revision: number;
-  product: { id: string; name: string; currentVersion: string };
+  product: { id: string; name: string; currentVersion: string; currentBuildId: string };
   capabilities: { check: true; download: false; apply: false; launcher: false };
   source: {
     state: AppUpdateSourceState;
     label: string;
     githubRepository: string;
     manifestConfigured: boolean;
+    usingCachedRelease: boolean;
+    lastSuccessfulState: Exclude<AppUpdateSourceState, "error">;
+    lastSuccessfulLabel: string;
   };
   checkState: AppUpdateCheckState;
   preferences: AppUpdatePreferences;
@@ -82,12 +104,15 @@ export type AppUpdateStatus = {
 };
 
 export type AppUpdateConfig = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   productId: string;
   productName: string;
   currentVersion: string;
   dataSchemaVersion: number;
-  launcherProtocolVersion: number;
+  dataCompatibility: AppDataCompatibility;
+  launcherProtocol: { min: number; max: number };
+  currentBuildId: string;
+  manifestSigning: { required: true; trustedKeys: Record<string, string> };
   githubRepository: string;
   manifestUrls: Record<AppUpdateChannel, string>;
   defaultChannel: AppUpdateChannel;

@@ -19,6 +19,8 @@ assert.match(buildScript, /meta-code-mark\.svg/);
 assert.match(buildScript, /path\.join\(root, "desktop", "installer\.nsh"\)/);
 assert.match(buildScript, /fsp\.rm\(path\.join\(artifacts, "builder-debug\.yml"\)/);
 assert.match(buildScript, /outputDirectory: "artifacts"/);
+assert.match(buildScript, /build-info\.json/);
+assert.match(buildScript, /METACODE_BUILD_ID/);
 assert.match(buildScript, /fsp\.rm\(staging, \{ recursive: true, force: true \}\)/);
 assert.match(installer, /真实的文件写入进度/);
 assert.match(installer, /不会主动删除该目录/);

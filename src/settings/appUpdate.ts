@@ -3,9 +3,9 @@ export type AppUpdateChannel = "stable" | "beta";
 export type AppUpdateStatus = {
   schemaVersion: 1;
   revision: number;
-  product: { id: string; name: string; currentVersion: string };
+  product: { id: string; name: string; currentVersion: string; currentBuildId: string };
   capabilities: { check: boolean; download: boolean; apply: boolean; launcher: boolean };
-  source: { state: "unconfigured" | "manifest" | "github" | "error"; label: string; githubRepository: string; manifestConfigured: boolean };
+  source: { state: "unconfigured" | "manifest" | "github" | "error"; label: string; githubRepository: string; manifestConfigured: boolean; usingCachedRelease: boolean; lastSuccessfulState: "unconfigured" | "manifest" | "github"; lastSuccessfulLabel: string };
   checkState: "idle" | "checking" | "completed" | "error";
   preferences: { autoCheck: boolean; channel: AppUpdateChannel; skippedVersion: string; remindAfter: string | null };
   lastCheckedAt: string | null;
@@ -13,6 +13,8 @@ export type AppUpdateStatus = {
   lastError: string;
   release: null | {
     version: string;
+    buildId: string;
+    manifestDigest: string;
     channel: AppUpdateChannel;
     publishedAt: string;
     releaseNotes: string;

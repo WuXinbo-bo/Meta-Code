@@ -24,16 +24,18 @@ Meta Code 当前产品版本为 `0.1.1`。`package.json` 是唯一版本源；�
 
 ## 发布清单
 
-正式 Manifest 包含产品、版本、频道、发布日期、兼容范围、发布说明和平台资产。每个资产必须包含 SHA-256；未来 Launcher 上线前还必须加入可验证签名。
+正式 Manifest v2 包含产品、SemVer、不可变 build ID、频道、发布日期、兼容范围、发布说明和平台资产。每个资产必须包含 SHA-256，整个清单必须通过受信任密钥的 Ed25519 签名；无签名、未知密钥或内容被篡改的清单一律拒绝。公开密钥进入 `release.config.json`，私钥只保存在本地安全目录和 GitHub Actions Secret `METACODE_MANIFEST_SIGNING_KEY_B64` 中。
 
 ```powershell
-npm run release:prepare -- --asset <package.zip> --asset-url <https-url> --release-url <https-url>
+npm run release:prepare -- --asset <package.zip> --asset-url <https-url> --release-url <https-url> --build-id <git-sha> --signing-key <private.pem> --signing-key-id meta-code-release-2026
 ```
 
-生成物写入被 Git 忽略的 `release-artifacts/`。推送 `v*` 标签后，GitHub Actions 会在隔离的 Windows Runner 中校验版本、执行发布测试、构建安装包，并生成 `latest.json` 与 `SHA256SUMS.txt` 后发布 Release。签名密钥不进入工作台进程或源码仓库。
+生成物写入被 Git 忽略的 `release-artifacts/`。推送 `v*` 标签后，GitHub Actions 会在隔离的 Windows Runner 中校验版本、执行发布测试、构建安装包，并生成 `latest.json` 与 `SHA256SUMS.txt` 后发布 Release。重复执行同一标签时会覆盖同名资产，不会因 Release 已存在而失败。签名密钥不进入工作台进程或源码仓库。
 
 ## 兼容与回滚
 
-`dataSchemaVersion` 与 `launcherProtocolVersion` 是发布闸门。Launcher 只能应用兼容的 Manifest，并依次执行：下载到临时目录、校验、解包到新版本目录、健康检查、切换活动指针。失败时保留旧版本并恢复指针。数据库迁移必须先备份且保持可重复执行。
+兼容闸门不再把“目标写入版本”误当成“当前必须版本”。Manifest 分别声明 `readsFrom`、`migratesFrom`、`writesTo`、迁移协议和禁止降级策略；因此 Schema 1 可以安全升级到写入 Schema 2，而 Schema 3 不会被旧程序覆盖。Launcher 协议同样使用范围协商。Launcher 只能应用兼容的 Manifest，并依次执行：下载到临时目录、校验、解包到新版本目录、健康检查、切换活动指针。失败时保留旧版本并恢复指针。数据库迁移必须先备份且保持可重复执行。
+
+检查请求使用系统代理环境并对超时、限流和服务端错误进行有限退避重试。当前检查失败时，设置页会把错误与“上次成功结果”分开显示，避免把缓存公告误报成刚刚检查成功。同一 SemVer 的紧急资源替换由 build ID 识别，正式发布仍应优先递增补丁版本。
 
 当前 `0.1.1` 只开放 `check` 能力；`download`、`apply` 和 `launcher` 能力均为关闭状态。后续 Launcher 接入时通过能力协商开放，而不是在 UI 中伪造进度。

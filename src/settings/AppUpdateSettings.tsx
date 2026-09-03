@@ -50,7 +50,7 @@ export function AppUpdateSettings() {
       <div className="app-update-row"><span><strong>更新源</strong><small className={sourceAttention ? "attention" : ""}>{status.source.label}</small></span><button type="button" disabled={busy !== "" || status.checkState === "checking"} onClick={() => void mutate("check", "/api/app-update/check", "POST")}><RefreshCw className={busy === "check" || status.checkState === "checking" ? "spin" : ""} size={14} />{status.lastCheckedAt ? "重新检查" : "检查更新"}</button></div>
     </div>
     <div className="app-update-check-meta"><Clock3 size={13} /><span>最近检查：{appUpdateTime(status.lastCheckedAt)}</span>{status.lastSuccessfulCheckAt && <span>最近成功：{appUpdateTime(status.lastSuccessfulCheckAt)}</span>}</div>
-    {status.lastError && status.source.state !== "unconfigured" && <p className="app-update-error">{status.lastError}</p>}
+    {status.lastError && status.source.state !== "unconfigured" && <p className="app-update-error">{status.lastError}{status.source.usingCachedRelease ? "；下方仍显示最近一次成功检查的结果" : ""}</p>}
     {release && <section className={`app-update-release ${status.updateAvailable ? "available" : ""}`}>
       <header><div>{status.updateAvailable ? <RefreshCw size={16} /> : <Check size={16} />}<span><strong>{status.updateAvailable ? `Meta Code ${release.version}` : `已检查 ${release.version}`}</strong><small>{appUpdateTime(release.publishedAt)} · {release.source === "manifest" ? "发布清单" : "GitHub Releases"}</small></span></div>{release.releaseUrl && <a href={release.releaseUrl} target="_blank" rel="noreferrer">查看发布页<ExternalLink size={13} /></a>}</header>
       {release.releaseNotes && <p>{release.releaseNotes}</p>}

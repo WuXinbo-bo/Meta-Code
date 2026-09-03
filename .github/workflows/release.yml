@@ -51,6 +51,8 @@ jobs:
 
       - name: Prepare release metadata
         shell: pwsh
+        env:
+          METACODE_MANIFEST_SIGNING_KEY_B64: ${{ secrets.METACODE_MANIFEST_SIGNING_KEY_B64 }}
         run: |
           $version = node -p "require('./package.json').version"
           $artifactRoot = Join-Path $env:METACODE_PACKAGE_ROOT $version
@@ -59,7 +61,14 @@ jobs:
           $installer = Join-Path $artifactDirectory $installerName
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$env:GITHUB_REF_NAME"
           $assetUrl = "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/$installerName"
-          npm run release:prepare -- --asset $installer --release-url $releaseUrl --asset-url $assetUrl --platform win32 --arch x64 --out $artifactRoot
+          if (-not $env:METACODE_MANIFEST_SIGNING_KEY_B64) { throw 'Missing METACODE_MANIFEST_SIGNING_KEY_B64 repository secret' }
+          $signingKey = Join-Path $artifactRoot 'manifest-signing-key.pem'
+          [IO.File]::WriteAllBytes($signingKey, [Convert]::FromBase64String($env:METACODE_MANIFEST_SIGNING_KEY_B64))
+          try {
+            npm run release:prepare -- --asset $installer --release-url $releaseUrl --asset-url $assetUrl --platform win32 --arch x64 --out $artifactRoot --build-id $env:GITHUB_SHA --signing-key $signingKey --signing-key-id meta-code-release-2026
+          } finally {
+            Remove-Item -LiteralPath $signingKey -Force -ErrorAction SilentlyContinue
+          }
           $manifest = Join-Path $artifactRoot "meta-code-$version\stable\latest.json"
           Copy-Item -LiteralPath $manifest -Destination (Join-Path $artifactDirectory 'latest.json')
           $checksumFile = Join-Path $artifactDirectory 'SHA256SUMS.txt'
@@ -76,12 +85,17 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $artifactDirectory = Join-Path (Join-Path $env:METACODE_PACKAGE_ROOT $version) 'artifacts'
-          gh release create $env:GITHUB_REF_NAME `
-            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe") `
-            (Join-Path $artifactDirectory "Meta-Code-Portable-$version-x64.exe") `
-            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe.blockmap") `
-            (Join-Path $artifactDirectory 'latest.json') `
-            (Join-Path $artifactDirectory 'SHA256SUMS.txt') `
-            --title "Meta Code $version" `
-            --generate-notes `
-            --verify-tag
+          $assets = @(
+            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe"),
+            (Join-Path $artifactDirectory "Meta-Code-Portable-$version-x64.exe"),
+            (Join-Path $artifactDirectory "Meta-Code-Setup-$version-x64.exe.blockmap"),
+            (Join-Path $artifactDirectory 'latest.json'),
+            (Join-Path $artifactDirectory 'SHA256SUMS.txt')
+          )
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+            gh release edit $env:GITHUB_REF_NAME --title "Meta Code $version"
+          } else {
+            gh release create $env:GITHUB_REF_NAME @assets --title "Meta Code $version" --generate-notes --verify-tag
+          }

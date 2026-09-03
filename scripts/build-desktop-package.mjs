@@ -79,6 +79,9 @@ await copy(path.join(root, "public"), path.join(runtime, "public"));
 await fsp.mkdir(path.join(runtime, "scripts"), { recursive: true });
 await copy(path.join(root, "scripts", "delegate-agent.mjs"), path.join(runtime, "scripts", "delegate-agent.mjs"));
 await copy(path.join(root, "release.config.json"), path.join(runtime, "release.config.json"));
+const sourceCommit = process.env.METACODE_SOURCE_COMMIT || "local";
+const buildId = process.env.METACODE_BUILD_ID || `${version}-${sourceCommit}`;
+await fsp.writeFile(path.join(runtime, "build-info.json"), `${JSON.stringify({ schemaVersion: 1, version, buildId, sourceCommit }, null, 2)}\n`, "utf8");
 
 const runtimePackage = {
   name: "meta-code-runtime",
@@ -167,7 +170,8 @@ const summary = {
   productName: "Meta Code",
   version,
   createdAt: new Date().toISOString(),
-  sourceCommit: process.env.METACODE_SOURCE_COMMIT || "local",
+  sourceCommit,
+  buildId,
   outputDirectory: "artifacts",
   files: packagedFiles
 };

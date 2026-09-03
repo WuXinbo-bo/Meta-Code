@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import semver from "semver";
+import { EnvHttpProxyAgent } from "undici";
 import { loadAppUpdateConfig } from "./config.js";
 import { parseAppUpdateManifest, refreshReleaseCompatibility, releaseFromManifest } from "./manifest.js";
 import type { AppUpdateChannel, AppUpdateCheckState, AppUpdateConfig, AppUpdatePersistedState, AppUpdateRelease, AppUpdateSourceState, AppUpdateStatus } from "./types.js";
@@ -14,10 +15,12 @@ type ServiceOptions = {
   now?: () => Date;
   requestTimeoutMs?: number;
   getDataSchemaVersion?: () => number;
+  retryDelaysMs?: number[];
 };
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_UPDATE_RESPONSE_BYTES = 1_000_000;
+const DEFAULT_RETRY_DELAYS_MS = [0, 250, 1_000];
 
 function cleanVersion(value: string) {
   const cleaned = semver.clean(value.trim().replace(/^v/i, ""));
@@ -27,14 +30,17 @@ function cleanVersion(value: string) {
 
 function defaultState(config: AppUpdateConfig): AppUpdatePersistedState {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 1,
     preferences: { autoCheck: true, channel: config.defaultChannel, skippedVersion: "", remindAfter: null },
     lastCheckedAt: null,
     lastSuccessfulCheckAt: null,
     lastError: "",
     release: null,
-    checkedByVersion: ""
+    checkedByVersion: "",
+    checkedByBuildId: "",
+    lastSuccessfulSourceState: "unconfigured",
+    lastSuccessfulSourceLabel: ""
   };
 }
 
@@ -45,7 +51,7 @@ function normalizeState(input: unknown, config: AppUpdateConfig): AppUpdatePersi
   const preferences = source.preferences || fallback.preferences;
   const channel = preferences.channel === "beta" ? "beta" : "stable";
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: Number.isInteger(source.revision) && Number(source.revision) > 0 ? Number(source.revision) : 1,
     preferences: {
       autoCheck: preferences.autoCheck !== false,
@@ -57,7 +63,10 @@ function normalizeState(input: unknown, config: AppUpdateConfig): AppUpdatePersi
     lastSuccessfulCheckAt: typeof source.lastSuccessfulCheckAt === "string" ? source.lastSuccessfulCheckAt : null,
     lastError: typeof source.lastError === "string" ? source.lastError : "",
     release: source.release && typeof source.release === "object" ? source.release as AppUpdateRelease : null,
-    checkedByVersion: typeof source.checkedByVersion === "string" ? source.checkedByVersion : ""
+    checkedByVersion: typeof source.checkedByVersion === "string" ? source.checkedByVersion : "",
+    checkedByBuildId: typeof source.checkedByBuildId === "string" ? source.checkedByBuildId : "",
+    lastSuccessfulSourceState: ["manifest", "github", "unconfigured"].includes(String(source.lastSuccessfulSourceState)) ? source.lastSuccessfulSourceState as Exclude<AppUpdateSourceState, "error"> : "unconfigured",
+    lastSuccessfulSourceLabel: typeof source.lastSuccessfulSourceLabel === "string" ? source.lastSuccessfulSourceLabel : ""
   };
 }
 
@@ -69,6 +78,8 @@ export class AppUpdateService {
   private readonly now: () => Date;
   private readonly requestTimeoutMs: number;
   private readonly getDataSchemaVersion: () => number;
+  private readonly retryDelaysMs: number[];
+  private readonly proxyAgent: EnvHttpProxyAgent | null;
   private state: AppUpdatePersistedState;
   private checkState: AppUpdateCheckState = "idle";
   private sourceState: AppUpdateSourceState = "unconfigured";
@@ -79,11 +90,13 @@ export class AppUpdateService {
   constructor(options: ServiceOptions) {
     this.config = loadAppUpdateConfig(options.projectRoot);
     this.stateFile = options.stateFile;
-    this.fetchImpl = options.fetch || globalThis.fetch;
+    this.proxyAgent = options.fetch ? null : new EnvHttpProxyAgent();
+    this.fetchImpl = options.fetch || ((input, init) => globalThis.fetch(input, { ...init, dispatcher: this.proxyAgent } as RequestInit));
     this.onChanged = options.onChanged;
     this.now = options.now || (() => new Date());
     this.requestTimeoutMs = options.requestTimeoutMs || REQUEST_TIMEOUT_MS;
     this.getDataSchemaVersion = options.getDataSchemaVersion || (() => this.config.dataSchemaVersion);
+    this.retryDelaysMs = options.retryDelaysMs?.length ? options.retryDelaysMs : DEFAULT_RETRY_DELAYS_MS;
     this.state = this.readState();
     if (this.state.release) this.state.release = refreshReleaseCompatibility(this.state.release, this.config, this.getDataSchemaVersion());
     this.refreshSourceState();
@@ -93,19 +106,25 @@ export class AppUpdateService {
     const releaseVersion = this.state.release ? semver.clean(this.state.release.version) : null;
     const currentVersion = semver.clean(this.config.currentVersion);
     const skippedVersion = semver.clean(this.state.preferences.skippedVersion || "");
-    const updateAvailable = Boolean(releaseVersion && currentVersion && semver.gt(releaseVersion, currentVersion));
+    const newerVersion = Boolean(releaseVersion && currentVersion && semver.gt(releaseVersion, currentVersion));
+    const replacedBuild = Boolean(releaseVersion && currentVersion && releaseVersion === currentVersion
+      && this.config.currentBuildId !== "development" && this.state.release?.buildId && this.state.release.buildId !== this.config.currentBuildId);
+    const updateAvailable = newerVersion || replacedBuild;
     const reminded = !this.state.preferences.remindAfter || Date.parse(this.state.preferences.remindAfter) <= this.now().getTime();
     const skipped = Boolean(releaseVersion && skippedVersion && releaseVersion === skippedVersion);
     return {
       schemaVersion: 1,
       revision: this.state.revision,
-      product: { id: this.config.productId, name: this.config.productName, currentVersion: this.config.currentVersion },
+      product: { id: this.config.productId, name: this.config.productName, currentVersion: this.config.currentVersion, currentBuildId: this.config.currentBuildId },
       capabilities: { check: true, download: false, apply: false, launcher: false },
       source: {
         state: this.sourceState,
         label: this.sourceLabel,
         githubRepository: this.config.githubRepository,
-        manifestConfigured: Boolean(this.manifestUrl(this.state.preferences.channel))
+        manifestConfigured: Boolean(this.manifestUrl(this.state.preferences.channel)),
+        usingCachedRelease: this.sourceState === "error" && Boolean(this.state.release),
+        lastSuccessfulState: this.state.lastSuccessfulSourceState,
+        lastSuccessfulLabel: this.state.lastSuccessfulSourceLabel
       },
       checkState: this.checkState,
       preferences: { ...this.state.preferences },
@@ -173,6 +192,7 @@ export class AppUpdateService {
   close() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    void this.proxyAgent?.close();
   }
 
   private async performCheck() {
@@ -203,6 +223,9 @@ export class AppUpdateService {
       this.state.release = release;
       this.state.lastSuccessfulCheckAt = this.now().toISOString();
       this.state.checkedByVersion = this.config.currentVersion;
+      this.state.checkedByBuildId = this.config.currentBuildId;
+      this.state.lastSuccessfulSourceState = this.sourceState;
+      this.state.lastSuccessfulSourceLabel = this.sourceLabel;
       this.state.lastError = "";
       this.checkState = "completed";
     } catch (error) {
@@ -232,6 +255,8 @@ export class AppUpdateService {
     const release = candidate as Record<string, unknown>;
     return {
       version: cleanVersion(String(release.tag_name || "")),
+      buildId: String(release.target_commitish || release.node_id || release.tag_name || "github-release"),
+      manifestDigest: "",
       channel: release.prerelease ? "beta" : "stable",
       publishedAt: String(release.published_at || release.created_at || this.now().toISOString()),
       releaseNotes: String(release.body || ""),
@@ -245,6 +270,21 @@ export class AppUpdateService {
   }
 
   private async fetchJson(url: string, headers: Record<string, string>) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < this.retryDelaysMs.length; attempt += 1) {
+      if (this.retryDelaysMs[attempt] > 0) await new Promise((resolve) => setTimeout(resolve, this.retryDelaysMs[attempt]));
+      try { return await this.fetchJsonOnce(url, headers); }
+      catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const retryable = /超时|HTTP (408|429|5\d\d)|fetch failed|network|socket|ECONN|ENOTFOUND|EAI_AGAIN/i.test(message);
+        if (!retryable) throw error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async fetchJsonOnce(url: string, headers: Record<string, string>) {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new Error("更新源地址无效"); }
     if (parsed.protocol !== "https:" && parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") throw new Error("更新源必须使用 HTTPS");
@@ -270,6 +310,7 @@ export class AppUpdateService {
   private shouldAutoCheck() {
     if (!this.state.preferences.autoCheck) return false;
     if (this.state.checkedByVersion !== this.config.currentVersion) return true;
+    if (this.state.checkedByBuildId !== this.config.currentBuildId) return true;
     if (!this.state.lastCheckedAt) return true;
     const interval = this.config.defaultCheckIntervalHours * 60 * 60 * 1000;
     return this.now().getTime() - Date.parse(this.state.lastCheckedAt) >= interval;

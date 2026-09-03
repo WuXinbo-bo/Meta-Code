@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { parseAppUpdateManifest } from "./manifest.js";
+import { canonicalManifestPayload, parseAppUpdateManifest } from "./manifest.js";
 import type { AppUpdateChannel, AppUpdateConfig, AppUpdateManifest } from "./types.js";
 
 export type ReleaseAssetInput = {
@@ -9,7 +9,6 @@ export type ReleaseAssetInput = {
   url: string;
   platform: string;
   arch: string;
-  signature?: string;
 };
 
 export async function createReleaseManifest(input: {
@@ -18,6 +17,9 @@ export async function createReleaseManifest(input: {
   publishedAt: string;
   releaseNotes: string;
   releaseUrl: string;
+  buildId: string;
+  signingKeyId: string;
+  signingPrivateKey: string | Buffer;
   assets: ReleaseAssetInput[];
 }) {
   const assets = await Promise.all(input.assets.map(async (asset) => {
@@ -27,25 +29,29 @@ export async function createReleaseManifest(input: {
       arch: asset.arch,
       url: asset.url,
       sha256: crypto.createHash("sha256").update(content).digest("hex"),
-      size: content.byteLength,
-      ...(asset.signature ? { signature: asset.signature } : {})
+      size: content.byteLength
     };
   }));
-  const manifest: AppUpdateManifest = {
-    schemaVersion: 1,
+  const unsigned: Omit<AppUpdateManifest, "signature"> = {
+    schemaVersion: 2,
     productId: input.config.productId,
     productName: input.config.productName,
     version: input.config.currentVersion,
+    buildId: input.buildId,
     channel: input.channel,
     publishedAt: input.publishedAt,
     releaseNotes: input.releaseNotes,
     releaseUrl: input.releaseUrl,
     compatibility: {
-      minDataSchemaVersion: input.config.dataSchemaVersion,
-      maxDataSchemaVersion: input.config.dataSchemaVersion,
-      launcherProtocolVersion: input.config.launcherProtocolVersion
+      data: structuredClone(input.config.dataCompatibility),
+      launcherProtocol: structuredClone(input.config.launcherProtocol)
     },
     assets
+  };
+  const privateKey = crypto.createPrivateKey(input.signingPrivateKey);
+  const manifest: AppUpdateManifest = {
+    ...unsigned,
+    signature: { algorithm: "Ed25519", keyId: input.signingKeyId, value: crypto.sign(null, canonicalManifestPayload(unsigned), privateKey).toString("base64") }
   };
   return parseAppUpdateManifest(manifest, input.config);
 }

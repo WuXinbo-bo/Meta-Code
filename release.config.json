@@ -1,9 +1,22 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "productId": "meta-code",
   "productName": "Meta Code",
   "dataSchemaVersion": 2,
-  "launcherProtocolVersion": 1,
+  "dataCompatibility": {
+    "readsFrom": { "min": 1, "max": 2 },
+    "writesTo": 2,
+    "migratesFrom": { "min": 1, "max": 2 },
+    "migrationProtocolVersion": 1,
+    "downgradePolicy": "blocked"
+  },
+  "launcherProtocol": { "min": 1, "max": 1 },
+  "manifestSigning": {
+    "required": true,
+    "trustedKeys": {
+      "meta-code-release-2026": "MCowBQYDK2VwAyEAOSlngB31m3t7cO4HQMI7KnTUjextaWnfjsWLfjYb7LA="
+    }
+  },
   "githubRepository": "WuXinbo-bo/Meta-Code",
   "manifestUrls": {
     "stable": "https://github.com/WuXinbo-bo/Meta-Code/releases/latest/download/latest.json",
