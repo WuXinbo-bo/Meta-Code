@@ -35,6 +35,18 @@ export type RuntimeInstallOptions = {
   certify?: (candidate: RuntimeInstallCandidate) => void | Promise<void>;
 };
 
+export type RuntimeExecutionIdentity = {
+  schemaVersion: 1;
+  runtimeId: CliRuntimeId;
+  providerId: string;
+  adapterId: string;
+  source: RuntimeSource;
+  path: string;
+  version: string;
+  capabilityFingerprint: string;
+  capturedAt: string;
+};
+
 export type RuntimeCandidate = {
   source: RuntimeSource;
   path: string;

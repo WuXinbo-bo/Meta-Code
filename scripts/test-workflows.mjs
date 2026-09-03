@@ -705,6 +705,20 @@ assert.equal(planningPaused.pausedPlanningMode, "initial");
 assert.equal(repository.resume(planningPauseRun.id, "user-a", planningPaused.revision).status, "planning");
 repository.cancel(planningPauseRun.id, "user-a", repository.get(planningPauseRun.id, "user-a").revision);
 
+const runtimeBinding = (fingerprint, version = "1.0.0") => ({
+  schemaVersion: 1, runtimeId: "codex", providerId: "codex", adapterId: "codex-native", source: "system",
+  path: "C:/tools/codex.exe", version, capabilityFingerprint: fingerprint, capturedAt: new Date().toISOString()
+});
+const plannerRuntimeRun = repository.create({ ownerUserId: "user-a", workspaceId: "workspace-a", prompt: "验证规划运行时固定", plannerEngine: "codex" });
+repository.setPlanning(plannerRuntimeRun.id, "user-a", plannerRuntimeRun.revision);
+repository.setPlannerSession(plannerRuntimeRun.id, "user-a", "planner-local", "native-thread-old");
+assert.equal(repository.bindPlannerRuntime(plannerRuntimeRun.id, "user-a", runtimeBinding("planner-a")).changed, false);
+assert.equal(repository.get(plannerRuntimeRun.id, "user-a").plannerEngineSessionId, "native-thread-old");
+assert.equal(repository.bindPlannerRuntime(plannerRuntimeRun.id, "user-a", runtimeBinding("planner-b", "2.0.0")).changed, true);
+assert.equal(repository.get(plannerRuntimeRun.id, "user-a").plannerEngineSessionId, null, "规划运行时变化后不得续接旧原生线程");
+assert.equal(repository.get(plannerRuntimeRun.id, "user-a").plannerRuntimeBinding.capabilityFingerprint, "planner-b");
+repository.cancel(plannerRuntimeRun.id, "user-a", repository.get(plannerRuntimeRun.id, "user-a").revision);
+
 const attemptRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-workflow-attempts-"));
 try {
   const claimed = repository.claimNodeAttempt(approved.nodes[0].recordId, "runner-a", attemptRoot, new Date(Date.now() + 60_000).toISOString());
@@ -794,6 +808,38 @@ try {
   assert.equal(repository.get(created.id, "user-a").nodes[0].nextRetryAt, "2099-01-01T00:00:00.000Z");
 } finally {
   await fs.rm(attemptRoot, { recursive: true, force: true });
+}
+
+const runtimeAttemptRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-runtime-binding-"));
+try {
+  const runtimeRun = repository.create({ ownerUserId: "user-a", workspaceId: "workspace-a", prompt: "验证执行运行时固定", plannerEngine: "codex" });
+  repository.setPlanning(runtimeRun.id, "user-a", runtimeRun.revision);
+  const runtimePlanned = repository.savePlan(runtimeRun.id, "user-a", validPlan);
+  const runtimeApproved = repository.approve(runtimeRun.id, "user-a", runtimePlanned.revision);
+  const first = repository.claimNodeAttempt(runtimeApproved.nodes[0].recordId, "runtime-runner-a", runtimeAttemptRoot, new Date(Date.now() + 60_000).toISOString(), runtimeBinding("runtime-a"));
+  assert.equal(first.runtimeBinding.capabilityFingerprint, "runtime-a");
+  repository.checkpointNodeAttempt(first.id, { phase: "agent_output_received", status: "interrupted", rawOutput: "durable output", leaseExpiresAt: null });
+  const interrupted = repository.get(runtimeRun.id, "user-a").nodes[0];
+  interrupted.status = "interrupted";
+  interrupted.leaseExpiresAt = null;
+  repository.updateNode(interrupted);
+  const resumed = repository.claimNodeAttempt(interrupted.recordId, "runtime-runner-b", runtimeAttemptRoot, new Date(Date.now() + 60_000).toISOString(), runtimeBinding("runtime-a"));
+  assert.equal(resumed.id, first.id, "相同能力指纹必须恢复同一次执行");
+  repository.checkpointNodeAttempt(resumed.id, { status: "interrupted", leaseExpiresAt: null });
+  const changedNode = repository.get(runtimeRun.id, "user-a").nodes[0];
+  changedNode.status = "interrupted";
+  changedNode.leaseExpiresAt = null;
+  repository.updateNode(changedNode);
+  const replaced = repository.claimNodeAttempt(changedNode.recordId, "runtime-runner-c", runtimeAttemptRoot, new Date(Date.now() + 60_000).toISOString(), runtimeBinding("runtime-b", "2.0.0"));
+  assert.notEqual(replaced.id, first.id, "能力指纹变化必须创建新的执行尝试");
+  assert.equal(replaced.attempt, 2);
+  assert.equal(replaced.runtimeBinding.capabilityFingerprint, "runtime-b");
+  const abandoned = repository.getNodeAttempts(changedNode.recordId).find((item) => item.id === first.id);
+  assert.equal(abandoned.status, "abandoned");
+  assert.match(abandoned.error, /运行时能力已变化/);
+  repository.updateRun(runtimeRun.id, "needs_review");
+} finally {
+  await fs.rm(runtimeAttemptRoot, { recursive: true, force: true });
 }
 
 const leaseRun = repository.create({ ownerUserId: "user-a", workspaceId: "workspace-a", prompt: "验证租约接管", plannerEngine: "claude" });
@@ -1010,13 +1056,19 @@ try {
   await fs.rm(stateRoot, { recursive: true, force: true });
 }
 const integrationRun = repository.create({ ownerUserId: "user-a", workspaceId: "workspace-a", prompt: "验证最终整合", plannerEngine: "codex" });
-repository.beginIntegration(integrationRun.id);
+repository.beginIntegration(integrationRun.id, runtimeBinding("integration-a"));
 repository.appendIntegrationLog(integrationRun.id, { id: "integration-log-1", createdAt: new Date().toISOString(), kind: "status", title: "开始最终整合", text: "读取节点结果" });
 const integrating = repository.get(integrationRun.id, "user-a");
 assert.equal(integrating.status, "integrating");
 assert.equal(integrating.integrationLogs.length, 1);
 assert.ok(integrating.integrationStartedAt);
+assert.equal(integrating.integrationRuntimeBinding.capabilityFingerprint, "integration-a");
 const finalResult = normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "最终验收通过", outputs: [], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] });
+repository.checkpointIntegration(integrationRun.id, "integrator_completed", { integratorResult: finalResult });
+assert.equal(repository.beginIntegration(integrationRun.id, runtimeBinding("integration-b", "2.0.0")).changed, true);
+const resetIntegration = repository.get(integrationRun.id, "user-a");
+assert.equal(resetIntegration.integrationPhase, "started", "最终验收运行时变化必须重置中间结果");
+assert.equal(resetIntegration.integratorResult, null);
 repository.checkpointIntegration(integrationRun.id, "integrator_completed", { integratorResult: finalResult });
 repository.prepareIntegrationRetry(integrationRun.id, "user-a");
 const integratorResumed = repository.get(integrationRun.id, "user-a");

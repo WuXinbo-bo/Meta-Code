@@ -41,7 +41,7 @@ import { AppUpdateService } from "./appUpdate/service.js";
 import { CliRuntimeManager } from "./runtime/manager.js";
 import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
 import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
-import type { CliRuntimeId, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
+import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
 import { WorkflowRepository } from "./workflows/repository.js";
 import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./workflows/stateFiles.js";
@@ -229,6 +229,7 @@ type Session = {
   standaloneExecutionMode?: ExecutionMode;
   providerConfigOptions?: SessionConfigOption[];
   providerConfigValues?: Record<string, string | boolean>;
+  runtimeBinding?: RuntimeExecutionIdentity;
 };
 
 type McpTransport = "stdio" | "http" | "sse";
@@ -284,6 +285,7 @@ type DelegatedTask = {
   acceptance?: string[];
   retryCount?: number;
   retryOf?: string;
+  runtimeBinding?: RuntimeExecutionIdentity;
 };
 
 type AgentLog = {
@@ -864,6 +866,34 @@ function runtimeUsage(runtimeId: string) {
 function assertRuntimeIdle(runtimeId: string) {
   const usage = runtimeUsage(runtimeId);
   if (usage.total) throw new Error(`${cliRuntimeManager.definition(runtimeId).label} 正被 ${usage.total} 个任务或工作流使用，请等待运行结束后再切换版本`);
+}
+
+async function runtimeBindingForProvider(providerId: string): Promise<RuntimeExecutionIdentity> {
+  const descriptor = agentAdapterRegistry.requireDescriptor(providerId);
+  const configuredPath = descriptor.runtimeId === "codex" ? state.settings.codexPath : descriptor.runtimeId === "claude" ? state.settings.claude.claudePath : "";
+  const status = await cliRuntimeManager.detect(descriptor.runtimeId, configuredPath);
+  if (!status.available) throw new Error(`${descriptor.displayName} CLI 不可用：${status.message}`);
+  const version = status.managedVersion || status.version;
+  const capabilityFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+    providerId: descriptor.id,
+    adapterId: descriptor.adapterId,
+    sdkVersion: descriptor.sdkVersion || 1,
+    capabilities: descriptor.capabilities,
+    source: status.source,
+    path: path.resolve(status.path),
+    version
+  })).digest("hex");
+  return {
+    schemaVersion: 1,
+    runtimeId: descriptor.runtimeId,
+    providerId: descriptor.id,
+    adapterId: descriptor.adapterId,
+    source: status.source,
+    path: path.resolve(status.path),
+    version,
+    capabilityFingerprint,
+    capturedAt: new Date().toISOString()
+  };
 }
 
 async function installCliRuntime(runtimeId: CliRuntimeId, requestedVersion?: string, options: RuntimeInstallOptions = {}) {
@@ -2188,9 +2218,13 @@ function delegatedRetryInput(task: DelegatedTask) {
 }
 
 function launchDelegatedExecution(task: DelegatedTask) {
-  const input = delegatedRetryInput(task);
-  const execution = agentAdapterRegistry.execute({ schemaVersion: 3, providerId: task.provider, ...input });
-  void execution.catch((error) => handleDelegatedExecutionFailure(task.id, error));
+  void (async () => {
+    task.runtimeBinding = await runtimeBindingForProvider(task.provider);
+    task.updatedAt = new Date().toISOString();
+    await saveState();
+    const input = delegatedRetryInput(task);
+    await agentAdapterRegistry.execute({ schemaVersion: 3, providerId: task.provider, ...input });
+  })().catch((error) => handleDelegatedExecutionFailure(task.id, error));
 }
 
 async function handleDelegatedExecutionFailure(taskId: string, error: unknown) {
@@ -4057,6 +4091,20 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
 }
 
 async function runSessionLoop(session: Session, workspace: Workspace, initialPrompt: string, activeRun: ActiveRun) {
+  const runtimeBinding = await runtimeBindingForProvider(session.engine);
+  if (session.runtimeBinding && session.runtimeBinding.capabilityFingerprint !== runtimeBinding.capabilityFingerprint && session.engineSessionId) {
+    appendMessage(session, {
+      role: "event",
+      text: `${mainEngineName(session)} 运行时或能力已变化，旧上下文不能安全续接；本轮将建立新上下文并保留工作台历史`,
+      eventType: "runtime.binding.changed",
+      eventPhase: "completed",
+      payload: { previous: session.runtimeBinding, current: runtimeBinding }
+    });
+    session.engineSessionId = null;
+    session.codexThreadId = null;
+  }
+  session.runtimeBinding = runtimeBinding;
+  await saveState();
   let prompt: string | null = initialPrompt;
   while (prompt) {
     const interruptedPrompt: string = prompt;
@@ -6252,8 +6300,10 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
   if (!workflow) throw new Error("工作流不存在");
   const workspace = workspaceById(workflow.workspaceId, ownerUserId);
   if (!workspace) throw new Error("工作区不存在");
-  workflowRepository.beginIntegration(workflowId);
+  const integrationBinding = await runtimeBindingForProvider(workflow.plannerEngine);
+  const integrationRuntime = workflowRepository.beginIntegration(workflowId, integrationBinding);
   workflow = workflowRepository.get(workflowId, ownerUserId)!;
+  if (integrationRuntime.changed) workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "运行时已更新", "最终验收的运行时或能力已变化，已放弃旧的中间结果并从一致状态重新执行"));
   workflowStateFiles.sync(workflow);
   workflowStateFiles.appendEvent(workflow, { type: "integration.started", attempt: workflow.integrationAttempt });
   const controller = new AbortController();
@@ -6457,7 +6507,10 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
     if (node.provider === "auto") { node.provider = resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities); workflowRepository.updateNode(node); }
     const checkpointRoot = workflowNodeCheckpointRoot(workflow.workDirectory, node.id, node.planVersion);
     let attempt: WorkflowNodeAttemptRecord;
-    try { attempt = workflowRepository.claimNodeAttempt(node.recordId, WORKFLOW_RUNNER_ID, checkpointRoot, new Date(Date.now() + 5 * 60_000).toISOString()); }
+    try {
+      const runtimeBinding = await runtimeBindingForProvider(node.provider);
+      attempt = workflowRepository.claimNodeAttempt(node.recordId, WORKFLOW_RUNNER_ID, checkpointRoot, new Date(Date.now() + 5 * 60_000).toISOString(), runtimeBinding);
+    }
     catch { continue; }
     const claimedNode = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!claimedNode) continue;
     syncWorkflowProtocolFiles(workflowId, ownerUserId);
@@ -6861,6 +6914,12 @@ async function executeWorkflowPlanningRun(input: {
   try {
     const workspace = workspaceById(baseWorkflow.workspaceId, ownerUserId); if (!workspace) throw new Error("工作区不存在");
     let snapshot = workflowRepository.get(workflowId, ownerUserId)!;
+    const plannerBinding = await runtimeBindingForProvider(snapshot.plannerEngine);
+    const plannerRuntime = workflowRepository.bindPlannerRuntime(workflowId, ownerUserId, plannerBinding);
+    if (plannerRuntime.changed) {
+      workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("status", "运行时已更新", "规划器运行时或能力已变化，已清除旧原生会话并从持久化任务上下文重新开始"));
+      snapshot = workflowRepository.get(workflowId, ownerUserId)!;
+    }
     workflowRepository.setPlannerSession(workflowId, ownerUserId, snapshot.plannerSessionId || `workflow-planner:${workflowId}`, snapshot.plannerEngineSessionId);
     snapshot = workflowRepository.get(workflowId, ownerUserId)!;
     workflowStateFiles.syncWorkflow(snapshot);

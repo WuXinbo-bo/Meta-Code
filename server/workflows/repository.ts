@@ -6,8 +6,9 @@ import { normalizeWorkflowNodeResult } from "./execution.js";
 import { reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction } from "./nodeResultTransactions.js";
 import { normalizeWorkflowPlan, workflowNodeContractDigest } from "./plan.js";
 import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowIntegrationPhase, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowRecord, type WorkflowStatus } from "./types.js";
+import type { RuntimeExecutionIdentity } from "../runtime/types.js";
 
-type WorkflowRow = { id: string; owner_user_id: string; workspace_id: string; work_directory: string; origin_id: string; parent_workflow_id: string | null; branch_index: number; branch_label: string; title: string; original_prompt: string; planner_engine: string; max_concurrent_agents: number | null; planner_session_id: string | null; planner_engine_session_id: string | null; status: WorkflowStatus; paused_from_status: WorkflowStatus | null; paused_planning_mode: "initial" | "refine" | "fresh" | null; paused_planning_maintenance: number; active_plan_version: number; revision: number; review_note: string | null; final_result_json: string | null; planner_logs_json: string; planner_started_at: string | null; planner_finished_at: string | null; integration_logs_json: string; integration_phase: WorkflowIntegrationPhase | null; integration_attempt: number; integrator_result_json: string | null; validator_result_json: string | null; integration_started_at: string | null; integration_finished_at: string | null; pinned: number; archived_at: string | null; folder_id: string | null; created_at: string; updated_at: string };
+type WorkflowRow = { id: string; owner_user_id: string; workspace_id: string; work_directory: string; origin_id: string; parent_workflow_id: string | null; branch_index: number; branch_label: string; title: string; original_prompt: string; planner_engine: string; max_concurrent_agents: number | null; planner_session_id: string | null; planner_engine_session_id: string | null; planner_runtime_binding_json: string | null; status: WorkflowStatus; paused_from_status: WorkflowStatus | null; paused_planning_mode: "initial" | "refine" | "fresh" | null; paused_planning_maintenance: number; active_plan_version: number; revision: number; review_note: string | null; final_result_json: string | null; planner_logs_json: string; planner_started_at: string | null; planner_finished_at: string | null; integration_logs_json: string; integration_phase: WorkflowIntegrationPhase | null; integration_attempt: number; integration_runtime_binding_json: string | null; integrator_result_json: string | null; validator_result_json: string | null; integration_started_at: string | null; integration_finished_at: string | null; pinned: number; archived_at: string | null; folder_id: string | null; created_at: string; updated_at: string };
 
 const parse = <T>(value: string | null, fallback: T): T => value ? JSON.parse(value) as T : fallback;
 
@@ -49,10 +50,10 @@ function recoverableAttemptResult(attempt: any): WorkflowNodeResult | null {
 export class WorkflowRepository {
   constructor(private db: DatabaseSync) {
     db.exec(`
-      CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, workspace_id TEXT NOT NULL, work_directory TEXT NOT NULL DEFAULT '', origin_id TEXT NOT NULL DEFAULT '', parent_workflow_id TEXT, branch_index INTEGER NOT NULL DEFAULT 1, branch_label TEXT NOT NULL DEFAULT '方案 1', title TEXT NOT NULL, original_prompt TEXT NOT NULL, planner_engine TEXT NOT NULL, max_concurrent_agents INTEGER, planner_session_id TEXT, planner_engine_session_id TEXT, status TEXT NOT NULL, paused_from_status TEXT, paused_planning_mode TEXT, paused_planning_maintenance INTEGER NOT NULL DEFAULT 0, active_plan_version INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, review_note TEXT, final_result_json TEXT, planner_logs_json TEXT NOT NULL DEFAULT '[]', planner_started_at TEXT, planner_finished_at TEXT, integration_logs_json TEXT NOT NULL DEFAULT '[]', integration_phase TEXT, integration_attempt INTEGER NOT NULL DEFAULT 0, integrator_result_json TEXT, validator_result_json TEXT, integration_started_at TEXT, integration_finished_at TEXT, pinned INTEGER NOT NULL DEFAULT 0, archived_at TEXT, folder_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, workspace_id TEXT NOT NULL, work_directory TEXT NOT NULL DEFAULT '', origin_id TEXT NOT NULL DEFAULT '', parent_workflow_id TEXT, branch_index INTEGER NOT NULL DEFAULT 1, branch_label TEXT NOT NULL DEFAULT '方案 1', title TEXT NOT NULL, original_prompt TEXT NOT NULL, planner_engine TEXT NOT NULL, max_concurrent_agents INTEGER, planner_session_id TEXT, planner_engine_session_id TEXT, planner_runtime_binding_json TEXT, status TEXT NOT NULL, paused_from_status TEXT, paused_planning_mode TEXT, paused_planning_maintenance INTEGER NOT NULL DEFAULT 0, active_plan_version INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, review_note TEXT, final_result_json TEXT, planner_logs_json TEXT NOT NULL DEFAULT '[]', planner_started_at TEXT, planner_finished_at TEXT, integration_logs_json TEXT NOT NULL DEFAULT '[]', integration_phase TEXT, integration_attempt INTEGER NOT NULL DEFAULT 0, integration_runtime_binding_json TEXT, integrator_result_json TEXT, validator_result_json TEXT, integration_started_at TEXT, integration_finished_at TEXT, pinned INTEGER NOT NULL DEFAULT 0, archived_at TEXT, folder_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workflow_plan_versions (workflow_id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL, plan_json TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1, review_note TEXT, approved_at TEXT, created_at TEXT NOT NULL, PRIMARY KEY(workflow_id, version), FOREIGN KEY(workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS workflow_nodes (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, plan_version INTEGER NOT NULL, node_key TEXT NOT NULL, status TEXT NOT NULL, provider TEXT NOT NULL, provider_reason TEXT NOT NULL DEFAULT '', contract_digest TEXT, prompt TEXT NOT NULL, non_goals_json TEXT NOT NULL DEFAULT '[]', constraints_json TEXT NOT NULL DEFAULT '[]', depends_json TEXT NOT NULL, skill_names_json TEXT NOT NULL, mcp_servers_json TEXT NOT NULL DEFAULT '[]', mcp_required INTEGER NOT NULL DEFAULT 0, workspace_access TEXT NOT NULL, write_scope_json TEXT NOT NULL, required_artifacts_json TEXT NOT NULL, deliverables_json TEXT NOT NULL, acceptance_json TEXT NOT NULL, verification_commands_json TEXT NOT NULL DEFAULT '[]', failure_policy TEXT NOT NULL, required INTEGER NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, engine_thread_id TEXT, context_recovery_count INTEGER NOT NULL DEFAULT 0, context_recovery_mode TEXT, idempotency_key TEXT, summary_json TEXT, result_digest TEXT, stale_reason TEXT, logs_json TEXT NOT NULL DEFAULT '[]', error TEXT, lease_expires_at TEXT, next_retry_at TEXT, started_at TEXT, finished_at TEXT, UNIQUE(workflow_id, plan_version, node_key), FOREIGN KEY(workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS workflow_node_attempts (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, node_record_id TEXT NOT NULL, node_key TEXT NOT NULL, attempt INTEGER NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, runner_id TEXT, lease_expires_at TEXT, raw_output TEXT, parsed_result_json TEXT, verified_result_json TEXT, result_repair_count INTEGER NOT NULL DEFAULT 0, verification_run_count INTEGER NOT NULL DEFAULT 0, snapshot_retry_count INTEGER NOT NULL DEFAULT 0, engine_thread_id TEXT, context_recovery_count INTEGER NOT NULL DEFAULT 0, context_recovery_mode TEXT, checkpoint_directory TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT, UNIQUE(node_record_id, attempt), FOREIGN KEY(workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE, FOREIGN KEY(node_record_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE);
+      CREATE TABLE IF NOT EXISTS workflow_node_attempts (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, node_record_id TEXT NOT NULL, node_key TEXT NOT NULL, attempt INTEGER NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, runner_id TEXT, lease_expires_at TEXT, raw_output TEXT, parsed_result_json TEXT, verified_result_json TEXT, result_repair_count INTEGER NOT NULL DEFAULT 0, verification_run_count INTEGER NOT NULL DEFAULT 0, snapshot_retry_count INTEGER NOT NULL DEFAULT 0, engine_thread_id TEXT, context_recovery_count INTEGER NOT NULL DEFAULT 0, context_recovery_mode TEXT, runtime_binding_json TEXT, checkpoint_directory TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT, UNIQUE(node_record_id, attempt), FOREIGN KEY(workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE, FOREIGN KEY(node_record_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS workflow_artifacts (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, node_id TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, result_digest TEXT, path TEXT NOT NULL, kind TEXT NOT NULL, hash TEXT, summary TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, FOREIGN KEY(workflow_id) REFERENCES workflow_runs(id) ON DELETE CASCADE);
       CREATE INDEX IF NOT EXISTS idx_workflow_owner_workspace ON workflow_runs(owner_user_id, workspace_id, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_workflow_nodes_status ON workflow_nodes(workflow_id, status);
@@ -70,6 +71,7 @@ export class WorkflowRepository {
     if (!runColumns.some((column) => column.name === "folder_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN folder_id TEXT");
     if (!runColumns.some((column) => column.name === "planner_session_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_session_id TEXT");
     if (!runColumns.some((column) => column.name === "planner_engine_session_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_engine_session_id TEXT");
+    if (!runColumns.some((column) => column.name === "planner_runtime_binding_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_runtime_binding_json TEXT");
     if (!runColumns.some((column) => column.name === "paused_from_status")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_from_status TEXT");
     if (!runColumns.some((column) => column.name === "paused_planning_mode")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_planning_mode TEXT");
     if (!runColumns.some((column) => column.name === "paused_planning_maintenance")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_planning_maintenance INTEGER NOT NULL DEFAULT 0");
@@ -81,6 +83,7 @@ export class WorkflowRepository {
     if (!runColumns.some((column) => column.name === "integration_finished_at")) db.exec("ALTER TABLE workflow_runs ADD COLUMN integration_finished_at TEXT");
     if (!runColumns.some((column) => column.name === "integration_phase")) db.exec("ALTER TABLE workflow_runs ADD COLUMN integration_phase TEXT");
     if (!runColumns.some((column) => column.name === "integration_attempt")) db.exec("ALTER TABLE workflow_runs ADD COLUMN integration_attempt INTEGER NOT NULL DEFAULT 0");
+    if (!runColumns.some((column) => column.name === "integration_runtime_binding_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN integration_runtime_binding_json TEXT");
     if (!runColumns.some((column) => column.name === "integrator_result_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN integrator_result_json TEXT");
     if (!runColumns.some((column) => column.name === "validator_result_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN validator_result_json TEXT");
     const planColumns = db.prepare("PRAGMA table_info(workflow_plan_versions)").all() as Array<{ name: string }>;
@@ -110,6 +113,7 @@ export class WorkflowRepository {
     if (!attemptColumns.some((column) => column.name === "engine_thread_id")) db.exec("ALTER TABLE workflow_node_attempts ADD COLUMN engine_thread_id TEXT");
     if (!attemptColumns.some((column) => column.name === "context_recovery_count")) db.exec("ALTER TABLE workflow_node_attempts ADD COLUMN context_recovery_count INTEGER NOT NULL DEFAULT 0");
     if (!attemptColumns.some((column) => column.name === "context_recovery_mode")) db.exec("ALTER TABLE workflow_node_attempts ADD COLUMN context_recovery_mode TEXT");
+    if (!attemptColumns.some((column) => column.name === "runtime_binding_json")) db.exec("ALTER TABLE workflow_node_attempts ADD COLUMN runtime_binding_json TEXT");
     const plannerRows = db.prepare("SELECT id, planner_logs_json FROM workflow_runs WHERE planner_logs_json LIKE '%\"title\":\"assistant\"%'").all() as Array<{ id: string; planner_logs_json: string }>;
     const updatePlannerLogs = db.prepare("UPDATE workflow_runs SET planner_logs_json = ? WHERE id = ?");
     for (const row of plannerRows) {
@@ -216,6 +220,15 @@ export class WorkflowRepository {
   clearPlannerEngineSession(id: string, ownerUserId: string) {
     this.db.prepare("UPDATE workflow_runs SET planner_engine_session_id = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
       .run(new Date().toISOString(), id, ownerUserId);
+  }
+
+  bindPlannerRuntime(id: string, ownerUserId: string, binding: RuntimeExecutionIdentity) {
+    const row = this.require(id, ownerUserId);
+    const previous = row.planner_runtime_binding_json ? parse<RuntimeExecutionIdentity | null>(row.planner_runtime_binding_json, null) : null;
+    const changed = Boolean(previous && previous.capabilityFingerprint !== binding.capabilityFingerprint);
+    this.db.prepare("UPDATE workflow_runs SET planner_runtime_binding_json = ?, planner_engine_session_id = CASE WHEN ? THEN NULL ELSE planner_engine_session_id END, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(JSON.stringify(binding), changed ? 1 : 0, new Date().toISOString(), id, ownerUserId);
+    return { changed, previous };
   }
 
   failPlanning(id: string, ownerUserId: string, errorLog: WorkflowNodeLog) {
@@ -550,13 +563,17 @@ export class WorkflowRepository {
     return this.get(id, ownerUserId)!;
   }
 
-  beginIntegration(id: string) {
+  beginIntegration(id: string, runtimeBinding?: RuntimeExecutionIdentity) {
     const row = this.db.prepare("SELECT integration_phase, integration_started_at FROM workflow_runs WHERE id = ?").get(id) as { integration_phase: WorkflowIntegrationPhase | null; integration_started_at: string | null } | undefined;
     if (!row) throw new Error("工作流不存在");
     const now = new Date().toISOString();
-    const fresh = !row.integration_started_at || !row.integration_phase;
-    this.db.prepare(`UPDATE workflow_runs SET status = 'integrating', integration_logs_json = CASE WHEN ? THEN '[]' ELSE integration_logs_json END, integration_phase = CASE WHEN ? THEN 'started' ELSE integration_phase END, integration_attempt = integration_attempt + 1, integrator_result_json = CASE WHEN ? THEN NULL ELSE integrator_result_json END, validator_result_json = CASE WHEN ? THEN NULL ELSE validator_result_json END, integration_started_at = COALESCE(integration_started_at, ?), integration_finished_at = NULL, final_result_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ?`)
-      .run(fresh ? 1 : 0, fresh ? 1 : 0, fresh ? 1 : 0, fresh ? 1 : 0, now, now, id);
+    const bindingRow = this.db.prepare("SELECT integration_runtime_binding_json FROM workflow_runs WHERE id = ?").get(id) as { integration_runtime_binding_json: string | null };
+    const previous = bindingRow.integration_runtime_binding_json ? parse<RuntimeExecutionIdentity | null>(bindingRow.integration_runtime_binding_json, null) : null;
+    const runtimeChanged = Boolean(runtimeBinding && previous && runtimeBinding.capabilityFingerprint !== previous.capabilityFingerprint);
+    const fresh = !row.integration_started_at || !row.integration_phase || runtimeChanged;
+    this.db.prepare(`UPDATE workflow_runs SET status = 'integrating', integration_logs_json = CASE WHEN ? THEN '[]' ELSE integration_logs_json END, integration_phase = CASE WHEN ? THEN 'started' ELSE integration_phase END, integration_attempt = integration_attempt + 1, integration_runtime_binding_json = COALESCE(?, integration_runtime_binding_json), integrator_result_json = CASE WHEN ? THEN NULL ELSE integrator_result_json END, validator_result_json = CASE WHEN ? THEN NULL ELSE validator_result_json END, integration_started_at = CASE WHEN ? THEN ? ELSE COALESCE(integration_started_at, ?) END, integration_finished_at = NULL, final_result_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ?`)
+      .run(fresh ? 1 : 0, fresh ? 1 : 0, runtimeBinding ? JSON.stringify(runtimeBinding) : null, fresh ? 1 : 0, fresh ? 1 : 0, runtimeChanged ? 1 : 0, now, now, now, id);
+    return { changed: runtimeChanged, previous };
   }
 
   checkpointIntegration(id: string, phase: WorkflowIntegrationPhase, input: { integratorResult?: WorkflowNodeResult | null; validatorResult?: WorkflowNodeResult | null } = {}) {
@@ -601,7 +618,7 @@ export class WorkflowRepository {
     this.db.prepare("UPDATE workflow_runs SET revision = revision + 1, updated_at = ? WHERE id = ?").run(new Date().toISOString(), node.workflowId);
   }
 
-  claimNodeAttempt(nodeRecordId: string, runnerId: string, checkpointRoot: string, leaseExpiresAt: string) {
+  claimNodeAttempt(nodeRecordId: string, runnerId: string, checkpointRoot: string, leaseExpiresAt: string, runtimeBinding?: RuntimeExecutionIdentity) {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -610,7 +627,9 @@ export class WorkflowRepository {
       const latest = this.db.prepare("SELECT * FROM workflow_node_attempts WHERE node_record_id = ? ORDER BY attempt DESC LIMIT 1").get(nodeRecordId) as any;
       const transactionRecoverable = latest && recoverableResultTransaction(latest.checkpoint_directory);
       const restartAgentInPlace = latest && latest.status === "interrupted" && ["pending", "interrupted"].includes(node.status) && ["claimed", "result_draft_started", "agent_running"].includes(latest.phase) && !transactionRecoverable;
-      const resumable = latest && latest.status === "interrupted" && ["pending", "interrupted"].includes(node.status) && (restartAgentInPlace || ["agent_output_received", "result_parsed", "result_candidate_committed", "verification_completed", "result_verified", "result_committed"].includes(latest.phase) || (["result_draft_started", "agent_running"].includes(latest.phase) && transactionRecoverable));
+      const latestBinding = latest?.runtime_binding_json ? parse<RuntimeExecutionIdentity | null>(latest.runtime_binding_json, null) : null;
+      const sameRuntime = !runtimeBinding || !latestBinding || runtimeBinding.capabilityFingerprint === latestBinding.capabilityFingerprint;
+      const resumable = latest && sameRuntime && latest.status === "interrupted" && ["pending", "interrupted"].includes(node.status) && (restartAgentInPlace || ["agent_output_received", "result_parsed", "result_candidate_committed", "verification_completed", "result_verified", "result_committed"].includes(latest.phase) || (["result_draft_started", "agent_running"].includes(latest.phase) && transactionRecoverable));
       let attemptId: string;
       let attempt = node.attempt;
       if (resumable) {
@@ -627,13 +646,17 @@ export class WorkflowRepository {
             .run(recoveredPhase, runnerId, leaseExpiresAt, now, attemptId);
         }
       } else {
-        if (latest && ["running", "interrupted"].includes(latest.status)) this.db.prepare("UPDATE workflow_node_attempts SET status = 'abandoned', finished_at = ?, updated_at = ? WHERE id = ?").run(now, now, latest.id);
+        if (latest && ["running", "interrupted"].includes(latest.status)) {
+          const reason = !sameRuntime ? "运行时能力已变化，不能安全续接" : "旧执行尝试已由新的调度接管";
+          this.db.prepare("UPDATE workflow_node_attempts SET status = 'abandoned', error = ?, finished_at = ?, updated_at = ? WHERE id = ?").run(reason, now, now, latest.id);
+        }
         attempt += 1;
         attemptId = `workflow-attempt-${crypto.randomUUID()}`;
         const checkpointDirectory = path.join(checkpointRoot, String(attempt));
-        this.db.prepare("INSERT INTO workflow_node_attempts (id, workflow_id, node_record_id, node_key, attempt, status, phase, runner_id, lease_expires_at, checkpoint_directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'running', 'claimed', ?, ?, ?, ?, ?)")
-          .run(attemptId, node.workflow_id, node.id, node.node_key, attempt, runnerId, leaseExpiresAt, checkpointDirectory, now, now);
+        this.db.prepare("INSERT INTO workflow_node_attempts (id, workflow_id, node_record_id, node_key, attempt, status, phase, runner_id, lease_expires_at, runtime_binding_json, checkpoint_directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'running', 'claimed', ?, ?, ?, ?, ?, ?)")
+          .run(attemptId, node.workflow_id, node.id, node.node_key, attempt, runnerId, leaseExpiresAt, runtimeBinding ? JSON.stringify(runtimeBinding) : null, checkpointDirectory, now, now);
       }
+      if (resumable && runtimeBinding && !latestBinding) this.db.prepare("UPDATE workflow_node_attempts SET runtime_binding_json = ? WHERE id = ?").run(JSON.stringify(runtimeBinding), attemptId);
       const idempotencyKey = `${node.workflow_id}:${node.plan_version}:${node.node_key}:${attempt}`;
       const claimed = this.db.prepare("UPDATE workflow_nodes SET status = 'running', attempt = ?, idempotency_key = ?, lease_expires_at = ?, next_retry_at = NULL, started_at = COALESCE(started_at, ?), finished_at = NULL, error = NULL WHERE id = ? AND status IN ('pending', 'ready', 'interrupted')")
         .run(attempt, idempotencyKey, leaseExpiresAt, now, nodeRecordId);
@@ -647,6 +670,11 @@ export class WorkflowRepository {
   getLatestNodeAttempt(nodeRecordId: string) {
     const row = this.db.prepare("SELECT * FROM workflow_node_attempts WHERE node_record_id = ? ORDER BY attempt DESC LIMIT 1").get(nodeRecordId) as any;
     return row ? this.hydrateAttempt(row) : null;
+  }
+
+  getNodeAttempts(nodeRecordId: string) {
+    return (this.db.prepare("SELECT * FROM workflow_node_attempts WHERE node_record_id = ? ORDER BY attempt DESC").all(nodeRecordId) as any[])
+      .map((row) => this.hydrateAttempt(row));
   }
 
   prepareResultRepair(id: string, ownerUserId: string, nodeId: string) {
@@ -806,7 +834,7 @@ export class WorkflowRepository {
       recordId: node.id, workflowId: row.id, planVersion: node.plan_version, status: node.status, attempt: node.attempt, engineThreadId: node.engine_thread_id || null, contextRecoveryCount: node.context_recovery_count || 0, contextRecoveryMode: node.context_recovery_mode || null, idempotencyKey: node.idempotency_key,
       summary: node.summary_json ? normalizeWorkflowNodeResult(parse(node.summary_json, {})) : null, resultDigest: node.result_digest, staleReason: node.stale_reason, logs: parse(node.logs_json, []), error: node.error, resultRepairable: repairableNodes.has(node.id), leaseExpiresAt: node.lease_expires_at, nextRetryAt: node.next_retry_at, startedAt: node.started_at, finishedAt: node.finished_at
     }));
-    return { id: row.id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id, workDirectory: row.work_directory, originId: row.origin_id || row.id, parentWorkflowId: row.parent_workflow_id, branchIndex: row.branch_index || 1, branchLabel: row.branch_label || `方案 ${row.branch_index || 1}`, title: row.title, originalPrompt: row.original_prompt, plannerEngine: row.planner_engine, maxConcurrentAgents: row.max_concurrent_agents, plannerSessionId: row.planner_session_id, plannerEngineSessionId: row.planner_engine_session_id, status: row.status, pausedFromStatus: row.paused_from_status, pausedPlanningMode: row.paused_planning_mode, pausedPlanningMaintenance: Boolean(row.paused_planning_maintenance), activePlanVersion: row.active_plan_version, revision: row.revision, reviewNote: row.review_note, finalResult: row.final_result_json ? normalizeWorkflowNodeResult(parse(row.final_result_json, {})) : null, plannerLogs: parse(row.planner_logs_json, []), plannerStartedAt: row.planner_started_at, plannerFinishedAt: row.planner_finished_at, integrationLogs: parse(row.integration_logs_json, []), integrationPhase: row.integration_phase, integrationAttempt: row.integration_attempt || 0, integratorResult: row.integrator_result_json ? normalizeWorkflowNodeResult(parse(row.integrator_result_json, {})) : null, validatorResult: row.validator_result_json ? normalizeWorkflowNodeResult(parse(row.validator_result_json, {})) : null, integrationStartedAt: row.integration_started_at, integrationFinishedAt: row.integration_finished_at, pinned: Boolean(row.pinned), archivedAt: row.archived_at, folderId: row.folder_id, createdAt: row.created_at, updatedAt: row.updated_at, plan, nodes };
+    return { id: row.id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id, workDirectory: row.work_directory, originId: row.origin_id || row.id, parentWorkflowId: row.parent_workflow_id, branchIndex: row.branch_index || 1, branchLabel: row.branch_label || `方案 ${row.branch_index || 1}`, title: row.title, originalPrompt: row.original_prompt, plannerEngine: row.planner_engine, maxConcurrentAgents: row.max_concurrent_agents, plannerSessionId: row.planner_session_id, plannerEngineSessionId: row.planner_engine_session_id, plannerRuntimeBinding: row.planner_runtime_binding_json ? parse(row.planner_runtime_binding_json, null) : null, status: row.status, pausedFromStatus: row.paused_from_status, pausedPlanningMode: row.paused_planning_mode, pausedPlanningMaintenance: Boolean(row.paused_planning_maintenance), activePlanVersion: row.active_plan_version, revision: row.revision, reviewNote: row.review_note, finalResult: row.final_result_json ? normalizeWorkflowNodeResult(parse(row.final_result_json, {})) : null, plannerLogs: parse(row.planner_logs_json, []), plannerStartedAt: row.planner_started_at, plannerFinishedAt: row.planner_finished_at, integrationLogs: parse(row.integration_logs_json, []), integrationPhase: row.integration_phase, integrationAttempt: row.integration_attempt || 0, integrationRuntimeBinding: row.integration_runtime_binding_json ? parse(row.integration_runtime_binding_json, null) : null, integratorResult: row.integrator_result_json ? normalizeWorkflowNodeResult(parse(row.integrator_result_json, {})) : null, validatorResult: row.validator_result_json ? normalizeWorkflowNodeResult(parse(row.validator_result_json, {})) : null, integrationStartedAt: row.integration_started_at, integrationFinishedAt: row.integration_finished_at, pinned: Boolean(row.pinned), archivedAt: row.archived_at, folderId: row.folder_id, createdAt: row.created_at, updatedAt: row.updated_at, plan, nodes };
   }
 
   private getNodeAttempt(id: string) {
@@ -822,7 +850,8 @@ export class WorkflowRepository {
       verifiedResult: row.verified_result_json ? normalizeWorkflowNodeResult(parse(row.verified_result_json, {})) : null,
       resultRepairCount: row.result_repair_count || 0, verificationRunCount: row.verification_run_count || 0, snapshotRetryCount: row.snapshot_retry_count || 0,
       engineThreadId: row.engine_thread_id || null, contextRecoveryCount: row.context_recovery_count || 0, contextRecoveryMode: row.context_recovery_mode || null,
-      checkpointDirectory: row.checkpoint_directory, error: row.error, createdAt: row.created_at, updatedAt: row.updated_at, finishedAt: row.finished_at
+      checkpointDirectory: row.checkpoint_directory, error: row.error, createdAt: row.created_at, updatedAt: row.updated_at, finishedAt: row.finished_at,
+      runtimeBinding: row.runtime_binding_json ? parse(row.runtime_binding_json, null) : null
     };
   }
 }

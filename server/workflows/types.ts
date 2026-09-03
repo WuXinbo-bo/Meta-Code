@@ -1,3 +1,6 @@
+import type { CanonicalActivityRecord } from "../activity/types.js";
+import type { RuntimeExecutionIdentity } from "../runtime/types.js";
+
 export type WorkflowEngine = string;
 export const DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS = 5;
 export const GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS = 20;
@@ -152,6 +155,7 @@ export type WorkflowNodeAttemptRecord = {
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  runtimeBinding: RuntimeExecutionIdentity | null;
 };
 
 export type WorkflowRecord = {
@@ -169,6 +173,7 @@ export type WorkflowRecord = {
   maxConcurrentAgents: number | null;
   plannerSessionId: string | null;
   plannerEngineSessionId: string | null;
+  plannerRuntimeBinding: RuntimeExecutionIdentity | null;
   status: WorkflowStatus;
   pausedFromStatus: WorkflowStatus | null;
   pausedPlanningMode: WorkflowPlanningMode | null;
@@ -183,6 +188,7 @@ export type WorkflowRecord = {
   integrationLogs: WorkflowNodeLog[];
   integrationPhase: WorkflowIntegrationPhase | null;
   integrationAttempt: number;
+  integrationRuntimeBinding: RuntimeExecutionIdentity | null;
   integratorResult: WorkflowNodeResult | null;
   validatorResult: WorkflowNodeResult | null;
   integrationStartedAt: string | null;
@@ -195,4 +201,3 @@ export type WorkflowRecord = {
   plan: WorkflowPlan | null;
   nodes: WorkflowNodeRecord[];
 };
-import type { CanonicalActivityRecord } from "../activity/types.js";
