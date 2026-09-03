@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "../server/appPaths.ts";
+import { defaultWorkbenchDataDir, prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "../server/appPaths.ts";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "metacode-paths-"));
 const project = path.join(sandbox, "project");
@@ -17,6 +17,7 @@ fs.writeFileSync(path.join(project, ".runtime", "managed-skills", "example", "SK
 const previousDataDir = process.env.WORKBENCH_DATA_DIR;
 const previousRuntimeDir = process.env.WORKBENCH_RUNTIME_DIR;
 const previousMetaCodeHome = process.env.METACODE_HOME;
+const previousProfile = process.env.METACODE_PROFILE;
 delete process.env.METACODE_HOME;
 delete process.env.WORKBENCH_RUNTIME_DIR;
 process.env.WORKBENCH_DATA_DIR = destination;
@@ -25,6 +26,11 @@ assert.equal(explicit.dataDir, destination);
 assert.equal(prepareWorkbenchDataDir(explicit).migrated, false, "explicit test directories must never import repository data");
 
 delete process.env.WORKBENCH_DATA_DIR;
+delete process.env.METACODE_PROFILE;
+assert.equal(resolveWorkbenchPaths(project).dataDir, defaultWorkbenchDataDir(), "development and installed entrypoints share the canonical personal data root unless isolation is explicit");
+process.env.METACODE_PROFILE = "development-test";
+assert.equal(resolveWorkbenchPaths(project).dataDir, `${defaultWorkbenchDataDir()}-development-test`);
+delete process.env.METACODE_PROFILE;
 const automatic = { ...resolveWorkbenchPaths(project), dataDir: destination };
 // Exercise the automatic migration branch without writing to the machine's
 // real application-data directory.
@@ -53,6 +59,8 @@ if (previousRuntimeDir === undefined) delete process.env.WORKBENCH_RUNTIME_DIR;
 else process.env.WORKBENCH_RUNTIME_DIR = previousRuntimeDir;
 if (previousMetaCodeHome === undefined) delete process.env.METACODE_HOME;
 else process.env.METACODE_HOME = previousMetaCodeHome;
+if (previousProfile === undefined) delete process.env.METACODE_PROFILE;
+else process.env.METACODE_PROFILE = previousProfile;
 if (originalData !== undefined) process.env.WORKBENCH_DATA_DIR = originalData;
 fs.rmSync(sandbox, { recursive: true, force: true });
 console.log("application path and legacy migration tests passed");

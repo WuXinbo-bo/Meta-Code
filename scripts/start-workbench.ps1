@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$dataRoot = if ($env:METACODE_HOME) { $env:METACODE_HOME } elseif ($env:WORKBENCH_DATA_DIR) { $env:WORKBENCH_DATA_DIR } elseif ($env:WORKBENCH_RUNTIME_DIR) { $env:WORKBENCH_RUNTIME_DIR } else { Join-Path $env:USERPROFILE ".metacode-development" }
+$dataRoot = if ($env:METACODE_HOME) { $env:METACODE_HOME } elseif ($env:WORKBENCH_DATA_DIR) { $env:WORKBENCH_DATA_DIR } elseif ($env:WORKBENCH_RUNTIME_DIR) { $env:WORKBENCH_RUNTIME_DIR } elseif ($env:METACODE_PROFILE) { Join-Path $env:USERPROFILE ".metacode-$($env:METACODE_PROFILE)" } else { Join-Path $env:USERPROFILE ".metacode" }
 $env:METACODE_HOME = $dataRoot
 $runtimeLogRoot = Join-Path $dataRoot "logs"
 $backendUrl = "http://127.0.0.1:4338/api/health"

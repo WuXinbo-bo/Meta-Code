@@ -1,12 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import os from "node:os";
-import path from "node:path";
+import { defaultWorkbenchDataDir } from "./server/appPaths";
 import { loadOrCreateDevelopmentApiToken, LOCAL_API_TOKEN_HEADER } from "./server/localApiSecurity";
 
 const webPort = Number(process.env.WORKBENCH_WEB_PORT || 4339);
 const apiPort = Number(process.env.WORKBENCH_API_PORT || process.env.PORT || 4338);
-const developmentDataDir = process.env.METACODE_HOME || path.join(os.homedir(), `.metacode-${process.env.METACODE_PROFILE || "development"}`);
+const developmentDataDir = process.env.METACODE_HOME
+  || (process.env.METACODE_PROFILE ? `${defaultWorkbenchDataDir()}-${process.env.METACODE_PROFILE}` : defaultWorkbenchDataDir());
 const apiToken = loadOrCreateDevelopmentApiToken(developmentDataDir);
 
 export default defineConfig({

@@ -4,16 +4,20 @@ Application source and personal data are intentionally separate.
 
 ## Default data directory
 
-- Installed application: `%USERPROFILE%\.metacode` on Windows and
-  `~/.metacode` on macOS/Linux.
-- Repository development: `%USERPROFILE%\.metacode-development` by default.
+- Installed application and normal repository development:
+  `%USERPROFILE%\.metacode` on Windows and `~/.metacode` on macOS/Linux.
+- Explicitly isolated development or compatibility profiles:
+  `~/.metacode-<profile>`.
 
 This mirrors Codex's `~/.codex` ownership model: deleting or replacing the
 application source does not delete the user's conversations, settings, skills,
 or managed runtimes. Set `METACODE_HOME` to override the root.
 `WORKBENCH_DATA_DIR` and `WORKBENCH_RUNTIME_DIR` remain compatibility aliases.
-Development and installed builds must never share a live data directory. Tests
-must always set `METACODE_HOME` to a disposable directory.
+The data-owner lease prevents installed and development backends from writing
+the same directory concurrently. Set `METACODE_PROFILE=development` or an
+explicit `METACODE_HOME` when deliberate isolation is required. Tests must
+always use a disposable explicit directory. Entry points must not silently
+select an empty profile when the canonical directory contains user data.
 
 The first normal start copies a legacy repository `.runtime` directory into
 the default data directory when the destination has no existing database. An
@@ -32,7 +36,8 @@ created.
   Windows user with DPAPI (authenticated AES-GCM fallback on other platforms).
 - `security/api-token`: an ephemeral local transport token. It is generated per
   installed launch or persisted only for the paired development server/Vite
-  processes. It is not personal data and is intentionally excluded from backup.
+  processes in their selected data root. It is not personal data and is
+  intentionally excluded from backup.
 
 Only one backend may own a data directory. `owner.json` records the owning PID,
 role, port, and heartbeat. A live owner blocks a second process; a dead PID is
