@@ -75,6 +75,7 @@ import type { CodexLinkBinding } from "./codex-link/model";
 import { RequestCoordinator } from "./requestCoordinator";
 import { WorkspaceResourceCache } from "./workspaceResourceCache";
 import { realtimeCoordinator } from "./realtimeCoordinator";
+import { isSessionPayload, matchesSessionNavigation } from "./sessionNavigation";
 import type { MarkdownBodyProps } from "./components/MarkdownBody";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
@@ -419,13 +420,6 @@ type Bootstrap = {
   providerControls: ProviderControlSnapshot[];
   runtime: { dataHome: string; codexHome: string; claudeHome: string; sdk: string; codex: CodexRuntimeStatus; claude: CodexRuntimeStatus; providers: Record<string, CodexRuntimeStatus> };
 };
-function isSessionPayload(value: Session | null | undefined): value is Session {
-  return Boolean(value
-    && typeof value.id === "string"
-    && (value.scopeKind === "workspace" || value.scopeKind === "standalone")
-    && Array.isArray(value.messages)
-    && Array.isArray(value.pendingInputs));
-}
 type NavigationSnapshot = Pick<Bootstrap, "workspaces" | "sessions" | "workflows">;
 type SessionNavigationSource = "task" | "workspace" | "scope";
 type SessionNavigationState =
@@ -3188,25 +3182,15 @@ export function App() {
       );
       if (!isSessionPayload(session)) throw new Error("服务端返回了空会话，已保留原对话");
       const currentNavigation = sessionNavigationRef.current;
-      if (
-        !requestCoordinatorRef.current.isCurrentGeneration(generation)
+      if (!requestCoordinatorRef.current.isCurrentGeneration(generation)
         || selectionGeneration !== taskSelectionGenerationRef.current
-        || currentNavigation.phase !== "loading"
-        || currentNavigation.sessionId !== id
-        || currentNavigation.generation !== generation
-        || currentNavigation.selectionGeneration !== selectionGeneration
-      ) return false;
+        || !matchesSessionNavigation(currentNavigation, { sessionId: id, generation, selectionGeneration })) return false;
       commitSessionSelection(session, source);
       return true;
     } catch (error) {
       const currentNavigation = sessionNavigationRef.current;
-      if (
-        currentNavigation.phase !== "loading"
-        || currentNavigation.sessionId !== id
-        || currentNavigation.generation !== generation
-        || currentNavigation.selectionGeneration !== selectionGeneration
-        || selectionGeneration !== taskSelectionGenerationRef.current
-      ) return false;
+      if (!matchesSessionNavigation(currentNavigation, { sessionId: id, generation, selectionGeneration })
+        || selectionGeneration !== taskSelectionGenerationRef.current) return false;
       updateSessionNavigation({ phase: "idle" });
       if (previousSelection.session && isSessionPayload(previousSelection.session)) {
         setActiveSession(previousSelection.session);
