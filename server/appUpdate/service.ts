@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import semver from "semver";
 import { loadAppUpdateConfig } from "./config.js";
-import { parseAppUpdateManifest, releaseFromManifest } from "./manifest.js";
+import { parseAppUpdateManifest, refreshReleaseCompatibility, releaseFromManifest } from "./manifest.js";
 import type { AppUpdateChannel, AppUpdateCheckState, AppUpdateConfig, AppUpdatePersistedState, AppUpdateRelease, AppUpdateSourceState, AppUpdateStatus } from "./types.js";
 
 type ServiceOptions = {
@@ -13,6 +13,7 @@ type ServiceOptions = {
   onChanged?: (status: AppUpdateStatus) => void;
   now?: () => Date;
   requestTimeoutMs?: number;
+  getDataSchemaVersion?: () => number;
 };
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -26,13 +27,14 @@ function cleanVersion(value: string) {
 
 function defaultState(config: AppUpdateConfig): AppUpdatePersistedState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     preferences: { autoCheck: true, channel: config.defaultChannel, skippedVersion: "", remindAfter: null },
     lastCheckedAt: null,
     lastSuccessfulCheckAt: null,
     lastError: "",
-    release: null
+    release: null,
+    checkedByVersion: ""
   };
 }
 
@@ -43,7 +45,7 @@ function normalizeState(input: unknown, config: AppUpdateConfig): AppUpdatePersi
   const preferences = source.preferences || fallback.preferences;
   const channel = preferences.channel === "beta" ? "beta" : "stable";
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: Number.isInteger(source.revision) && Number(source.revision) > 0 ? Number(source.revision) : 1,
     preferences: {
       autoCheck: preferences.autoCheck !== false,
@@ -54,7 +56,8 @@ function normalizeState(input: unknown, config: AppUpdateConfig): AppUpdatePersi
     lastCheckedAt: typeof source.lastCheckedAt === "string" ? source.lastCheckedAt : null,
     lastSuccessfulCheckAt: typeof source.lastSuccessfulCheckAt === "string" ? source.lastSuccessfulCheckAt : null,
     lastError: typeof source.lastError === "string" ? source.lastError : "",
-    release: source.release && typeof source.release === "object" ? source.release as AppUpdateRelease : null
+    release: source.release && typeof source.release === "object" ? source.release as AppUpdateRelease : null,
+    checkedByVersion: typeof source.checkedByVersion === "string" ? source.checkedByVersion : ""
   };
 }
 
@@ -65,6 +68,7 @@ export class AppUpdateService {
   private readonly onChanged?: (status: AppUpdateStatus) => void;
   private readonly now: () => Date;
   private readonly requestTimeoutMs: number;
+  private readonly getDataSchemaVersion: () => number;
   private state: AppUpdatePersistedState;
   private checkState: AppUpdateCheckState = "idle";
   private sourceState: AppUpdateSourceState = "unconfigured";
@@ -79,7 +83,9 @@ export class AppUpdateService {
     this.onChanged = options.onChanged;
     this.now = options.now || (() => new Date());
     this.requestTimeoutMs = options.requestTimeoutMs || REQUEST_TIMEOUT_MS;
+    this.getDataSchemaVersion = options.getDataSchemaVersion || (() => this.config.dataSchemaVersion);
     this.state = this.readState();
+    if (this.state.release) this.state.release = refreshReleaseCompatibility(this.state.release, this.config, this.getDataSchemaVersion());
     this.refreshSourceState();
   }
 
@@ -106,7 +112,7 @@ export class AppUpdateService {
       lastCheckedAt: this.state.lastCheckedAt,
       lastSuccessfulCheckAt: this.state.lastSuccessfulCheckAt,
       lastError: this.state.lastError,
-      release: this.state.release ? structuredClone(this.state.release) : null,
+      release: this.state.release ? refreshReleaseCompatibility(structuredClone(this.state.release), this.config, this.getDataSchemaVersion()) : null,
       updateAvailable,
       announcementVisible: updateAvailable && !skipped && reminded
     };
@@ -181,7 +187,7 @@ export class AppUpdateService {
         const payload = await this.fetchJson(manifestUrl, {});
         const manifest = parseAppUpdateManifest(payload, this.config);
         if (manifest.channel !== channel) throw new Error(`更新清单频道不匹配：${manifest.channel}`);
-        release = releaseFromManifest(manifest, this.config);
+        release = releaseFromManifest(manifest, this.config, this.getDataSchemaVersion());
         this.sourceState = "manifest";
         this.sourceLabel = "发布清单";
       } else if (this.config.githubRepository) {
@@ -196,6 +202,7 @@ export class AppUpdateService {
       cleanVersion(release.version);
       this.state.release = release;
       this.state.lastSuccessfulCheckAt = this.now().toISOString();
+      this.state.checkedByVersion = this.config.currentVersion;
       this.state.lastError = "";
       this.checkState = "completed";
     } catch (error) {
@@ -262,6 +269,7 @@ export class AppUpdateService {
 
   private shouldAutoCheck() {
     if (!this.state.preferences.autoCheck) return false;
+    if (this.state.checkedByVersion !== this.config.currentVersion) return true;
     if (!this.state.lastCheckedAt) return true;
     const interval = this.config.defaultCheckIntervalHours * 60 * 60 * 1000;
     return this.now().getTime() - Date.parse(this.state.lastCheckedAt) >= interval;

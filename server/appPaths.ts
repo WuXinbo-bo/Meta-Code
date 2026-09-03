@@ -5,6 +5,7 @@ import path from "node:path";
 export const METACODE_HOME_ENV = "METACODE_HOME";
 export const WORKBENCH_DATA_DIR_ENV = "WORKBENCH_DATA_DIR";
 export const LEGACY_RUNTIME_DIR_ENV = "WORKBENCH_RUNTIME_DIR";
+export const METACODE_PROFILE_ENV = "METACODE_PROFILE";
 
 export type WorkbenchPaths = {
   projectRoot: string;
@@ -30,11 +31,18 @@ export function defaultWorkbenchDataDir() {
   return path.join(os.homedir(), ".metacode");
 }
 
+function defaultProcessDataDir() {
+  const profile = String(process.env[METACODE_PROFILE_ENV] || "").trim();
+  if (!profile) return defaultWorkbenchDataDir();
+  if (!/^[a-z0-9][a-z0-9._-]{0,31}$/i.test(profile)) throw new Error("METACODE_PROFILE 格式无效");
+  return path.join(os.homedir(), `.metacode-${profile}`);
+}
+
 export function resolveWorkbenchPaths(projectRoot: string): WorkbenchPaths {
   // WORKBENCH_RUNTIME_DIR remains a compatibility alias for existing tests and
   // managed deployments. New installations should use WORKBENCH_DATA_DIR.
   const configured = process.env[METACODE_HOME_ENV] || process.env[WORKBENCH_DATA_DIR_ENV] || process.env[LEGACY_RUNTIME_DIR_ENV];
-  const dataDir = path.resolve(configured || defaultWorkbenchDataDir());
+  const dataDir = path.resolve(configured || defaultProcessDataDir());
   const legacyRuntimeDir = path.join(projectRoot, ".runtime");
   const runtimesDir = path.join(dataDir, "runtimes");
   return {

@@ -36,6 +36,7 @@ import { WorkbenchStateStore } from "./stateStore.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
 import { WorkbenchEventHub } from "./eventHub.js";
 import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
+import { WorkbenchDataOwnerLease } from "./dataOwnerLease.js";
 import { AppUpdateService } from "./appUpdate/service.js";
 import { CliRuntimeManager } from "./runtime/manager.js";
 import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
@@ -362,6 +363,11 @@ type CodexRuntimeStatus = RuntimeStatus;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const APP_PATHS = resolveWorkbenchPaths(ROOT);
+const PORT = Number(process.env.PORT || 4338);
+const DATA_OWNER_LEASE = WorkbenchDataOwnerLease.acquire(APP_PATHS.dataDir, {
+  role: process.env.METACODE_DESKTOP === "1" ? "desktop" : process.env.METACODE_PROCESS_ROLE === "development" ? "development" : "server",
+  port: PORT
+});
 const DATA_MIGRATION = prepareWorkbenchDataDir(APP_PATHS);
 if (DATA_MIGRATION.migrated) console.info(`Workbench personal data migrated to ${DATA_MIGRATION.destination}; recovery copy stored outside the repository`);
 const RUNTIME_DIR = APP_PATHS.dataDir;
@@ -375,7 +381,6 @@ const ACTIVITY_ARTIFACTS_DIR = APP_PATHS.activityArtifactsDir;
 const SESSION_RECOVERY_DIR = path.join(APP_PATHS.dataDir, "sessions", "recovery");
 const SKILLS_DIR = path.join(CODEX_HOME, "skills");
 const STATE_FILE = path.join(RUNTIME_DIR, "state.json");
-const PORT = Number(process.env.PORT || 4338);
 const METACODE_LAUNCHER_TOKEN = process.env.METACODE_LAUNCHER_TOKEN || "";
 const execFileAsync = promisify(execFile);
 const CODEX_BRIDGE_TOKEN = process.env.CLAUDE_CODEX_BRIDGE_TOKEN || crypto.randomUUID();
@@ -457,6 +462,7 @@ const eventHub = new WorkbenchEventHub();
 const appUpdateService = new AppUpdateService({
   projectRoot: ROOT,
   stateFile: APP_PATHS.appUpdateStateFile,
+  getDataSchemaVersion: () => stateStore.schemaVersion(),
   onChanged: (status) => eventHub.publish("app-update.changed", {
     revision: status.revision,
     checkState: status.checkState,
@@ -5053,6 +5059,7 @@ async function shutdown(reason: string) {
     sessionManagementRepository.close();
     performanceMonitor.close();
     stateStore.close();
+    DATA_OWNER_LEASE.release();
   } finally {
     clearTimeout(forceExitTimer);
     process.exit(0);

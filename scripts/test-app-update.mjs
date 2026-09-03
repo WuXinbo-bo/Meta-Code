@@ -88,6 +88,34 @@ try {
   assert.equal(status.release?.compatible, false);
   assert.match(status.release?.incompatibilityReason || "", /数据架构/);
 
+  currentManifest = manifest("0.3.1", { compatibility: { minDataSchemaVersion: 2, maxDataSchemaVersion: 2, launcherProtocolVersion: 1 } });
+  const actualSchema = new AppUpdateService({
+    projectRoot: configuredRoot,
+    stateFile: path.join(configuredRoot, "data", "actual-schema.json"),
+    getDataSchemaVersion: () => 2
+  });
+  status = await actualSchema.check(true);
+  assert.equal(status.release?.compatible, true, "compatibility must use the opened database schema instead of release.config.json");
+
+  const staleStateFile = path.join(configuredRoot, "data", "stale-state.json");
+  await fs.writeFile(staleStateFile, JSON.stringify({
+    schemaVersion: 1,
+    revision: 7,
+    preferences: { autoCheck: true, channel: "stable", skippedVersion: "", remindAfter: null },
+    lastCheckedAt: new Date().toISOString(),
+    lastSuccessfulCheckAt: new Date().toISOString(),
+    lastError: "",
+    release: {
+      version: "0.3.0", channel: "stable", publishedAt: new Date().toISOString(), releaseNotes: "old",
+      releaseUrl: "https://example.com", source: "manifest", compatible: false, installable: false,
+      incompatibilityReason: "需要数据架构 2-2，当前为 1", assets: []
+    }
+  }));
+  const refreshed = new AppUpdateService({ projectRoot: configuredRoot, stateFile: staleStateFile, getDataSchemaVersion: () => 2 });
+  assert.equal(refreshed.status().release?.compatible, true, "legacy derived compatibility must not survive an app restart");
+  status = await refreshed.check(false);
+  assert.equal(status.release?.version, "0.3.1", "a new app version must bypass the previous version's check cooldown");
+
   const timeout = new AppUpdateService({
     projectRoot: configuredRoot,
     stateFile: path.join(configuredRoot, "data", "timeout.json"),
@@ -152,7 +180,7 @@ try {
   assert.equal(status.source.state, "error");
   assert.match(status.lastError, /没有找到测试版发布记录/);
   stableGithub.close(); betaGithub.close(); noBeta.close();
-  configured.close(); current.close(); incompatible.close(); timeout.close(); unconfigured.close();
+  configured.close(); current.close(); incompatible.close(); actualSchema.close(); refreshed.close(); timeout.close(); unconfigured.close();
   console.log("app update service: ok");
 } finally {
   await new Promise((resolve) => server.close(resolve));

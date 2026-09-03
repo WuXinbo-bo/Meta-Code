@@ -116,12 +116,13 @@ function writerVersion() {
   return process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development";
 }
 
-function setStateMetadata(db: DatabaseSync, input: { migrationId?: string; migrationState?: string } = {}) {
+function setStateMetadata(db: DatabaseSync, input: { migrationId?: string; migrationState?: string; migrationSteps?: string } = {}) {
   const upsert = db.prepare("INSERT INTO state_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
   upsert.run("dataSchemaVersion", String(CURRENT_STATE_SCHEMA_VERSION));
   upsert.run("lastWriterAppVersion", writerVersion());
   if (input.migrationId) upsert.run("migrationId", input.migrationId);
   if (input.migrationState) upsert.run("migrationState", input.migrationState);
+  if (input.migrationSteps) upsert.run("migrationSteps", input.migrationSteps);
 }
 
 function createMigrationBackup(db: DatabaseSync, runtimeDir: string, fromVersion: number) {
@@ -155,6 +156,30 @@ function migrateInlineSessionMessages(db: DatabaseSync) {
   }
 }
 
+type StateMigration = { from: number; to: number; id: string; migrate(db: DatabaseSync): void };
+const STATE_MIGRATIONS: StateMigration[] = [
+  { from: 1, to: 2, id: "move-session-messages-to-table", migrate: migrateInlineSessionMessages }
+];
+
+function migrationPath(from: number, to: number) {
+  const result: StateMigration[] = [];
+  let version = from;
+  while (version < to) {
+    const migration = STATE_MIGRATIONS.find((candidate) => candidate.from === version);
+    if (!migration || migration.to <= version) throw new Error(`缺少数据迁移步骤：v${version} -> v${version + 1}`);
+    result.push(migration);
+    version = migration.to;
+  }
+  if (version !== to) throw new Error(`数据迁移路径不能到达 v${to}`);
+  return result;
+}
+
+export function readWorkbenchStateSchema(file: string) {
+  if (!fs.existsSync(file)) return CURRENT_STATE_SCHEMA_VERSION;
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { return declaredSchemaVersion(db); } finally { db.close(); }
+}
+
 export class WorkbenchStateStore {
   readonly db: DatabaseSync;
   readonly file: string;
@@ -177,6 +202,8 @@ export class WorkbenchStateStore {
     this.db = new DatabaseSync(this.file);
     try {
       this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      const quickCheck = this.db.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
+      if (quickCheck?.quick_check !== "ok") throw new Error(`工作台数据库完整性检查失败：${quickCheck?.quick_check || "未知错误"}`);
       const hasApplicationTables = tableExists(this.db, "settings") || tableExists(this.db, "sessions");
       const declaredVersion = declaredSchemaVersion(this.db);
       const effectiveVersion = declaredVersion || (hasApplicationTables ? (tableExists(this.db, "session_messages") ? 2 : 1) : CURRENT_STATE_SCHEMA_VERSION);
@@ -187,11 +214,16 @@ export class WorkbenchStateStore {
 
       if (hasApplicationTables && effectiveVersion < CURRENT_STATE_SCHEMA_VERSION) {
         const backupFile = createMigrationBackup(this.db, runtimeDir, effectiveVersion);
+        const migrations = migrationPath(effectiveVersion, CURRENT_STATE_SCHEMA_VERSION);
         this.db.exec("BEGIN IMMEDIATE");
         try {
           this.db.exec(STATE_SCHEMA_SQL);
-          if (effectiveVersion === 1) migrateInlineSessionMessages(this.db);
-          setStateMetadata(this.db, { migrationId: `v${effectiveVersion}-to-v${CURRENT_STATE_SCHEMA_VERSION}`, migrationState: "completed" });
+          for (const migration of migrations) migration.migrate(this.db);
+          setStateMetadata(this.db, {
+            migrationId: `v${effectiveVersion}-to-v${CURRENT_STATE_SCHEMA_VERSION}`,
+            migrationState: "completed",
+            migrationSteps: migrations.map((item) => item.id).join(",")
+          });
           this.db.exec(`PRAGMA user_version = ${CURRENT_STATE_SCHEMA_VERSION}; COMMIT`);
         } catch (error) {
           try { this.db.exec("ROLLBACK"); } catch { /* The transaction already ended. */ }
@@ -354,6 +386,8 @@ export class WorkbenchStateStore {
       deleted.push(id);
     }
   }
+
+  schemaVersion() { return declaredSchemaVersion(this.db); }
 
   private syncSessions(items: SessionRecord[], changed: string[], deleted: string[]) {
     const present = new Set(items.map((item) => item.id));

@@ -33,12 +33,12 @@ export function parseAppUpdateManifest(input: unknown, config: AppUpdateConfig):
   return manifest;
 }
 
-export function releaseFromManifest(manifest: AppUpdateManifest, config: AppUpdateConfig): AppUpdateRelease {
-  const dataCompatible = config.dataSchemaVersion >= manifest.compatibility.minDataSchemaVersion
-    && config.dataSchemaVersion <= manifest.compatibility.maxDataSchemaVersion;
+export function releaseFromManifest(manifest: AppUpdateManifest, config: AppUpdateConfig, actualDataSchemaVersion = config.dataSchemaVersion): AppUpdateRelease {
+  const dataCompatible = actualDataSchemaVersion >= manifest.compatibility.minDataSchemaVersion
+    && actualDataSchemaVersion <= manifest.compatibility.maxDataSchemaVersion;
   const launcherCompatible = config.launcherProtocolVersion === manifest.compatibility.launcherProtocolVersion;
   const incompatibilityReason = !dataCompatible
-    ? `需要数据架构 ${manifest.compatibility.minDataSchemaVersion}-${manifest.compatibility.maxDataSchemaVersion}，当前为 ${config.dataSchemaVersion}`
+    ? `需要数据架构 ${manifest.compatibility.minDataSchemaVersion}-${manifest.compatibility.maxDataSchemaVersion}，当前为 ${actualDataSchemaVersion}`
     : !launcherCompatible
       ? `需要启动器协议 ${manifest.compatibility.launcherProtocolVersion}，当前为 ${config.launcherProtocolVersion}`
       : "";
@@ -52,6 +52,18 @@ export function releaseFromManifest(manifest: AppUpdateManifest, config: AppUpda
     compatible: !incompatibilityReason,
     installable: false,
     incompatibilityReason,
-    assets: manifest.assets
+    assets: manifest.assets,
+    compatibility: structuredClone(manifest.compatibility)
   };
+}
+
+export function refreshReleaseCompatibility(release: AppUpdateRelease, config: AppUpdateConfig, actualDataSchemaVersion: number) {
+  if (!release.compatibility) return { ...release, compatible: true, installable: false, incompatibilityReason: "" };
+  const manifest = {
+    schemaVersion: 1, productId: config.productId, productName: config.productName,
+    version: release.version, channel: release.channel, publishedAt: release.publishedAt,
+    releaseNotes: release.releaseNotes, releaseUrl: release.releaseUrl,
+    compatibility: release.compatibility, assets: release.assets
+  } as AppUpdateManifest;
+  return releaseFromManifest(manifest, config, actualDataSchemaVersion);
 }

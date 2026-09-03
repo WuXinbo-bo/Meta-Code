@@ -39,6 +39,7 @@ export type AppUpdateRelease = {
   installable: boolean;
   incompatibilityReason: string;
   assets: AppUpdateAsset[];
+  compatibility?: AppUpdateManifest["compatibility"];
 };
 
 export type AppUpdatePreferences = {
@@ -49,13 +50,14 @@ export type AppUpdatePreferences = {
 };
 
 export type AppUpdatePersistedState = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   revision: number;
   preferences: AppUpdatePreferences;
   lastCheckedAt: string | null;
   lastSuccessfulCheckAt: string | null;
   lastError: string;
   release: AppUpdateRelease | null;
+  checkedByVersion: string;
 };
 
 export type AppUpdateStatus = {
