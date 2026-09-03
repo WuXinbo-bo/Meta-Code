@@ -4,8 +4,6 @@ import path from "node:path";
 import type { ActivityArtifactRef } from "./types.js";
 
 const ARTIFACT_ID = /^[a-f0-9]{32}$/;
-const MAX_ARTIFACTS = 1_000;
-
 type StoredActivityArtifact = {
   schemaVersion: 1;
   id: string;
@@ -22,15 +20,6 @@ function artifactPath(root: string, id: string) {
   return path.join(root, `${id}.json`);
 }
 
-async function pruneArtifacts(root: string) {
-  const entries = await fsp.readdir(root, { withFileTypes: true }).catch(() => []);
-  const files = entries.filter((entry) => entry.isFile() && ARTIFACT_ID.test(path.basename(entry.name, ".json")) && entry.name.endsWith(".json"));
-  if (files.length <= MAX_ARTIFACTS) return;
-  const stats = await Promise.all(files.map(async (entry) => ({ entry, stat: await fsp.stat(path.join(root, entry.name)) })));
-  stats.sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs);
-  await Promise.all(stats.slice(0, files.length - MAX_ARTIFACTS).map(({ entry }) => fsp.unlink(path.join(root, entry.name)).catch(() => undefined)));
-}
-
 export async function storeActivityArtifact(root: string, input: Omit<StoredActivityArtifact, "schemaVersion" | "id" | "createdAt">): Promise<ActivityArtifactRef> {
   await fsp.mkdir(root, { recursive: true });
   const id = crypto.randomBytes(16).toString("hex");
@@ -39,7 +28,6 @@ export async function storeActivityArtifact(root: string, input: Omit<StoredActi
   const temporary = `${target}.${process.pid}.tmp`;
   await fsp.writeFile(temporary, JSON.stringify(artifact), { encoding: "utf8", mode: 0o600 });
   await fsp.rename(temporary, target);
-  void pruneArtifacts(root).catch(() => undefined);
   return { id, kind: input.kind, mediaType: input.mediaType, size: Buffer.byteLength(input.content) };
 }
 

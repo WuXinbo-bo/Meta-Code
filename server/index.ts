@@ -44,6 +44,7 @@ import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normaliz
 import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
 import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
+import { planStorageMaintenance, runStorageMaintenance, type StorageMaintenanceInput } from "./storageGovernance.js";
 import { WorkflowRepository } from "./workflows/repository.js";
 import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./workflows/stateFiles.js";
 import { normalizeWorkflowPlan, parsePlanJson, plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, validateWorkflowPlan, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./workflows/plan.js";
@@ -1471,6 +1472,41 @@ async function listRuntimeBackups() {
     appVersion: item.manifest.appVersion,
     dataSchemaVersion: item.manifest.dataSchemaVersion
   }));
+}
+
+function storageMaintenanceInput(): StorageMaintenanceInput {
+  const protectedRuntimePaths = new Set<string>();
+  const protectedWorkflowRuntimeNames = new Set<string>();
+  const protectBinding = (binding?: RuntimeExecutionIdentity | null) => {
+    if (binding?.source === "runtime" && binding.path) protectedRuntimePaths.add(binding.path);
+  };
+  for (const session of state.sessions) {
+    if (["running", "paused", "interrupted"].includes(session.status)) protectBinding(session.runtimeBinding);
+  }
+  for (const task of state.delegatedTasks) {
+    if (["queued", "running", "interrupted"].includes(task.status)) protectBinding(task.runtimeBinding);
+  }
+  for (const workflow of workflowRepository.listAll()) {
+    if (!["planning", "queued", "running", "integrating", "paused"].includes(workflow.status)) continue;
+    protectBinding(workflow.plannerRuntimeBinding);
+    protectBinding(workflow.integrationRuntimeBinding);
+    for (const node of workflow.nodes) {
+      if (!["queued", "running", "pause_requested", "paused", "restart_requested", "retry_wait", "interrupted"].includes(node.status)) continue;
+      const attempt = workflowRepository.getLatestNodeAttempt(node.recordId);
+      protectBinding(attempt?.runtimeBinding);
+      if (attempt) protectedWorkflowRuntimeNames.add(crypto.createHash("sha256").update(`${workflow.id}:${node.planVersion}:${node.id}:${attempt.attempt}`).digest("hex"));
+    }
+  }
+  return {
+    dataDir: APP_PATHS.dataDir,
+    protectedSessionIds: state.sessions.map((session) => session.id),
+    protectedRuntimePaths,
+    protectedWorkflowRuntimeNames
+  };
+}
+
+function storageMaintenanceIdle() {
+  return !activeRuns.size && !activeDelegationTasks.size && !activeWorkflowNodes.size && !activeWorkflowPlanners.size && !activeWorkflowIntegrations.size;
 }
 
 function redactLog(text: string) {
@@ -7437,11 +7473,30 @@ app.get("/api/data/capabilities", auth.requireRoles("owner", "admin"), (_req, re
     scope: "device",
     product: { id: appUpdateService.config.productId, name: appUpdateService.config.productName, version: appUpdateService.config.currentVersion },
     capabilities: {
-      backup: { available: true, audited: true, retentionGroups: 14 },
+      backup: { available: true, audited: true, retentionGroups: 3 },
       runtimeDiagnostics: { available: true, readOnly: true },
+      storageMaintenance: { available: true, dryRun: true, requiresIdle: true },
       openLocalFolder: { available: true, localOnly: true, targets: ["data", "backups"] }
     }
   });
+});
+
+app.get("/api/data/storage", auth.requireRoles("owner", "admin"), async (_req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  try { res.json(await planStorageMaintenance(storageMaintenanceInput())); }
+  catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/data/storage/maintenance", auth.requireRoles("owner", "admin"), async (req, res) => {
+  if (!storageMaintenanceIdle()) return res.status(409).json({ error: "仍有任务正在运行，暂不执行存储清理" });
+  try {
+    const report = await runStorageMaintenance(storageMaintenanceInput());
+    auth.auditRequest(req, { action: "data.storage_maintenance", targetType: "workbench", summary: { deletedItems: report.deletedItems, deletedBytes: report.deletedBytes } });
+    res.json(report);
+  } catch (error) {
+    auth.auditRequest(req, { action: "data.storage_maintenance", targetType: "workbench", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.post("/api/data/backups", auth.requireRoles("owner", "admin"), async (req, res) => {
@@ -10931,7 +10986,13 @@ if (fs.existsSync(DIST_DIR)) {
 }
 
 setInterval(() => {
-  createRuntimeBackup().then((result) => auth.audit({ action: "system.backup", targetType: "server", summary: result }))
+  createRuntimeBackup()
+    .then((result) => {
+      auth.audit({ action: "system.backup", targetType: "server", summary: result });
+      return runStorageMaintenance(storageMaintenanceInput())
+        .then((maintenance) => auth.audit({ action: "system.storage_maintenance", targetType: "server", summary: { deletedItems: maintenance.deletedItems, deletedBytes: maintenance.deletedBytes } }))
+        .catch((error) => auth.audit({ action: "system.storage_maintenance", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) }));
+    })
     .catch((error) => auth.audit({ action: "system.backup", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) }));
 }, 24 * 60 * 60 * 1000).unref();
 
