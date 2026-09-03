@@ -84,6 +84,7 @@
     "test:request-resource-cache": "node --import tsx scripts/test-request-resource-cache.mjs",
     "test:secret-vault": "node --import tsx scripts/test-secret-vault.mjs",
     "test:path-boundary": "node --import tsx scripts/test-path-boundary.mjs",
+    "test:local-api-security": "node --import tsx scripts/test-local-api-security.mjs",
     "test:app-update": "node --import tsx scripts/test-app-update.mjs",
     "test:release-manifest": "node --import tsx scripts/test-release-manifest.mjs",
     "test:desktop-package": "node scripts/test-desktop-package.mjs",

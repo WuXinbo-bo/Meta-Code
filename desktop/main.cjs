@@ -18,6 +18,7 @@ const logDir = path.join(dataHome, "logs");
 const runtimeStateFile = path.join(desktopDir, "runtime.json");
 const windowStateFile = path.join(desktopDir, "window.json");
 const launcherToken = crypto.randomBytes(32).toString("hex");
+const apiToken = crypto.randomBytes(32).toString("base64url");
 
 app.setPath("userData", path.join(desktopDir, "electron"));
 
@@ -114,7 +115,8 @@ async function startBackend() {
       METACODE_HOME: dataHome,
       METACODE_DESKTOP: "1",
       WORKBENCH_PACKAGED: "1",
-      METACODE_LAUNCHER_TOKEN: launcherToken
+      METACODE_LAUNCHER_TOKEN: launcherToken,
+      METACODE_API_TOKEN: apiToken
     }
   });
   backend.stdout.pipe(backendLog, { end: false });
@@ -158,6 +160,13 @@ function createWindow() {
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
   Menu.setApplicationMenu(null);
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+    try {
+      const target = new URL(details.url);
+      if (target.hostname === "127.0.0.1" && Number(target.port) === backendPort) details.requestHeaders["X-MetaCode-Api-Token"] = apiToken;
+    } catch { /* Non-HTTP application resources do not need the local API token. */ }
+    callback({ requestHeaders: details.requestHeaders });
+  });
   mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
   mainWindow.once("ready-to-show", () => { if (!TEST_HEADLESS) mainWindow?.show(); });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

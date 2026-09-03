@@ -11,6 +11,7 @@ const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-mcp-api
 const dataRoot = path.join(temporaryRoot, "data");
 const workspaceRoot = path.join(temporaryRoot, "workspace");
 const fixturePath = path.join(projectRoot, "scripts", "fixtures", "mcp-stdio-server.mjs");
+const apiToken = "mcp-connection-test-token-0123456789";
 await fsp.mkdir(workspaceRoot, { recursive: true });
 
 const port = await new Promise((resolve, reject) => {
@@ -26,7 +27,7 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const output = [];
 const backend = spawn(process.execPath, [path.join(projectRoot, "dist-server", "index.js")], {
   cwd: projectRoot,
-  env: { ...process.env, PORT: String(port), METACODE_HOME: dataRoot, WORKSPACE_ROOT: temporaryRoot },
+  env: { ...process.env, PORT: String(port), METACODE_HOME: dataRoot, WORKSPACE_ROOT: temporaryRoot, METACODE_API_TOKEN: apiToken },
   windowsHide: true,
   shell: false,
   stdio: ["ignore", "pipe", "pipe"]
@@ -50,7 +51,7 @@ async function waitForHealth() {
 }
 
 async function json(pathname, expectedStatus = 200, options) {
-  const response = await fetch(`${baseUrl}${pathname}`, options);
+  const response = await fetch(`${baseUrl}${pathname}`, { ...options, headers: { "X-MetaCode-Api-Token": apiToken, ...(options?.headers || {}) } });
   const body = await response.json().catch(() => null);
   assert.equal(response.status, expectedStatus, `${pathname}: ${JSON.stringify(body)}`);
   return body;

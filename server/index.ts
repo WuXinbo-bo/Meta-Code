@@ -43,6 +43,7 @@ import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
 import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
 import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
+import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
 import { WorkflowRepository } from "./workflows/repository.js";
 import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./workflows/stateFiles.js";
 import { normalizeWorkflowPlan, parsePlanJson, plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, validateWorkflowPlan, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./workflows/plan.js";
@@ -385,6 +386,8 @@ const SESSION_RECOVERY_DIR = path.join(APP_PATHS.dataDir, "sessions", "recovery"
 const SKILLS_DIR = path.join(CODEX_HOME, "skills");
 const STATE_FILE = path.join(RUNTIME_DIR, "state.json");
 const METACODE_LAUNCHER_TOKEN = process.env.METACODE_LAUNCHER_TOKEN || "";
+const METACODE_API_TOKEN = process.env.METACODE_API_TOKEN?.trim() || loadOrCreateDevelopmentApiToken(APP_PATHS.dataDir);
+const LOCAL_API_PORTS = new Set([PORT, Number(process.env.WORKBENCH_WEB_PORT || 4339)].filter((value) => Number.isInteger(value) && value > 0));
 const execFileAsync = promisify(execFile);
 const CODEX_BRIDGE_TOKEN = process.env.CLAUDE_CODEX_BRIDGE_TOKEN || crypto.randomUUID();
 const CODEX_BRIDGE_URL = `http://127.0.0.1:${PORT}/api/internal/codex/delegate`;
@@ -6643,13 +6646,9 @@ app.use((req, res, next) => {
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-  if (process.env.NODE_ENV === "production" && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
-    const origin = String(req.headers.origin || "");
-    const host = String(req.headers.host || "");
-    if (origin) {
-      try { if (new URL(origin).host !== host) return res.status(403).json({ error: "跨站请求已拒绝" }); }
-      catch { return res.status(403).json({ error: "请求来源无效" }); }
-    }
+  if (req.path.startsWith("/api/")) {
+    const rejected = validateLocalApiRequest({ pathname: req.path, method: req.method, headers: req.headers, apiToken: METACODE_API_TOKEN, allowedPorts: LOCAL_API_PORTS });
+    if (rejected) return res.status(rejected.status).json({ error: rejected.error });
   }
   next();
 });
@@ -11010,6 +11009,7 @@ httpServer = listeningServer;
 listeningServer.on("error", (error: NodeJS.ErrnoException) => {
   const address = `127.0.0.1:${PORT}`;
   console.error(`Meta Code backend HTTP server failed on ${address}: ${error.code || error.message}`, error);
+  DATA_OWNER_LEASE.release();
   process.exit(1);
 });
 

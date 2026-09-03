@@ -13,8 +13,6 @@ export type DataOwnerRecord = {
 };
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
-const HEARTBEAT_STALE_MS = 20_000;
-
 function processExists(pid: number) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -33,13 +31,13 @@ function readRecord(file: string): DataOwnerRecord | null {
   } catch { return null; }
 }
 
-export function activeDataOwner(dataDir: string, now = Date.now()) {
+export function activeDataOwner(dataDir: string) {
   const file = path.join(path.resolve(dataDir), "owner.json");
   const owner = readRecord(file);
   if (!owner) return null;
-  const heartbeat = Date.parse(owner.heartbeatAt);
-  const recent = Number.isFinite(heartbeat) && now - heartbeat < HEARTBEAT_STALE_MS;
-  return processExists(owner.pid) || recent ? owner : null;
+  // A recently written heartbeat does not prove that its process is still alive.
+  // Treat a dead PID as stale immediately so crash recovery is not delayed.
+  return processExists(owner.pid) ? owner : null;
 }
 
 export class WorkbenchDataOwnerLease {

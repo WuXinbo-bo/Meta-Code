@@ -10,6 +10,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-preview-api-"));
 const dataRoot = path.join(temporaryRoot, "data");
 const workspaceRoot = path.join(temporaryRoot, "workspace");
+const apiToken = "file-preview-test-token-0123456789";
 await fsp.mkdir(workspaceRoot, { recursive: true });
 
 const port = await new Promise((resolve, reject) => {
@@ -29,7 +30,8 @@ const child = spawn(process.execPath, [path.join(projectRoot, "dist-server", "in
     ...process.env,
     PORT: String(port),
     METACODE_HOME: dataRoot,
-    WORKSPACE_ROOT: temporaryRoot
+    WORKSPACE_ROOT: temporaryRoot,
+    METACODE_API_TOKEN: apiToken
   },
   windowsHide: true,
   shell: false,
@@ -54,7 +56,7 @@ async function waitForHealth() {
 }
 
 async function json(pathname, expectedStatus = 200, options) {
-  const response = await fetch(`${baseUrl}${pathname}`, options);
+  const response = await fetch(`${baseUrl}${pathname}`, { ...options, headers: { "X-MetaCode-Api-Token": apiToken, ...(options?.headers || {}) } });
   const body = await response.json().catch(() => null);
   assert.equal(response.status, expectedStatus, `${pathname}: ${JSON.stringify(body)}`);
   return body;
@@ -97,10 +99,10 @@ try {
   assert.match((await preview("broken.docx", 400)).error, /Word|archive|zip/i);
   assert.match((await preview("broken.pdf", 400)).error, /PDF.*无效|损坏/);
   assert.match((await preview("broken.png", 400)).error, /PNG.*无效|损坏/);
-  const pdfResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=valid.pdf`);
+  const pdfResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=valid.pdf`, { headers: { "X-MetaCode-Api-Token": apiToken } });
   assert.equal(pdfResponse.status, 200);
   assert.match(pdfResponse.headers.get("content-type") || "", /application\/pdf/);
-  const imageResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=valid.png`);
+  const imageResponse = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=valid.png`, { headers: { "X-MetaCode-Api-Token": apiToken } });
   assert.equal(imageResponse.status, 200);
   assert.match(imageResponse.headers.get("content-type") || "", /image\/png/);
 

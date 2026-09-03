@@ -11,6 +11,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-backend-recovery-"));
 const dataRoot = path.join(temporaryRoot, "data");
 const workspaceRoot = path.join(temporaryRoot, "workspace");
+const apiToken = "backend-recovery-test-token-0123456789";
 await fsp.mkdir(workspaceRoot, { recursive: true });
 
 async function reservePort() {
@@ -29,7 +30,7 @@ function startBackend(port, home = dataRoot) {
   const output = [];
   const child = spawn(process.execPath, [path.join(projectRoot, "dist-server", "index.js")], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: String(port), METACODE_HOME: home, WORKSPACE_ROOT: temporaryRoot },
+    env: { ...process.env, PORT: String(port), METACODE_HOME: home, WORKSPACE_ROOT: temporaryRoot, METACODE_API_TOKEN: apiToken },
     windowsHide: true,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"]
@@ -86,7 +87,7 @@ try {
   await waitForHealth(active, port);
   const createdResponse = await fetch(`http://127.0.0.1:${port}/api/workspaces`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-MetaCode-Api-Token": apiToken },
     body: JSON.stringify({ root: workspaceRoot, name: "Crash recovery workspace" })
   });
   assert.equal(createdResponse.status, 201);
@@ -95,7 +96,7 @@ try {
   await stopBackend(active, "SIGKILL");
   active = startBackend(port);
   await waitForHealth(active, port);
-  const bootstrapResponse = await fetch(`http://127.0.0.1:${port}/api/bootstrap`);
+  const bootstrapResponse = await fetch(`http://127.0.0.1:${port}/api/bootstrap`, { headers: { "X-MetaCode-Api-Token": apiToken } });
   assert.equal(bootstrapResponse.status, 200);
   const bootstrap = await bootstrapResponse.json();
   assert.ok(bootstrap.workspaces.some((workspace) => workspace.id === created.id && workspace.root === workspaceRoot));
@@ -126,7 +127,7 @@ try {
   active = startBackend(legacyPort, legacyDataRoot);
   await waitForHealth(active, legacyPort);
   for (const id of ["legacy-missing-messages", "legacy-invalid-messages"]) {
-    const sessionResponse = await fetch(`http://127.0.0.1:${legacyPort}/api/sessions/${id}`);
+    const sessionResponse = await fetch(`http://127.0.0.1:${legacyPort}/api/sessions/${id}`, { headers: { "X-MetaCode-Api-Token": apiToken } });
     assert.equal(sessionResponse.status, 200, `${id} must survive startup migration`);
     const session = await sessionResponse.json();
     assert.deepEqual(session.messages, [], `${id} must normalize messages to an empty array`);
