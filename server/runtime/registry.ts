@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { resolveClaudeCommand } from "../engines/claude/runtime.js";
 import type { CliDefinition } from "./types.js";
+import { assertCodexMcpConfiguration } from "./codexCompatibility.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -81,6 +82,16 @@ async function probeExecutable(candidate: string, resolver?: (path: string) => {
   }
 }
 
+async function validateCodexInstallation(_root: string, executable: string) {
+  await assertCodexMcpConfiguration(executable, {
+    name: "workbench-compatibility-probe",
+    transport: "stdio",
+    command: process.execPath,
+    args: ["--version"],
+    required: true
+  });
+}
+
 export const CLI_REGISTRY: Record<string, CliDefinition> = {
   codex: {
     id: "codex",
@@ -93,7 +104,8 @@ export const CLI_REGISTRY: Record<string, CliDefinition> = {
     executableCandidates: codexCandidates,
     bundledRoots: (projectRoot) => [projectRoot],
     systemCandidates: () => commandOnPath("codex"),
-    probe: (candidate) => probeExecutable(candidate)
+    probe: (candidate) => probeExecutable(candidate),
+    validateInstallation: validateCodexInstallation
   },
   claude: {
     id: "claude",

@@ -17,6 +17,7 @@ import { WORKFLOW_ROLE_SKILLS } from "../dist-server/workflows/roles.js";
 import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "../dist-server/workflows/stateFiles.js";
 import { abortWorkflowPlanTransaction, applyWorkflowPlanOperations, commitWorkflowPlanTransaction, createWorkflowPlanTransaction, finishWorkflowPlanTransactionWithoutChange, openWorkflowPlanTransaction, readWorkflowPlanTransaction, replaceWorkflowPlanDraft, validateWorkflowPlanTransaction } from "../dist-server/workflows/plannerTransactions.js";
 import { commitWorkflowNodeResultTransaction, createWorkflowNodeResultTransaction, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, recordWorkflowNodeSelfReview, registerWorkflowNodeChecks, registerWorkflowNodeOutputs, reopenWorkflowNodeResultTransaction, setWorkflowNodeHandoff, setWorkflowNodeOutcome, setWorkflowNodeResultSummary, validateWorkflowNodeResultTransaction, WORKFLOW_NODE_SELF_REVIEW_KEYS } from "../dist-server/workflows/nodeResultTransactions.js";
+import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPlannerToolInstructions, codexWorkflowResultToolInstructions } from "../dist-server/workflows/controlTools.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +117,10 @@ assert.match(planSystemPrompt([], [], "", 3), /不得因为自己的模型身份
 assert.match(planSystemPrompt([], [], "", 3), /auto 不是运行时动态能力比较/);
 assert.match(planSystemPrompt([], [], "", 3), /研究、分析、策划、总结默认 deliverables\/final.md/);
 assert.match(planSystemPrompt([], [], "", 3), /final-delivery/);
+assert.match(codexWorkflowPlannerToolInstructions(), /tools\.mcp__workbench_workflow_plan__workflow_read_plan/);
+assert.match(codexWorkflowPlannerToolInstructions(), /不能调用 tools\.workflow_read_plan/);
+assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_read_node_contract/);
+assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_commit_result/);
 assert.match(planSystemPrompt([], [], "", 3), /验证命令必须具有能力闭环/);
 assert.match(planSystemPrompt([], [], "", 3, { claudeAvailable: true, codexAvailable: false }), /Claude（claude）：可用、可写；Codex（codex）：不可用、可写/);
 const missingProviderReason = normalizeWorkflowPlan({ ...validPlan, nodes: [{ ...validPlan.nodes[0], providerReason: "" }] });
@@ -451,9 +456,11 @@ try {
   const transactionPath = path.join(mcpTransactionRoot, "transaction.json");
   createWorkflowPlanTransaction(transactionPath, { workflowId: "workflow-mcp", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
   const env = Object.fromEntries(Object.entries(process.env).filter((entry) => typeof entry[1] === "string"));
+  const plannerServer = { name: "workbench-workflow-plan", transport: "stdio", command: process.execPath, args: [path.resolve("dist-server/workflows/plannerToolServer.js")], env: { WORKFLOW_PLANNER_TRANSACTION_PATH: transactionPath }, required: true };
+  await assertWorkflowPlannerTools(plannerServer, process.cwd());
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [path.resolve("dist-server/workflows/plannerToolServer.js")],
+    command: plannerServer.command,
+    args: plannerServer.args,
     env: { ...env, WORKFLOW_PLANNER_TRANSACTION_PATH: transactionPath },
     cwd: process.cwd(),
     stderr: "pipe"
@@ -495,8 +502,10 @@ try {
     taskContract: { task: { id: "node-mcp" } }, downstreamNodeIds: []
   });
   const env = Object.fromEntries(Object.entries(process.env).filter((entry) => typeof entry[1] === "string"));
+  const resultServer = { name: "workbench-workflow-result", transport: "stdio", command: process.execPath, args: [path.resolve("dist-server/workflows/nodeResultToolServer.js")], env: { WORKFLOW_NODE_RESULT_TRANSACTION_PATH: transactionPath }, required: true };
+  await assertWorkflowResultTools(resultServer, process.cwd());
   const transport = new StdioClientTransport({
-    command: process.execPath, args: [path.resolve("dist-server/workflows/nodeResultToolServer.js")],
+    command: resultServer.command, args: resultServer.args,
     env: { ...env, WORKFLOW_NODE_RESULT_TRANSACTION_PATH: transactionPath }, cwd: process.cwd(), stderr: "pipe"
   });
   const client = new McpClient({ name: "workflow-node-result-test", version: "1.0.0" });

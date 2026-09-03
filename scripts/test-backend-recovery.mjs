@@ -25,11 +25,11 @@ async function reservePort() {
   });
 }
 
-function startBackend(port) {
+function startBackend(port, home = dataRoot) {
   const output = [];
   const child = spawn(process.execPath, [path.join(projectRoot, "dist-server", "index.js")], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: String(port), METACODE_HOME: dataRoot, WORKSPACE_ROOT: temporaryRoot },
+    env: { ...process.env, PORT: String(port), METACODE_HOME: home, WORKSPACE_ROOT: temporaryRoot },
     windowsHide: true,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"]
@@ -105,7 +105,35 @@ try {
   const database = new DatabaseSync(path.join(dataRoot, "workbench-state.db"), { readOnly: true });
   assert.equal(database.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   database.close();
-  console.log("Backend port conflict, abrupt termination, restart persistence, and database integrity passed");
+
+  const legacyDataRoot = path.join(temporaryRoot, "legacy-data");
+  const legacyTimestamp = new Date().toISOString();
+  await fsp.mkdir(legacyDataRoot, { recursive: true });
+  await fsp.writeFile(path.join(legacyDataRoot, "state.json"), JSON.stringify({
+    settings: {},
+    workspaces: [],
+    sessions: [
+      { id: "legacy-missing-messages", title: "Missing messages", workspaceId: "", codexThreadId: null, createdAt: legacyTimestamp, updatedAt: legacyTimestamp },
+      { id: "legacy-invalid-messages", title: "Invalid messages", workspaceId: "", codexThreadId: null, createdAt: legacyTimestamp, updatedAt: legacyTimestamp, messages: "invalid" }
+    ],
+    delegatedTasks: [],
+    mcpServers: [],
+    skillFolders: [],
+    skillOrganizations: [],
+    delegationProtocolVersion: 2
+  }));
+  const legacyPort = await reservePort();
+  active = startBackend(legacyPort, legacyDataRoot);
+  await waitForHealth(active, legacyPort);
+  for (const id of ["legacy-missing-messages", "legacy-invalid-messages"]) {
+    const sessionResponse = await fetch(`http://127.0.0.1:${legacyPort}/api/sessions/${id}`);
+    assert.equal(sessionResponse.status, 200, `${id} must survive startup migration`);
+    const session = await sessionResponse.json();
+    assert.deepEqual(session.messages, [], `${id} must normalize messages to an empty array`);
+  }
+  await stopBackend(active);
+  active = null;
+  console.log("Backend port conflict, abrupt termination, restart persistence, malformed legacy sessions, and database integrity passed");
 } finally {
   if (active?.child.exitCode === null) active.child.kill("SIGTERM");
   if (active) await waitForExit(active.child).catch(() => undefined);

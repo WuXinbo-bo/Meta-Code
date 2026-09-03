@@ -7,6 +7,7 @@ import { Codex } from "@openai/codex-sdk";
 import { resolveWorkbenchPaths } from "../dist-server/appPaths.js";
 import { SecretVault } from "../dist-server/secretVault.js";
 import { createWorkflowPlanTransaction, readWorkflowPlanTransaction } from "../dist-server/workflows/plannerTransactions.js";
+import { codexWorkflowPlannerToolInstructions } from "../dist-server/workflows/controlTools.js";
 
 const root = process.cwd();
 const paths = resolveWorkbenchPaths(root);
@@ -42,6 +43,7 @@ try {
   const normalizedBase = String(settings.baseUrl || "https://api.openai.com").trim().replace(/\/+$/, "").replace(/\/(?:models|responses|chat\/completions)$/i, "");
   const baseUrl = /\/v1$/i.test(normalizedBase) ? normalizedBase : `${normalizedBase}/v1`;
   const codex = new Codex({
+    ...(process.env.CODEX_PATH_OVERRIDE ? { codexPathOverride: process.env.CODEX_PATH_OVERRIDE } : {}),
     apiKey: settings.apiKey,
     env: { ...process.env, CODEX_API_KEY: settings.apiKey, OPENAI_API_KEY: settings.apiKey },
     config: {
@@ -59,7 +61,7 @@ try {
     }
   });
   const thread = codex.startThread({ workingDirectory: temp, skipGitRepoCheck: true, model: settings.model || undefined, modelReasoningEffort: settings.reasoningEffort, sandboxMode: "workspace-write", approvalPolicy: "never", networkAccessEnabled: false });
-  const { events } = await thread.runStreamed("这是内部规划写入权限链测试。必须先调用 workflow_read_plan，然后调用 workflow_apply_operations，只用 set_plan_fields 将 title 改为‘Codex 写入权限链通过’；接着调用 workflow_validate_draft，校验通过后调用 workflow_commit_candidate。不要调用其他工具。");
+  const { events } = await thread.runStreamed(`这是内部规划写入权限链测试。必须先读取计划，然后只用 set_plan_fields 将 title 改为‘Codex 写入权限链通过’；接着校验草稿，校验通过后提交候选计划。不要调用其他工具。\n\n${codexWorkflowPlannerToolInstructions()}`);
   const diagnostics = [];
   for await (const event of events) {
     if (event.type.startsWith("item.")) diagnostics.push({ event: event.type, type: event.item?.type, status: event.item?.status, error: event.item?.error, tool: event.item?.tool, server: event.item?.server, text: String(event.item?.text || "").slice(0, 500), result: JSON.stringify(event.item?.result || null).slice(0, 500) });

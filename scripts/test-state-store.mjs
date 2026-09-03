@@ -21,6 +21,8 @@ const initial = {
 
 let store = new WorkbenchStateStore(root);
 assert.equal(store.db.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+assert.equal(store.db.prepare("PRAGMA user_version").get().user_version, 2);
+assert.equal(store.db.prepare("SELECT value FROM state_meta WHERE key = 'dataSchemaVersion'").get().value, "2");
 const first = store.save(initial);
 assert.deepEqual(first.sessionIds, ["session-1"]);
 assert.deepEqual(first.delegatedParentSessionIds, ["session-1"]);
@@ -76,10 +78,29 @@ legacyDb.close();
 const legacyStore = new WorkbenchStateStore(legacyRoot);
 const migrated = legacyStore.load();
 assert.equal(migrated.sessions[0].messages[0].text, "preserved");
+assert.equal(legacyStore.db.prepare("PRAGMA user_version").get().user_version, 2);
+assert.equal(legacyStore.db.prepare("SELECT value FROM state_meta WHERE key = 'migrationId'").get().value, "v1-to-v2");
 assert.equal(JSON.parse(legacyStore.db.prepare("SELECT json FROM sessions WHERE id = ?").get("legacy-session").json).messages, undefined);
 assert.equal(legacyStore.db.prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ?").get("legacy-session").count, 1);
 legacyStore.close();
+const migrationBackups = fs.readdirSync(path.join(legacyRoot, "backups", "migrations"));
+assert.equal(migrationBackups.length, 1);
+const migrationBackup = new DatabaseSync(path.join(legacyRoot, "backups", "migrations", migrationBackups[0]), { readOnly: true });
+assert.equal(JSON.parse(migrationBackup.prepare("SELECT json FROM sessions WHERE id = ?").get("legacy-session").json).messages[0].text, "preserved");
+migrationBackup.close();
 fs.rmSync(legacyRoot, { recursive: true, force: true });
+
+const futureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-state-future-"));
+const futureDb = new DatabaseSync(path.join(futureRoot, "workbench-state.db"));
+futureDb.exec("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE settings (id INTEGER PRIMARY KEY, json TEXT NOT NULL); PRAGMA user_version = 99");
+futureDb.prepare("INSERT INTO state_meta VALUES ('dataSchemaVersion', '99')").run();
+futureDb.close();
+assert.throws(() => new WorkbenchStateStore(futureRoot), /数据版本 99.*拒绝写入/);
+const unchangedFutureDb = new DatabaseSync(path.join(futureRoot, "workbench-state.db"), { readOnly: true });
+assert.equal(unchangedFutureDb.prepare("PRAGMA user_version").get().user_version, 99);
+assert.equal(unchangedFutureDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'").get().count, 2);
+unchangedFutureDb.close();
+fs.rmSync(futureRoot, { recursive: true, force: true });
 
 const faultRoot = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-state-faults-"));
 const faultStore = new WorkbenchStateStore(faultRoot);

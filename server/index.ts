@@ -38,6 +38,7 @@ import { WorkbenchEventHub } from "./eventHub.js";
 import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
 import { AppUpdateService } from "./appUpdate/service.js";
 import { CliRuntimeManager } from "./runtime/manager.js";
+import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
 import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
 import type { CliRuntimeId, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
@@ -47,6 +48,7 @@ import { normalizeWorkflowPlan, parsePlanJson, plannerTurnPrompt, planSystemProm
 import { failedDependencyReason, missingRequiredArtifacts, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowNodeResultGateIssues, workflowResultArtifactPaths, workflowRetryLimit } from "./workflows/execution.js";
 import { abortWorkflowPlanTransaction, openWorkflowPlanTransaction, readWorkflowPlanTransaction } from "./workflows/plannerTransactions.js";
 import { commitWorkflowNodeResultTransaction, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, type WorkflowNodeResultContract } from "./workflows/nodeResultTransactions.js";
+import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPlannerToolInstructions, codexWorkflowResultToolInstructions } from "./workflows/controlTools.js";
 import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommands } from "./workflows/enforcement.js";
 import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent, type WorkflowLogContext } from "./workflows/logs.js";
 import { WORKFLOW_ROLE_SKILLS } from "./workflows/roles.js";
@@ -974,9 +976,10 @@ async function ensureRuntime() {
     const legacyOwnerUserId = auth.getOwnerUserId() || "legacy-unassigned";
     const sessions = Array.isArray(parsed.sessions)
         ? parsed.sessions.map((legacySession) => {
-          const session = legacySession as Partial<Session> & Pick<Session, "id" | "title" | "workspaceId" | "codexThreadId" | "createdAt" | "updatedAt" | "messages">;
-          let sessionMigrated = false;
-          const messages = (Array.isArray(session.messages) ? session.messages : []).map((message, index) => {
+          const session = legacySession as Partial<Session> & Pick<Session, "id" | "title" | "workspaceId" | "codexThreadId" | "createdAt" | "updatedAt">;
+          const storedMessages = Array.isArray(session.messages) ? session.messages : [];
+          let sessionMigrated = !Array.isArray(session.messages);
+          const messages = storedMessages.map((message, index) => {
             const normalized = message as Message;
             if (!normalized.id) { normalized.id = `legacy-message-${index}`; }
             if (!normalized.createdAt) { normalized.createdAt = session.updatedAt || new Date().toISOString(); }
@@ -984,7 +987,7 @@ async function ensureRuntime() {
             if (compactStoredMessage(normalized)) sessionMigrated = true;
             return normalized;
           }).filter((message) => !isGarbledInternalInput(message));
-          if (messages.length !== session.messages.length) sessionMigrated = true;
+          if (messages.length !== storedMessages.length) sessionMigrated = true;
           let status: SessionStatus = session.status || (messages.length ? "completed" : "idle");
           const scope = normalizeSessionScope(session.scopeKind, session.workspaceId);
           const pendingInputs = normalizePendingInputs<Attachment, SkillPolicies>(session.pendingInputs, session.updatedAt || new Date().toISOString());
@@ -1025,7 +1028,7 @@ async function ensureRuntime() {
             typeof session.revision !== "number" || !session.ownerUserId || !session.engine
             || session.engineSessionId === undefined || session.claudeInstructionsInjected === undefined || session.scopeKind === undefined
             || (scope.scopeKind === "standalone" && session.standaloneExecutionMode === undefined)
-            || messages.length !== session.messages.length || legacyTaskMode !== undefined
+            || messages.length !== storedMessages.length || legacyTaskMode !== undefined
           ) {
             sessionMigrated = true;
           }
@@ -1532,7 +1535,7 @@ function mcpServersForNode(workspace: Workspace, names: string[]) {
 }
 
 function codexMcpConfigForWorkspace(workspace: Workspace, selectedNames?: string[], additionalServers: WorkbenchMcpServer[] = []) {
-  return codexMcpConfig([...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace)), ...additionalServers]);
+  return codexMcpConfig([...additionalServers, ...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace))]);
 }
 
 const CLAUDE_WORKFLOW_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"] as const;
@@ -1549,11 +1552,20 @@ function packagedWorkflowToolArgs(compiledName: string, sourceName: string) {
 }
 
 function workflowPlannerToolServer(transactionPath: string): WorkbenchMcpServer {
-  return { name: "workbench-workflow-plan", transport: "stdio", command: process.execPath, args: packagedWorkflowToolArgs("plannerToolServer.js", "plannerToolServer.ts"), env: { WORKFLOW_PLANNER_TRANSACTION_PATH: transactionPath } };
+  return { name: "workbench-workflow-plan", transport: "stdio", command: process.execPath, args: packagedWorkflowToolArgs("plannerToolServer.js", "plannerToolServer.ts"), env: { WORKFLOW_PLANNER_TRANSACTION_PATH: transactionPath }, required: true };
 }
 
 function workflowNodeResultToolServer(transactionPath: string): WorkbenchMcpServer {
-  return { name: "workbench-workflow-result", transport: "stdio", command: process.execPath, args: packagedWorkflowToolArgs("nodeResultToolServer.js", "nodeResultToolServer.ts"), env: { WORKFLOW_NODE_RESULT_TRANSACTION_PATH: transactionPath } };
+  return { name: "workbench-workflow-result", transport: "stdio", command: process.execPath, args: packagedWorkflowToolArgs("nodeResultToolServer.js", "nodeResultToolServer.ts"), env: { WORKFLOW_NODE_RESULT_TRANSACTION_PATH: transactionPath }, required: true };
+}
+
+async function assertCodexWorkflowControlPlane(server: WorkbenchMcpServer, cwd: string, kind: "planner" | "result") {
+  const runtime = await detectCodexRuntime();
+  if (!runtime.available || !runtime.path) throw new Error("Codex CLI 不可用，请先在设置中检测或安装");
+  await Promise.all([
+    kind === "planner" ? assertWorkflowPlannerTools(server, cwd) : assertWorkflowResultTools(server, cwd),
+    assertCodexMcpConfiguration(runtime.path, server)
+  ]);
 }
 
 async function workflowPlannerMcpConfigPath(workspace: Workspace, transactionPath: string) {
@@ -5276,12 +5288,15 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
   }
   if (!state.settings.apiKey) throw new Error("请先配置 Codex / OpenAI API Key");
   const plannerDirectory = path.dirname(transactionPath);
+  const plannerServer = workflowPlannerToolServer(transactionPath);
+  await assertCodexWorkflowControlPlane(plannerServer, plannerDirectory, "planner");
   const plannerThreadOptions = { ...threadOptions({ ...workspace, root: plannerDirectory }, state.settings), workingDirectory: plannerDirectory, sandboxMode: "workspace-write" as const, approvalPolicy: "never" as const, networkAccessEnabled: false };
   let output = "";
   let plannerToolAuthorizationError = "";
-  let prompt = plannerPrompt;
+  const codexPlannerInstructions = codexWorkflowPlannerToolInstructions();
+  let prompt = `${plannerPrompt}\n\n${codexPlannerInstructions}`;
   for (let recoveryAttempt = 0; recoveryAttempt <= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS; recoveryAttempt += 1) {
-    const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [workflowPlannerToolServer(transactionPath)]);
+    const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [plannerServer]);
     const terminal = await runCodexSessionTurn({
       createThread: (threadId) => threadId ? codex.resumeThread(threadId, plannerThreadOptions) : codex.startThread(plannerThreadOptions),
       threadId: engineSessionId,
@@ -5308,7 +5323,7 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
     const reason = terminal.failure || "规划回合已结束，但事务尚未提交";
     const recoverable = !terminal.failed || retryableWorkflowPlannerFailure(reason);
     if (!recoverable || recoveryAttempt >= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS) throw new Error(reason || "Codex 规划 Agent 执行失败");
-    prompt = workflowPlannerRecoveryPrompt(reason);
+    prompt = `${workflowPlannerRecoveryPrompt(reason)}\n\n${codexPlannerInstructions}`;
     onActivity({ type: "status", sourceId: `planner-recovery:${recoveryAttempt + 1}`, text: `规划通道未完整结束，正在从事务草稿自动续跑（${recoveryAttempt + 1}/${WORKFLOW_PLANNER_RECOVERY_ATTEMPTS}）` });
   }
   if (plannerToolAuthorizationError) throw new Error(`规划工具被 Codex 执行权限策略拒绝：${plannerToolAuthorizationError}`);
@@ -5686,12 +5701,13 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
       const resultServer = workflowNodeResultToolServer(resultTransactionPath);
       try {
         if (workflowExecutionProvider(current) === "codex") {
+          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
           const codex = buildCodex(state.settings, undefined, true, workspace, [], [resultServer]);
           const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
           const repairOptions = { ...delegatedThreadOptions(workflowWorkspace, state.settings), sandboxMode: "read-only" as const };
           const terminal = await runCodexSessionTurn({
             createThread: () => codex.startThread(repairOptions),
-            prompt: repairPrompt,
+            prompt: `${repairPrompt}\n\n${codexWorkflowResultToolInstructions()}`,
             signal: controller.signal,
             missingCompletionMessage: "Codex 未完成机器交接修复",
             terminalReason: "Codex 机器交接修复已到达终态",
@@ -5776,7 +5792,9 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
       let engineError: unknown;
       try {
         if (workflowExecutionProvider(current) === "codex") {
-          const codex = buildCodex(state.settings, undefined, true, workspace, current.mcpServers, [workflowNodeResultToolServer(resultTransactionPath)]);
+          const resultServer = workflowNodeResultToolServer(resultTransactionPath);
+          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
+          const codex = buildCodex(state.settings, undefined, true, workspace, current.mcpServers, [resultServer]);
           const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
           const threadOptions = { ...delegatedThreadOptions(workflowWorkspace, state.settings), sandboxMode: current.workspaceAccess === "write" ? "danger-full-access" as const : "read-only" as const };
           const previousThreadId = current.engineThreadId;
@@ -5797,7 +5815,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
           const terminal = await runCodexSessionTurn({
             createThread: (threadId) => threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions),
             threadId: contextStrategy.threadId,
-            prompt: recoveryPrompt,
+            prompt: `${recoveryPrompt}\n\n${codexWorkflowResultToolInstructions()}`,
             signal: controller.signal,
             missingCompletionMessage: "Codex 节点未返回完成状态",
             terminalReason: "Codex 节点已到达终态",

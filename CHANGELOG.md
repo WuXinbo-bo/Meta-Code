@@ -4,6 +4,11 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ## [Unreleased]
 
+### Fixed
+
+- State upgrades now create a consistent pre-migration backup, run transactionally, and reject unsupported future schemas before writing.
+- A local compatibility snapshot tool can reconstruct version 0.1.0 session storage without modifying current user data.
+
 ## [0.1.1] - 2026-09-02
 
 ### Added

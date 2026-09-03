@@ -8,6 +8,7 @@ export type WorkbenchMcpServer = {
   url?: string;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  required?: boolean;
 };
 
 export type CodexConfigValue = string | number | boolean | CodexConfigValue[] | CodexConfigObject;
@@ -65,7 +66,7 @@ export function codexMcpConfig(servers: WorkbenchMcpServer[]): { config: CodexCo
     entries.push([name, {
       ...transport,
       enabled: true,
-      required: false,
+      required: server.required === true,
       startup_timeout_sec: 30,
       tool_timeout_sec: 300
     }]);

@@ -84,6 +84,7 @@ export type CliDefinition = {
   systemCandidates(): Promise<string[]>;
   probe(candidate: string): Promise<string>;
   finalizeInstallation?(root: string): Promise<void>;
+  validateInstallation?(root: string, executable: string): Promise<void>;
 };
 
 export type RuntimeInstallProgress = {

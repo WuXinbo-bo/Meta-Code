@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 import { loadAppUpdateConfig } from "../server/appUpdate/config.ts";
 import { parseAppUpdateManifest } from "../server/appUpdate/manifest.ts";
 import { createReleaseManifest, writeReleaseManifest } from "../server/appUpdate/release.ts";
+import { CURRENT_STATE_SCHEMA_VERSION } from "../server/stateStore.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const config = loadAppUpdateConfig(root);
 assert.equal(config.productName, "Meta Code");
 assert.equal(config.currentVersion, "0.1.1", "发布版本必须保持为 0.1.1");
+assert.equal(config.dataSchemaVersion, CURRENT_STATE_SCHEMA_VERSION, "发布清单的数据 Schema 必须与状态存储一致");
 
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "meta-code-release-"));
 try {

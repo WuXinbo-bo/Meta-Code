@@ -326,7 +326,9 @@ export class CliRuntimeManager {
         }
         const finalRoot = path.join(runtimeRoot, "versions", installedVersion);
         this.report({ runtimeId: id, phase: "verifying", version: installedVersion, message: "正在校验 CLI 可执行文件", startedAt, active: true, resumable: false });
-        if (!await this.firstWorkingCandidate(definition, staging)) throw new Error(`${definition.label} 已下载，但可执行文件校验失败`);
+        const workingCandidate = await this.firstWorkingCandidate(definition, staging);
+        if (!workingCandidate) throw new Error(`${definition.label} 已下载，但可执行文件校验失败`);
+        await definition.validateInstallation?.(staging, workingCandidate);
         await fsp.mkdir(path.dirname(finalRoot), { recursive: true });
         await publishDirectory(staging, finalRoot);
         await this.activate(id, installedVersion);

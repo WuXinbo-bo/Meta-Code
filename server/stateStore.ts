@@ -2,6 +2,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+export const CURRENT_STATE_SCHEMA_VERSION = 2;
+export const MIN_STATE_SCHEMA_VERSION = 1;
+
+const STATE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, position INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS session_messages (session_id TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (session_id, id), FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE);
+  CREATE TABLE IF NOT EXISTS delegated_tasks (id TEXT PRIMARY KEY, position INTEGER NOT NULL, updated_at TEXT NOT NULL, parent_session_id TEXT, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS mcp_servers (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS skill_folders (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS skill_organizations (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS capability_profiles (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS provider_connections (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
+  CREATE INDEX IF NOT EXISTS idx_delegated_parent ON delegated_tasks(parent_session_id);
+  CREATE INDEX IF NOT EXISTS idx_session_messages_position ON session_messages(session_id, position);
+`;
+
 type JsonRecord = object;
 type SessionMessageRecord = JsonRecord & { id: string };
 type SessionRecord = JsonRecord & { id: string; revision?: number; updatedAt?: string; messages?: SessionMessageRecord[] };
@@ -81,6 +100,61 @@ function messageSnapshotEquals(entry: MessageCacheEntry, item: SessionMessageRec
   return keys.length === previousKeys.length && keys.every((key) => entry.snapshot[key] === current[key]);
 }
 
+function tableExists(db: DatabaseSync, table: string) {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function declaredSchemaVersion(db: DatabaseSync) {
+  const pragmaVersion = Number((db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined)?.user_version || 0);
+  if (!tableExists(db, "state_meta")) return pragmaVersion;
+  const row = db.prepare("SELECT value FROM state_meta WHERE key = 'dataSchemaVersion'").get() as { value?: string } | undefined;
+  const metadataVersion = Number(row?.value || 0);
+  return Math.max(pragmaVersion, Number.isFinite(metadataVersion) ? metadataVersion : 0);
+}
+
+function writerVersion() {
+  return process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development";
+}
+
+function setStateMetadata(db: DatabaseSync, input: { migrationId?: string; migrationState?: string } = {}) {
+  const upsert = db.prepare("INSERT INTO state_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  upsert.run("dataSchemaVersion", String(CURRENT_STATE_SCHEMA_VERSION));
+  upsert.run("lastWriterAppVersion", writerVersion());
+  if (input.migrationId) upsert.run("migrationId", input.migrationId);
+  if (input.migrationState) upsert.run("migrationState", input.migrationState);
+}
+
+function createMigrationBackup(db: DatabaseSync, runtimeDir: string, fromVersion: number) {
+  const backupDir = path.join(runtimeDir, "backups", "migrations");
+  fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupFile = path.join(backupDir, `workbench-state-v${fromVersion}-to-v${CURRENT_STATE_SCHEMA_VERSION}-${stamp}.db`);
+  db.prepare("VACUUM INTO ?").run(backupFile);
+  const backup = new DatabaseSync(backupFile, { readOnly: true });
+  try {
+    const integrity = backup.prepare("PRAGMA integrity_check").get() as { integrity_check?: string } | undefined;
+    if (integrity?.integrity_check !== "ok") throw new Error("迁移备份完整性检查失败");
+  } finally {
+    backup.close();
+  }
+  return backupFile;
+}
+
+function migrateInlineSessionMessages(db: DatabaseSync) {
+  const rows = db.prepare("SELECT id, json FROM sessions ORDER BY position ASC").all() as Array<{ id: string; json: string }>;
+  const updateSession = db.prepare("UPDATE sessions SET json = ? WHERE id = ?");
+  const insertMessage = db.prepare("INSERT INTO session_messages (session_id, id, position, json) VALUES (?, ?, ?, ?) ON CONFLICT(session_id, id) DO UPDATE SET position = excluded.position, json = excluded.json");
+  for (const row of rows) {
+    const session = JSON.parse(row.json) as SessionRecord;
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    messages.forEach((message, position) => {
+      const normalized = { ...message, id: message.id || `legacy-message-${position}` };
+      insertMessage.run(row.id, normalized.id, position, JSON.stringify(messageSnapshot(normalized)));
+    });
+    updateSession.run(sessionMetadataJson(session), row.id);
+  }
+}
+
 export class WorkbenchStateStore {
   readonly db: DatabaseSync;
   readonly file: string;
@@ -101,25 +175,44 @@ export class WorkbenchStateStore {
     fs.mkdirSync(runtimeDir, { recursive: true });
     this.file = path.join(runtimeDir, "workbench-state.db");
     this.db = new DatabaseSync(this.file);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA busy_timeout = 5000;
-      PRAGMA foreign_keys = ON;
-      CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, position INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_messages (session_id TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY (session_id, id), FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE);
-      CREATE TABLE IF NOT EXISTS delegated_tasks (id TEXT PRIMARY KEY, position INTEGER NOT NULL, updated_at TEXT NOT NULL, parent_session_id TEXT, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_servers (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS skill_folders (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS skill_organizations (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS capability_profiles (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS provider_connections (id TEXT PRIMARY KEY, position INTEGER NOT NULL, json TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS idx_delegated_parent ON delegated_tasks(parent_session_id);
-      CREATE INDEX IF NOT EXISTS idx_session_messages_position ON session_messages(session_id, position);
-    `);
+    try {
+      this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      const hasApplicationTables = tableExists(this.db, "settings") || tableExists(this.db, "sessions");
+      const declaredVersion = declaredSchemaVersion(this.db);
+      const effectiveVersion = declaredVersion || (hasApplicationTables ? (tableExists(this.db, "session_messages") ? 2 : 1) : CURRENT_STATE_SCHEMA_VERSION);
+      if (effectiveVersion > CURRENT_STATE_SCHEMA_VERSION) {
+        throw new Error(`数据版本 ${effectiveVersion} 高于当前程序支持的 ${CURRENT_STATE_SCHEMA_VERSION}，已拒绝写入；请使用更新版本的 Meta Code`);
+      }
+      if (effectiveVersion < MIN_STATE_SCHEMA_VERSION) throw new Error(`不支持的数据版本：${effectiveVersion}`);
+
+      if (hasApplicationTables && effectiveVersion < CURRENT_STATE_SCHEMA_VERSION) {
+        const backupFile = createMigrationBackup(this.db, runtimeDir, effectiveVersion);
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.exec(STATE_SCHEMA_SQL);
+          if (effectiveVersion === 1) migrateInlineSessionMessages(this.db);
+          setStateMetadata(this.db, { migrationId: `v${effectiveVersion}-to-v${CURRENT_STATE_SCHEMA_VERSION}`, migrationState: "completed" });
+          this.db.exec(`PRAGMA user_version = ${CURRENT_STATE_SCHEMA_VERSION}; COMMIT`);
+        } catch (error) {
+          try { this.db.exec("ROLLBACK"); } catch { /* The transaction already ended. */ }
+          throw new Error(`数据升级失败，原数据未修改；迁移前备份位于 ${backupFile}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.db.exec(STATE_SCHEMA_SQL);
+          setStateMetadata(this.db);
+          this.db.exec(`PRAGMA user_version = ${CURRENT_STATE_SCHEMA_VERSION}; COMMIT`);
+        } catch (error) {
+          try { this.db.exec("ROLLBACK"); } catch { /* The transaction already ended. */ }
+          throw error;
+        }
+      }
+      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   hasState() {
@@ -202,6 +295,7 @@ export class WorkbenchStateStore {
         undefined,
         (item) => { if (item.ownerUserId) changes.providerConnectionOwnerUserIds.push(item.ownerUserId); });
       this.db.prepare("INSERT INTO state_meta (key, value) VALUES ('delegationProtocolVersion', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(state.delegationProtocolVersion || 2));
+      setStateMetadata(this.db);
       this.db.exec("COMMIT");
       changes.delegatedParentSessionIds = [...new Set(changes.delegatedParentSessionIds)];
       return changes;

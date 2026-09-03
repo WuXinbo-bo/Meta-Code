@@ -109,6 +109,7 @@ async function startBackend() {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       NODE_ENV: "production",
+      METACODE_APP_VERSION: app.getVersion(),
       PORT: String(backendPort),
       METACODE_HOME: dataHome,
       METACODE_DESKTOP: "1",
