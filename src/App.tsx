@@ -2465,6 +2465,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (data || !notice?.message) return;
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    let retryAttempt = 0;
+
+    const retryBootstrap = async () => {
+      try {
+        await refresh();
+        if (!cancelled) setNotice("");
+      } catch {
+        if (cancelled) return;
+        retryAttempt += 1;
+        retryTimer = window.setTimeout(retryBootstrap, Math.min(1_000 * 2 ** retryAttempt, 8_000));
+      }
+    };
+
+    retryTimer = window.setTimeout(retryBootstrap, 1_000);
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [Boolean(data), notice?.message]);
+
+  useEffect(() => {
     if (view !== "agents") return;
     let stopped = false;
     const syncSkills = async () => {
