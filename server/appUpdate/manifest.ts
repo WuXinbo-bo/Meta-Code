@@ -53,7 +53,18 @@ export function manifestDigest(manifest: AppUpdateManifest) {
 function validRange(range: { min: number; max: number }) { return range.min <= range.max; }
 
 export function parseAppUpdateManifest(input: unknown, config: AppUpdateConfig): AppUpdateManifest {
-  const manifest = manifestSchema.parse(input) as AppUpdateManifest;
+  const parsed = manifestSchema.safeParse(input);
+  if (!parsed.success) {
+    const suppliedVersion = input && typeof input === "object" && "schemaVersion" in input
+      ? Number((input as { schemaVersion?: unknown }).schemaVersion)
+      : 0;
+    if (suppliedVersion > 0 && suppliedVersion < 2) {
+      throw new Error(`远程更新清单仍为旧版 v${suppliedVersion}，当前客户端要求带签名和兼容范围的 v2 清单；已安全拒绝该更新，请等待发布方替换 latest.json`);
+    }
+    const fields = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "root"))].slice(0, 6);
+    throw new Error(`远程更新清单格式无效${fields.length ? `（字段：${fields.join("、")}）` : ""}；已安全拒绝该更新`);
+  }
+  const manifest = parsed.data as AppUpdateManifest;
   if (manifest.productId !== config.productId) throw new Error(`更新清单产品不匹配：${manifest.productId}`);
   if (!validRange(manifest.compatibility.data.readsFrom) || !validRange(manifest.compatibility.data.migratesFrom) || !validRange(manifest.compatibility.launcherProtocol)) throw new Error("更新清单的兼容范围无效");
   const encodedKey = config.manifestSigning.trustedKeys[manifest.signature.keyId];

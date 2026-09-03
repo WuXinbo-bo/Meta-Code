@@ -42,6 +42,16 @@ try {
   await writeReleaseManifest(output, manifest);
   const persisted = parseAppUpdateManifest(JSON.parse(await fs.readFile(output, "utf8")), config);
   assert.deepEqual(persisted, manifest);
+  assert.throws(
+    () => parseAppUpdateManifest({ schemaVersion: 1, productId: "meta-code", version: "0.1.1" }, config),
+    /旧版 v1.*v2 清单.*安全拒绝/,
+    "legacy manifests must produce an actionable error instead of leaking validator internals"
+  );
+  assert.throws(
+    () => parseAppUpdateManifest({ schemaVersion: 2, productId: "meta-code" }, config),
+    /清单格式无效.*字段/,
+    "malformed current manifests must report bounded field names"
+  );
   await assert.rejects(async () => parseAppUpdateManifest({ ...manifest, productId: "other" }, config), /产品不匹配/);
   await assert.rejects(async () => parseAppUpdateManifest({ ...manifest, releaseNotes: "tampered" }, config), /签名验证失败/);
   const { signature: _signature, ...unsigned } = manifest;
