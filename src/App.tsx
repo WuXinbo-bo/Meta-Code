@@ -386,7 +386,7 @@ type RuntimeInstallProgress = {
   runtimeId: CliRuntimeId;
   operationId?: string;
   sequence?: number;
-  phase: "started" | "probing" | "downloading" | "installing" | "verifying" | "activated" | "failed" | "interrupted";
+  phase: "started" | "probing" | "downloading" | "installing" | "verifying" | "certifying" | "activated" | "failed" | "interrupted";
   message: string;
   version?: string;
   startedAt: string;

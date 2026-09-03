@@ -41,7 +41,7 @@ import { AppUpdateService } from "./appUpdate/service.js";
 import { CliRuntimeManager } from "./runtime/manager.js";
 import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
 import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
-import type { CliRuntimeId, RuntimeStatus } from "./runtime/types.js";
+import type { CliRuntimeId, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
 import { WorkflowRepository } from "./workflows/repository.js";
 import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./workflows/stateFiles.js";
@@ -846,15 +846,49 @@ async function getClaudeRuntime(force = false, allowStale = false) {
   return claudeRuntimeDetectionPromise;
 }
 
-async function installCliRuntime(runtimeId: CliRuntimeId, requestedVersion?: string) {
-  const status = await cliRuntimeManager.install(runtimeId, requestedVersion);
+function runtimeProviderIds(runtimeId: string) {
+  return new Set(agentAdapterRegistry.list().filter((provider) => provider.runtimeId === runtimeId).map((provider) => provider.id));
+}
+
+function runtimeUsage(runtimeId: string) {
+  const providers = runtimeProviderIds(runtimeId);
+  const sessions = state.sessions.filter((session) => session.status === "running" && providers.has(session.engine)).map((session) => session.id);
+  const delegated = state.delegatedTasks.filter((task) => ["queued", "running"].includes(task.status) && providers.has(task.provider)).map((task) => task.id);
+  const workflows = workflowRepository.listAll().filter((workflow) => {
+    if (!["planning", "queued", "running", "integrating"].includes(workflow.status)) return false;
+    return providers.has(workflow.plannerEngine) || workflow.nodes.some((node) => node.provider === "auto" || providers.has(node.provider));
+  }).map((workflow) => workflow.id);
+  return { sessions, delegated, workflows, total: sessions.length + delegated.length + workflows.length };
+}
+
+function assertRuntimeIdle(runtimeId: string) {
+  const usage = runtimeUsage(runtimeId);
+  if (usage.total) throw new Error(`${cliRuntimeManager.definition(runtimeId).label} 正被 ${usage.total} 个任务或工作流使用，请等待运行结束后再切换版本`);
+}
+
+async function installCliRuntime(runtimeId: CliRuntimeId, requestedVersion?: string, options: RuntimeInstallOptions = {}) {
+  assertRuntimeIdle(runtimeId);
+  const previousVersion = cliRuntimeManager.activeVersion(runtimeId);
+  const previousRuntime = structuredClone(state.settings.runtime);
+  const status = await cliRuntimeManager.install(runtimeId, requestedVersion, {
+    ...options,
+    ensureCanActivate: async () => { assertRuntimeIdle(runtimeId); await options.ensureCanActivate?.(); }
+  });
   if (!status.available || status.source !== "runtime") throw new Error(`${cliRuntimeManager.definition(runtimeId).label} 已下载，但未找到可执行文件`);
-  state.settings.runtime.selections[runtimeId] = { mode: "managed", systemPath: "", customPath: "" };
-  cliRuntimeManager.configure(state.settings.runtime);
-  invalidateRuntimeDetection();
-  await saveState();
-  eventHub.publish("runtime.changed", { runtimeId, status: publicRuntimeStatus(status) });
-  return status;
+  try {
+    state.settings.runtime.selections[runtimeId] = { mode: "managed", systemPath: "", customPath: "" };
+    cliRuntimeManager.configure(state.settings.runtime);
+    invalidateRuntimeDetection();
+    await saveState();
+    eventHub.publish("runtime.changed", { runtimeId, status: publicRuntimeStatus(status) });
+    return status;
+  } catch (error) {
+    state.settings.runtime = previousRuntime;
+    cliRuntimeManager.configure(previousRuntime);
+    await cliRuntimeManager.restoreActivation(runtimeId, previousVersion).catch(() => undefined);
+    invalidateRuntimeDetection();
+    throw error;
+  }
 }
 
 async function startCliRuntimeInstall(runtimeId: CliRuntimeId, requestedVersion?: string) {
@@ -3751,10 +3785,10 @@ function providerConnectionFor(providerId: string, ownerUserId: string) {
   return profiles.find((profile) => profile.isDefault) || profiles[0];
 }
 
-async function launchInstalledAcpProvider(agent: import("./providers/acp/registry.js").AcpRegistryAgent, ownerUserId: string, input?: AcpMainSessionInput) {
-  const status = await cliRuntimeManager.detect(agent.id);
-  if (!status.available) throw new Error(`${agent.name} CLI 不可用：${status.message}`);
-  const launch = acpLaunchSpecForRuntime(agent, status.path);
+async function launchInstalledAcpProvider(agent: import("./providers/acp/registry.js").AcpRegistryAgent, ownerUserId: string, input?: AcpMainSessionInput, executableOverride = "") {
+  const status = executableOverride ? null : await cliRuntimeManager.detect(agent.id);
+  if (!executableOverride && !status?.available) throw new Error(`${agent.name} CLI 不可用：${status?.message || "未检测到运行时"}`);
+  const launch = acpLaunchSpecForRuntime(agent, executableOverride || status!.path);
   const profile = providerConnectionFor(agent.id, ownerUserId);
   const managedEnv = providerManagedEnvironment(agent.id, profile?.authMode, path.join(APP_PATHS.dataDir, "providers"));
   const connectionEnv = providerActiveEnvironment(agent.id, profile?.authMethodId, providerConnectionEnvironment(profile));
@@ -7629,8 +7663,8 @@ function setMarketInstallState(providerId: string, phase: MarketInstallState["ph
   return state;
 }
 
-async function handshakeAcpProvider(agent: import("./providers/acp/registry.js").AcpRegistryAgent, ownerUserId: string) {
-  const launch = await launchInstalledAcpProvider(agent, ownerUserId);
+async function handshakeAcpProvider(agent: import("./providers/acp/registry.js").AcpRegistryAgent, ownerUserId: string, executableOverride = "") {
+  const launch = await launchInstalledAcpProvider(agent, ownerUserId, undefined, executableOverride);
   const services = new RestrictedAcpClientServices({ roots: [ROOT], allowWrite: false, allowTerminal: false, autoApprove: false });
   const backend = new AcpStdioBackend(agent.id, launch, services);
   try { return await backend.start(AbortSignal.timeout(20_000)); }
@@ -7642,17 +7676,19 @@ async function installMarketProvider(providerId: string, ownerUserId: string, re
   const definition = createAcpRuntimeDefinition(agent);
   if (!definition) throw new Error(`${agent.name} 当前无法由工作台安装`);
   cliRuntimeManager.registerDefinition(definition);
-  state.settings.runtime = normalizeRuntimeConfiguration({
-    ...state.settings.runtime,
-    selections: { ...state.settings.runtime.selections, [agent.id]: { mode: "managed", systemPath: "", customPath: "" } }
-  });
-  cliRuntimeManager.configure(state.settings.runtime);
+  const previousVersion = cliRuntimeManager.activeVersion(agent.id);
+  const previousRuntime = structuredClone(state.settings.runtime);
   const startedAt = new Date().toISOString();
   setMarketInstallState(agent.id, "installing", `正在安装 ${agent.name}`, startedAt);
   try {
-    const status = await installCliRuntime(agent.id, requestedVersion || agent.version);
-    setMarketInstallState(agent.id, "verifying", "CLI 已下载，正在进行 ACP 协议握手", startedAt);
-    const initialized = await handshakeAcpProvider(agent, ownerUserId);
+    let initialized: Awaited<ReturnType<typeof handshakeAcpProvider>> | null = null;
+    const status = await installCliRuntime(agent.id, requestedVersion || agent.version, {
+      certify: async (candidate) => {
+        setMarketInstallState(agent.id, "verifying", "CLI 已下载，正在进行 ACP 协议握手", startedAt);
+        initialized = await handshakeAcpProvider(agent, ownerUserId, candidate.executable);
+      }
+    });
+    if (!initialized) throw new Error("ACP 协议认证未完成");
     agentMarketStore.rememberInstalled(agent);
     registerInstalledAcpProvider(agent);
     agentAdapterRegistry.updateAcpHandshake(agent.id, initialized);
@@ -7661,6 +7697,12 @@ async function installMarketProvider(providerId: string, ownerUserId: string, re
     eventHub.publish("agent-market.changed", { providerId: agent.id, action: "installed" });
     return status;
   } catch (error) {
+    await acpSessionRuntimes.get(agent.id)?.closeAll().catch(() => undefined);
+    await cliRuntimeManager.restoreActivation(agent.id, previousVersion).catch(() => undefined);
+    state.settings.runtime = previousRuntime;
+    cliRuntimeManager.configure(previousRuntime);
+    invalidateRuntimeDetection();
+    await saveState().catch(() => undefined);
     const message = error instanceof Error ? error.message : String(error);
     setMarketInstallState(agent.id, "failed", message, startedAt);
     throw error;
@@ -7803,6 +7845,7 @@ app.post("/api/agent-market/:id/rollback", auth.requireRoles("owner", "admin"), 
   try {
     const providerId = normalizeProviderId(req.params.id);
     if (!agentMarketStore.installed().some((item) => item.agent.id === providerId)) throw new Error("Agent 尚未安装");
+    assertRuntimeIdle(providerId);
     const status = await cliRuntimeManager.rollback(providerId);
     await acpSessionRuntimes.get(providerId)?.closeAll();
     await saveState();
@@ -9981,6 +10024,7 @@ app.post("/api/runtime/:runtimeId/sources", auth.requireRoles("owner", "admin"),
 app.post("/api/runtime/:runtimeId/activate", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
     const runtimeId = registeredRuntimeId(req.params.runtimeId);
+    assertRuntimeIdle(runtimeId);
     await cliRuntimeManager.activate(runtimeId, String(req.body?.version || ""));
     state.settings.runtime.selections[runtimeId] = { mode: "managed", systemPath: "", customPath: "" };
     cliRuntimeManager.configure(state.settings.runtime);
@@ -9994,6 +10038,7 @@ app.post("/api/runtime/:runtimeId/activate", auth.requireRoles("owner", "admin")
 app.post("/api/runtime/:runtimeId/rollback", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
     const runtimeId = registeredRuntimeId(req.params.runtimeId);
+    assertRuntimeIdle(runtimeId);
     const status = await cliRuntimeManager.rollback(runtimeId);
     state.settings.runtime.selections[runtimeId] = { mode: "managed", systemPath: "", customPath: "" };
     cliRuntimeManager.configure(state.settings.runtime);

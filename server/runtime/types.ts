@@ -22,6 +22,19 @@ export type RuntimeStatus = {
   };
 };
 
+export type RuntimeInstallCandidate = {
+  runtimeId: CliRuntimeId;
+  version: string;
+  root: string;
+  executable: string;
+  previousVersion: string;
+};
+
+export type RuntimeInstallOptions = {
+  ensureCanActivate?: () => void | Promise<void>;
+  certify?: (candidate: RuntimeInstallCandidate) => void | Promise<void>;
+};
+
 export type RuntimeCandidate = {
   source: RuntimeSource;
   path: string;
@@ -91,7 +104,7 @@ export type RuntimeInstallProgress = {
   runtimeId: CliRuntimeId;
   operationId: string;
   sequence: number;
-  phase: "started" | "probing" | "downloading" | "installing" | "verifying" | "activated" | "failed" | "interrupted";
+  phase: "started" | "probing" | "downloading" | "installing" | "verifying" | "certifying" | "activated" | "failed" | "interrupted";
   message: string;
   version?: string;
   startedAt: string;

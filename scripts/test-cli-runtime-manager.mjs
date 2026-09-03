@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CliRuntimeManager, runtimeUpdateDecision } from "../server/runtime/manager.ts";
+import { CliRuntimeManager, runRuntimeActivationTransaction, runtimeUpdateDecision } from "../server/runtime/manager.ts";
 import { resolveClaudeCommand } from "../server/engines/claude/runtime.ts";
 import { CLI_REGISTRY } from "../server/runtime/registry.ts";
 
@@ -15,6 +15,23 @@ assert.deepEqual(runtimeUpdateDecision("managed", "1.0.0", "2.0.0"), { state: "a
 assert.deepEqual(runtimeUpdateDecision("managed", "2.0.0", "2.0.0"), { state: "latest", action: "none" });
 assert.deepEqual(runtimeUpdateDecision("managed", "3.0.0", "2.0.0"), { state: "newer-local", action: "none" });
 assert.deepEqual(runtimeUpdateDecision("system", "1.0.0", "2.0.0"), { state: "external", action: "install-managed" });
+
+const activationEvents = [];
+await assert.rejects(runRuntimeActivationTransaction({
+  certify: () => activationEvents.push("certify"),
+  activate: () => activationEvents.push("activate"),
+  verify: () => { activationEvents.push("verify"); throw new Error("post-activation canary failed"); },
+  restore: () => activationEvents.push("restore")
+}), /canary failed/);
+assert.deepEqual(activationEvents, ["certify", "activate", "verify", "restore"]);
+const rejectedEvents = [];
+await assert.rejects(runRuntimeActivationTransaction({
+  certify: () => { rejectedEvents.push("certify"); throw new Error("protocol mismatch"); },
+  activate: () => rejectedEvents.push("activate"),
+  verify: () => true,
+  restore: () => rejectedEvents.push("restore")
+}), /protocol mismatch/);
+assert.deepEqual(rejectedEvents, ["certify"], "a rejected candidate must not alter the active runtime");
 
 const systemManager = new CliRuntimeManager(root, path.join(root, "system-runtimes"));
 systemManager.definition = () => ({

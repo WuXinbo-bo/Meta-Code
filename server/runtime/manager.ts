@@ -11,7 +11,7 @@ import { downloadArtifact } from "./downloader.js";
 import { CLI_REGISTRY, runtimePlatform } from "./registry.js";
 import { resolveNpmArtifacts } from "./source.js";
 import { RuntimeTaskStore } from "./taskStore.js";
-import type { CliDefinition, CliRuntimeId, RuntimeInstallProgress, RuntimeSource, RuntimeStatus, RuntimeUpdateStatus } from "./types.js";
+import type { CliDefinition, CliRuntimeId, RuntimeInstallOptions, RuntimeInstallProgress, RuntimeSource, RuntimeStatus, RuntimeUpdateStatus } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const NPM_LOCAL_INSTALL_TIMEOUT_MS = 10 * 60_000;
@@ -70,6 +70,26 @@ export function runtimeUpdateDecision(mode: RuntimeUseMode, currentVersion: stri
   if (comparison < 0) return { state: "available", action: "update" };
   if (comparison > 0) return { state: "newer-local", action: "none" };
   return { state: "latest", action: "none" };
+}
+
+export async function runRuntimeActivationTransaction<T>(input: {
+  ensureCanActivate?: () => void | Promise<void>;
+  certify?: () => void | Promise<void>;
+  activate: () => void | Promise<void>;
+  verify: () => T | Promise<T>;
+  restore: () => void | Promise<void>;
+}) {
+  await input.ensureCanActivate?.();
+  await input.certify?.();
+  let activationStarted = false;
+  try {
+    activationStarted = true;
+    await input.activate();
+    return await input.verify();
+  } catch (error) {
+    if (activationStarted) await Promise.resolve(input.restore()).catch(() => undefined);
+    throw error;
+  }
 }
 
 export class CliRuntimeManager {
@@ -230,10 +250,10 @@ export class CliRuntimeManager {
     return { runtimeId: id, mode, currentVersion, latestVersion, state, action, selectedRegistry: source?.selected || "", probes: source?.probes || [] };
   }
 
-  async install(id: CliRuntimeId, requestedVersion?: string) {
+  async install(id: CliRuntimeId, requestedVersion?: string, options: RuntimeInstallOptions = {}) {
     const running = this.installs.get(id);
     if (running) return running;
-    const operation = this.installUnlocked(id, requestedVersion).finally(() => this.installs.delete(id));
+    const operation = this.installUnlocked(id, requestedVersion, options).finally(() => this.installs.delete(id));
     this.installs.set(id, operation);
     return operation;
   }
@@ -280,12 +300,13 @@ export class CliRuntimeManager {
     return readJson<{ version?: string }>(packageFile)?.version || source.version;
   }
 
-  private async installUnlocked(id: CliRuntimeId, requestedVersion?: string): Promise<RuntimeStatus> {
+  private async installUnlocked(id: CliRuntimeId, requestedVersion?: string, options: RuntimeInstallOptions = {}): Promise<RuntimeStatus> {
     const definition = this.definition(id);
     const distribution = definition.distribution;
     const configuration = this.config();
     const version = safeVersion(requestedVersion || (distribution.kind === "npm" ? distribution.defaultVersion : distribution.version));
     const startedAt = new Date().toISOString();
+    const previousVersion = this.activeVersion(id);
     this.report({ runtimeId: id, phase: "started", version, message: `准备安装 ${definition.label}`, startedAt, active: true, resumable: false });
     try {
       const runtimeRoot = this.runtimeRoot(id);
@@ -330,10 +351,23 @@ export class CliRuntimeManager {
         if (!workingCandidate) throw new Error(`${definition.label} 已下载，但可执行文件校验失败`);
         await definition.validateInstallation?.(staging, workingCandidate);
         await fsp.mkdir(path.dirname(finalRoot), { recursive: true });
+        const executableRelative = path.relative(staging, workingCandidate);
         await publishDirectory(staging, finalRoot);
-        await this.activate(id, installedVersion);
-        const status = await this.detect(id, "", "managed");
-        if (!status.available || status.source !== "runtime") throw new Error(`${definition.label} 已安装，但无法从托管目录启动`);
+        const finalExecutable = path.join(finalRoot, executableRelative);
+        const status = await runRuntimeActivationTransaction({
+          ensureCanActivate: options.ensureCanActivate,
+          certify: options.certify ? async () => {
+            this.report({ runtimeId: id, phase: "certifying", version: installedVersion, message: "正在验证协议、编排与委派兼容性", startedAt, active: true, resumable: false });
+            await options.certify!({ runtimeId: id, version: installedVersion, root: finalRoot, executable: finalExecutable, previousVersion });
+          } : undefined,
+          activate: () => this.activate(id, installedVersion),
+          verify: async () => {
+            const detected = await this.detect(id, "", "managed");
+            if (!detected.available || detected.source !== "runtime") throw new Error(`${definition.label} 已安装，但无法从托管目录启动`);
+            return detected;
+          },
+          restore: () => this.restoreActivation(id, previousVersion)
+        });
         this.report({ runtimeId: id, phase: "activated", version: installedVersion, message: `${definition.label} ${installedVersion} 已启用`, startedAt, active: false, resumable: false });
         return status;
       } catch (error) {
@@ -360,6 +394,11 @@ export class CliRuntimeManager {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(temporary, `${JSON.stringify({ version: normalized, platform: runtimePlatform(), activatedAt: new Date().toISOString() }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await fsp.rename(temporary, file);
+  }
+
+  async restoreActivation(id: CliRuntimeId, version: string) {
+    if (version) return this.activate(id, version);
+    await fsp.rm(this.currentFile(id), { force: true });
   }
 
   async rollback(id: CliRuntimeId) {

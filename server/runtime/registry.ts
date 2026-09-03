@@ -92,6 +92,12 @@ async function validateCodexInstallation(_root: string, executable: string) {
   });
 }
 
+async function validateClaudeInstallation(_root: string, executable: string) {
+  const command = resolveClaudeCommand(executable);
+  const { stdout, stderr } = await execFileAsync(command.executable, [...command.args, "--help"], { encoding: "utf8", timeout: 20_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+  if (!`${stdout || ""}\n${stderr || ""}`.trim()) throw new Error("Claude CLI 帮助探测没有返回内容");
+}
+
 export const CLI_REGISTRY: Record<string, CliDefinition> = {
   codex: {
     id: "codex",
@@ -119,7 +125,8 @@ export const CLI_REGISTRY: Record<string, CliDefinition> = {
     bundledRoots: () => [],
     systemCandidates: () => commandOnPath("claude"),
     probe: (candidate) => probeExecutable(candidate, resolveClaudeCommand),
-    finalizeInstallation: finalizeClaudeInstallation
+    finalizeInstallation: finalizeClaudeInstallation,
+    validateInstallation: validateClaudeInstallation
   }
 };
 
