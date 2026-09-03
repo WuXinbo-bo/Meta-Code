@@ -68,6 +68,7 @@ import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase"
 import { ThemeToggle } from "./branding/ThemeToggle";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
+import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
 import { AgentReplyContent } from "./components/AgentActivityEntry";
 import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
 import type { CodexLinkBinding } from "./codex-link/model";
@@ -4966,7 +4967,7 @@ export function App() {
           }} />
         )}
         {view === "mcp" && <McpView servers={data.mcpServers || []} workspaces={data.workspaces} activeWorkspaceId={activeWorkspaceId} onChanged={refresh} onNotice={setNotice} />}
-        {view === "settings" && <SettingsView
+        {view === "settings" && <RecoverableSectionBoundary resetKey={`${settingsTarget}:${settingsProvider}`} title="设置页面暂时无法显示"><SettingsView
           initialSection={settingsTarget}
           settings={data.settings}
           dataHome={data.runtime.dataHome}
@@ -4992,7 +4993,7 @@ export function App() {
           onOpenWorkflow={(id) => { setView("chat"); void selectWorkflow(id); }}
           onNotice={(message, tone) => setNotice(message, tone)}
           onChanged={refresh}
-        />}
+        /></RecoverableSectionBoundary>}
         {navigationPending && (
           <div className="conversation-switch-state" role="status" aria-live="polite">
             <span><ProviderIcon provider={navigationSummary?.engine || "codex"} icon={data.providerControls.find((control) => control.providerId === (navigationSummary?.engine || "codex"))?.identity.icon} accent={data.providerControls.find((control) => control.providerId === (navigationSummary?.engine || "codex"))?.identity.accent} size={18} /><LoaderCircle className="spin" size={16} /></span>
@@ -5023,7 +5024,7 @@ export function App() {
             {treeQuery && <button type="button" aria-label="清除文件搜索" onClick={() => setTreeQuery("")}><X size={13} /></button>}
           </label>
           {treeError && <div className="tree-error"><span>{treeError}</span><button type="button" onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>重试</button></div>}
-          {treeHasVisibleItems ? <WorkspaceFileTree workspaceId={activeFileScopeId} nodes={tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /> : <p className="empty-note">{treeLoading ? "正在读取工作区文件" : treeQuery ? "没有匹配的文件" : "没有可显示的文件"}</p>}
+          {treeHasVisibleItems ? <RecoverableSectionBoundary resetKey={`${activeFileScopeId}:${treeUpdatedAt?.getTime() || 0}`} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary> : <p className="empty-note">{treeLoading ? "正在读取工作区文件" : treeQuery ? "没有匹配的文件" : "没有可显示的文件"}</p>}
         </aside>
       )}
       {inspectorVisible && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={220} aria-valuemax={420} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
@@ -6098,7 +6099,7 @@ function SettingsView({
     <div className="settings-shell">
     <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={setSettingsSection} onAgentPageChange={setAiSettingsPage} />
     <div className="settings-page-content">
-    {settingsSection === "sessions" && <Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense>}
+    {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
     {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId) => { onProviderChange(providerId); setAiSettingsPage("providers"); window.setTimeout(() => document.getElementById("native-provider-settings")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0); }} /></div>}
     {settingsSection === "ai" && aiSettingsPage === "overview" && <div className="settings-section settings-agent-overview">
       <div className="settings-page-heading"><h2>Agent 总览</h2><p>设置默认主脑，并查看所有已连接 Agent 的运行状态。</p></div>

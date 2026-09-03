@@ -54,6 +54,7 @@ export type SessionManagementPreferences = {
 };
 
 export type SessionManagementSummary = { total: number; healthy: number; attention: number; running: number; archived: number; trash: number };
+export type SessionManagementFacet = { id: string; label: string; count: number };
 
 export type SessionInventoryResponse = {
   items: SessionInventoryItem[];
@@ -65,6 +66,7 @@ export type SessionInventoryResponse = {
   preferences: SessionManagementPreferences;
   warnings: string[];
   scopes: SessionScopeSummary[];
+  facets: { providers: SessionManagementFacet[]; sources: SessionManagementFacet[] };
 };
 
 export type SessionTrashItem = {

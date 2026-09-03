@@ -94,6 +94,7 @@ import { claimPendingInput, normalizePendingInputs, promotePendingInput, removeP
 import { GenerationSaveCoordinator } from "./persistence/generationSaveCoordinator.js";
 import { PendingInputActionError, type PendingInput as QueuePendingInput } from "./sessionInputs/types.js";
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
+import { sessionManagementFacets } from "./sessionManagement/facets.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
 import { createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
 import { BackupBusyError, BackupScheduler } from "./persistence/backupScheduler.js";
@@ -9015,6 +9016,13 @@ function sessionManagementSummary(ownerUserId: string, items = workbenchManageme
   };
 }
 
+function sessionManagementSourceLabel(source: SessionInventoryItem["source"]) {
+  if (source === "workbench") return "工作台";
+  if (source === "codex-official") return "Codex 官方";
+  if (source === "claude-native") return "Claude 原生";
+  return source;
+}
+
 function sessionNativeThreadIds(ownerUserId: string) {
   const codex = new Set<string>();
   const claude = new Set<string>();
@@ -9583,8 +9591,9 @@ app.get("/api/session-management/sessions", async (req, res) => {
   const filtered = filterSessionManagementItems(all, filters);
   const selectionTotal = filterSessionManagementItems(workbenchItems, filters).length;
   const start = (page - 1) * pageSize;
+  const facets = sessionManagementFacets(all, (providerId) => agentAdapterRegistry.descriptor(providerId)?.shortName || providerId, sessionManagementSourceLabel);
   res.setHeader("Cache-Control", "private, no-store");
-  res.json({ items: filtered.slice(start, start + pageSize), total: filtered.length, selectionTotal, page, pageSize, summary: sessionManagementSummary(ownerUserId, all), preferences, warnings, scopes: sessionManagementScopes(ownerUserId) });
+  res.json({ items: filtered.slice(start, start + pageSize), total: filtered.length, selectionTotal, page, pageSize, summary: sessionManagementSummary(ownerUserId, all), preferences, warnings, scopes: sessionManagementScopes(ownerUserId), facets });
 });
 
 app.post("/api/session-management/native/codex/:threadId/adopt", async (req, res) => {

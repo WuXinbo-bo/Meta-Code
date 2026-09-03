@@ -895,6 +895,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .heading-actions, .dialog-actions { display: flex; gap: 8px; }
 .heading-actions button, .section-heading > button, .dialog-actions button, button.primary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid #d0d0ca; border-radius: 6px; background: white; cursor: pointer; font-size: 12px; font-weight: 600; }
 button.primary { border-color: #252724; background: #252724; color: white; }
+.recoverable-section-error { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 10px; margin: 18px; padding: 16px; border: 1px solid #e5c8c5; border-radius: 6px; background: #fffafa; color: #783f3b; }
+.recoverable-section-error > div { display: grid; gap: 4px; min-width: 0; }
+.recoverable-section-error span, .recoverable-section-error small { color: #7a6765; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.recoverable-section-error button { display: inline-flex; min-height: 30px; align-items: center; gap: 5px; padding: 0 9px; border: 1px solid #d5c3c0; border-radius: 5px; background: #fff; color: #603d39; }
 .skill-list { max-width: 1000px; margin: 0 auto; }
 .skill-item { display: grid; grid-template-columns: 42px minmax(0, 1fr) 34px; gap: 12px; padding: 17px 8px; border-bottom: 1px solid #e2e2dd; }
 .skill-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 7px; background: #edf2ed; color: #49705c; }
@@ -1768,6 +1772,10 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .settings-diagnostic-list code { color: #aeb5b0; }
 :root[data-theme="dark"] .settings-backup-health { background: #342f23; color: #dec27f; }
 :root[data-theme="dark"] .settings-backup-health.failed { background: #382929; color: #e3a3a3; }
+:root[data-theme="dark"] .recoverable-section-error { border-color: #684d4a; background: #332827; color: #e2aaa5; }
+:root[data-theme="dark"] .recoverable-section-error span,
+:root[data-theme="dark"] .recoverable-section-error small { color: #c29b97; }
+:root[data-theme="dark"] .recoverable-section-error button { border-color: #69514e; background: #2b2423; color: #e2aaa5; }
 :root[data-theme="dark"] .runtime-install-progress { border-color: #484b49; }
 :root[data-theme="dark"] .runtime-install-progress-head strong { color: #dfe4e0; }
 :root[data-theme="dark"] .runtime-install-progress-head small,

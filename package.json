@@ -81,6 +81,7 @@
     "test:first-run": "node --import tsx scripts/test-first-run-guide.mjs",
     "test:repository": "node scripts/test-repository-readiness.mjs",
     "test:session-management": "node --import tsx scripts/test-session-management.mjs",
+    "test:session-facets": "node --import tsx scripts/test-session-management-facets.mjs",
     "test:session-selection": "node --import tsx scripts/test-session-selection.mjs",
     "test:workspace-browser-tabs": "node --import tsx scripts/test-workspace-browser-tabs.mjs",
     "test:request-resource-cache": "node --import tsx scripts/test-request-resource-cache.mjs",
