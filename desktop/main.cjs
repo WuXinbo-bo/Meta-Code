@@ -157,7 +157,12 @@ function createWindow() {
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     icon: path.join(runtimeRoot(), "public", "workbench.ico"),
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, "preload.cjs")
+    }
   });
   Menu.setApplicationMenu(null);
   mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {

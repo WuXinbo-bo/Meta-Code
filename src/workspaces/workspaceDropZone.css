@@ -1,0 +1,8 @@
+.workspace-drop-zone { position: relative; display: grid; min-height: 96px; place-items: center; align-content: center; gap: 7px; padding: 16px; border: 1px dashed var(--border-strong, #b8bdb9); border-radius: 7px; background: #fff; color: var(--muted); text-align: center; transition: border-color 140ms ease, box-shadow 140ms ease, color 140ms ease; }
+.workspace-drop-zone > span { display: grid; gap: 3px; }
+.workspace-drop-zone strong { color: var(--text); font-size: 13px; }
+.workspace-drop-zone small { font-size: 11px; }
+.workspace-drop-zone.dragging { border-color: var(--accent, #1f6f43); box-shadow: inset 0 0 0 1px var(--accent, #1f6f43); color: var(--accent, #1f6f43); }
+.workspace-drop-zone.disabled { cursor: not-allowed; opacity: .55; }
+.workspace-drop-zone p { display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 0; color: var(--danger, #b42318); font-size: 11px; }
+:root[data-theme="dark"] .workspace-drop-zone { background: var(--surface); }

@@ -55,6 +55,7 @@ console.log("[desktop] compiling web and backend");
 await runNpm(["run", "build"], root);
 
 await copy(path.join(root, "desktop", "main.cjs"), path.join(staging, "desktop", "main.cjs"));
+await copy(path.join(root, "desktop", "preload.cjs"), path.join(staging, "desktop", "preload.cjs"));
 await copy(path.join(root, "public", "workbench.ico"), path.join(staging, "build", "icon.ico"));
 await copy(path.join(root, "desktop", "installer.nsh"), path.join(staging, "build", "installer.nsh"));
 await run(path.join(root, "node_modules", "electron", "dist", "electron.exe"), [

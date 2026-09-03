@@ -111,6 +111,8 @@ import { formatRuntimeProgressDuration, runtimeProgressElapsedMs } from "./runti
 import { CapabilityProfileControl } from "./chat/CapabilityProfileControl";
 import { ComposerRuntimeControl } from "./chat/ComposerRuntimeControl";
 import { PendingTurnTray } from "./chat/PendingTurnTray";
+import { WorkspaceDropZone } from "./workspaces/WorkspaceDropZone";
+import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
 import type { AgentProviderDescriptor } from "./agents/types";
 import type { ProviderControlSnapshot } from "./providers/types";
@@ -5082,6 +5084,12 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   const [picking, setPicking] = useState(false);
   return <Dialog title="添加工作区" onClose={onClose}>
     <div className="form-grid">
+      <WorkspaceDropZone disabled={picking} onFolder={(path) => {
+        setRoot(path);
+        setCreate(false);
+        setError("");
+        setName((current) => current || workspaceNameFromPath(path));
+      }} />
       <label>
         <span>文件夹位置</span>
         <div className="path-picker">

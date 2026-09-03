@@ -9,6 +9,7 @@ const buildScript = await fs.readFile(path.join(root, "scripts", "build-desktop-
 const installer = await fs.readFile(path.join(root, "desktop", "installer.nsh"), "utf8");
 const renderer = await fs.readFile(path.join(root, "scripts", "render-installer-logo.cjs"), "utf8");
 const desktopMain = await fs.readFile(path.join(root, "desktop", "main.cjs"), "utf8");
+const desktopPreload = await fs.readFile(path.join(root, "desktop", "preload.cjs"), "utf8");
 
 assert.equal(packageJson.version, "0.1.1");
 assert.match(buildScript, /Meta-Code-Packages/);
@@ -27,6 +28,8 @@ assert.match(installer, /不会主动删除该目录/);
 assert.match(renderer, /capturePage/);
 assert.match(desktopMain, /\.metacode/);
 assert.match(desktopMain, /app\.setPath\("userData"/);
+assert.match(desktopMain, /preload\.cjs/);
+assert.match(desktopPreload, /webUtils\.getPathForFile/);
 assert.doesNotMatch(buildScript, /\.runtime|\.workbench-data/);
 
 console.log("desktop package configuration: ok");

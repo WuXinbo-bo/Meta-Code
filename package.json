@@ -64,6 +64,7 @@
     "test:skill-projection": "npm run build && node scripts/test-skill-projection.mjs",
     "test:workspace-files": "npm run build && node scripts/test-workspace-files.mjs",
     "test:workspace-pressure": "node --import tsx scripts/test-workspace-pressure.mjs",
+    "test:workspace-drop": "node --import tsx scripts/test-workspace-drop.mjs",
     "test:docx-preview": "node --import tsx scripts/test-docx-preview.mjs",
     "test:file-preview-types": "node --import tsx scripts/test-file-preview-types.mjs",
     "test:file-preview-api": "npm run build && node scripts/test-file-preview-api.mjs",
