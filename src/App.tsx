@@ -4987,6 +4987,7 @@ export function App() {
         )}
       </main>
 
+      {inspectorVisible && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => setInspectorOpen(false)} />}
       {inspectorVisible && (
         <aside className={`inspector ${navigationPending ? "navigation-pending" : ""}`} aria-busy={navigationPending}>
           <div className="inspector-header">
@@ -5000,6 +5001,7 @@ export function App() {
               <IconButton label="刷新文件" disabled={!activeFileScopeId || treeLoading} onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>
                 <RefreshCw className={treeLoading ? "spin" : undefined} size={15} />
               </IconButton>
+              <IconButton label="关闭文件区" onClick={() => setInspectorOpen(false)}><X size={15} /></IconButton>
             </span>
           </div>
           <label className="tree-search">

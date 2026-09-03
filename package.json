@@ -84,6 +84,7 @@
     "test:session-facets": "node --import tsx scripts/test-session-management-facets.mjs",
     "test:session-selection": "node --import tsx scripts/test-session-selection.mjs",
     "test:workspace-browser-tabs": "node --import tsx scripts/test-workspace-browser-tabs.mjs",
+    "test:responsive-inspector": "node scripts/test-responsive-inspector.mjs",
     "test:request-resource-cache": "node --import tsx scripts/test-request-resource-cache.mjs",
     "test:session-navigation": "node --import tsx scripts/test-session-navigation.mjs",
     "test:secret-vault": "node --import tsx scripts/test-secret-vault.mjs",

@@ -66,6 +66,7 @@
 
 .sidebar { padding: 0; }
 .inspector { background: var(--mc-surface); }
+.mobile-inspector-backdrop { display: none; }
 
 .sidebar-pane-header {
   display: flex;
@@ -467,6 +468,29 @@
   .token-status-wrap { display: none; }
   .connected-provider-showcase { max-width: 126px; }
   .connected-provider-icons { overflow: hidden; }
+  .app-shell:not(.inspector-collapsed) .inspector {
+    position: fixed;
+    z-index: 18;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    width: min(360px, calc(100vw - var(--activity-rail-width)));
+    border-left: 1px solid var(--mc-line);
+    box-shadow: -12px 0 32px rgba(31, 35, 32, .12);
+  }
+  .app-shell:not(.inspector-collapsed) .mobile-inspector-backdrop {
+    position: fixed;
+    z-index: 17;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(31, 35, 32, .18);
+  }
+  .pane-resizer-inspector { display: none; }
 }
 
 @media (max-width: 760px) {
