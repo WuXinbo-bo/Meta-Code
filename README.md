@@ -7,7 +7,7 @@
   <p><strong>本地优先的多 Agent 开发工作台</strong></p>
   <p>在一个界面中连接、协作、编排并验收 Codex、Claude 与 ACP Agent。</p>
   <p>
-    <img alt="Version 0.1.1" src="https://img.shields.io/badge/version-0.1.1-24292f?style=flat-square" />
+    <img alt="Version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-24292f?style=flat-square" />
     <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&amp;logo=windows11&amp;logoColor=white" />
     <img alt="Node.js 22+" src="https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" />
     <img alt="ACP Ready" src="https://img.shields.io/badge/protocol-ACP-2563eb?style=flat-square" />
@@ -30,7 +30,7 @@
 
 ---
 
-Meta Code 统一管理编码 CLI、模型连接、会话、工作区、Skill、MCP、文件预览和执行日志。它保留 Codex 与 Claude 的原生增强能力，并通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) 接入更多 Agent。当前版本为 `0.1.1`，优先支持 Windows 与本地单用户场景。
+Meta Code 统一管理编码 CLI、模型连接、会话、工作区、Skill、MCP、文件预览和执行日志。它保留 Codex 与 Claude 的原生增强能力，并通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) 接入更多 Agent。当前版本为 `0.1.2`，优先支持 Windows 与本地单用户场景。
 
 ## 两种特色工作方式
 
@@ -136,14 +136,14 @@ npm start
 
 ## 更新状态
 
-设置页已经支持版本检查、更新频道、跳过版本和兼容性判断。稳定版从 GitHub Release 的固定 `latest.json` 地址检查更新；`0.1.1` 不会自动覆盖正在运行的程序，更新时会打开对应 Release 页面。未来独立 Launcher 负责下载、校验、原子切换和失败回滚。详见[发布与更新架构](docs/development/release-and-update.md)。
+设置页已经支持版本检查、更新频道、跳过版本和兼容性判断。稳定版从 GitHub Release 的固定 `latest.json` 地址检查更新；`0.1.2` 不会自动覆盖正在运行的程序，更新时会打开对应 Release 页面。未来独立 Launcher 负责下载、校验、原子切换和失败回滚。详见[发布与更新架构](docs/development/release-and-update.md)。
 
 ## 当前限制
 
 - 当前主要在 Windows 上开发和验证。
 - Codex 与 Claude 保留原生增强路径；其他 Provider 的能力取决于其 ACP 实现与能力协商结果。
 - 更新模块当前只开放检查与公告；正式下载和应用更新将在 Launcher 与签名链完成后启用。
-- `0.1.1` 桌面安装包尚未进行 Authenticode 签名，Windows 可能显示未知发布者提示。
+- `0.1.2` 桌面安装包尚未进行 Authenticode 签名，Windows 可能显示未知发布者提示。
 
 ## 文档
 

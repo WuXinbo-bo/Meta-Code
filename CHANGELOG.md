@@ -4,10 +4,25 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-03
+
+### Added
+
+- Complete personal-data snapshots, self-healing scheduled backups, storage governance, and safe workspace folder drag-and-drop.
+- Local API token and origin protection, desktop backend crash recovery, and responsive workspace-file drawers.
+- Release compatibility contracts for signed manifests, transactional CLI activation, and pinned workflow runtime identities.
+
+### Changed
+
+- Session navigation, Provider filters, and UI failure boundaries now use isolated, reusable state contracts.
+- Release, runtime, data ownership, and recovery documentation now describe the hardened lifecycle.
+
 ### Fixed
 
-- State upgrades now create a consistent pre-migration backup, run transactionally, and reject unsupported future schemas before writing.
-- A local compatibility snapshot tool can reconstruct version 0.1.0 session storage without modifying current user data.
+- State upgrades create a consistent pre-migration backup, run transactionally, and reject unsupported future schemas before writing.
+- Live follow-up input, revision reconciliation, generation saves, and recovered task rendering no longer require a manual refresh.
+- CLI updates and invalid app-update manifests fail safely without corrupting the active runtime or current update state.
+- Narrow-screen workspace files remain accessible and can be dismissed without overlapping the workbench.
 
 ## [0.1.1] - 2026-09-02
 

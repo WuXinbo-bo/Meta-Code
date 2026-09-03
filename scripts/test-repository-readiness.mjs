@@ -61,7 +61,7 @@ for (const { relative, text } of documents) {
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 assert.equal(packageJson.name, "meta-code-workbench");
 assert.equal(packageJson.productName, "Meta Code");
-assert.equal(packageJson.version, "0.1.1");
+assert.equal(packageJson.version, "0.1.2");
 assert.equal(packageJson.license, "Apache-2.0");
 assert.equal(packageJson.repository?.url, "git+https://github.com/WuXinbo-bo/Meta-Code.git");
 

@@ -1,6 +1,6 @@
 {
   "name": "meta-code-workbench",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "productName": "Meta Code",
   "description": "Local-first multi-agent development workbench with native Codex and Claude integrations plus ACP support.",
   "license": "Apache-2.0",
