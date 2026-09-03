@@ -109,6 +109,7 @@ export class CodexLinkRepository {
     for (const [name, definition] of migrations) {
       if (!bindingColumns.has(name)) this.db.exec(`ALTER TABLE codex_link_bindings ADD COLUMN ${name} ${definition}`);
     }
+    this.db.exec("PRAGMA user_version = 1");
   }
 
   list(ownerUserId: string, workspaceId: string) {

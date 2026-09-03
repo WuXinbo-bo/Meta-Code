@@ -218,6 +218,7 @@ export function createAuth(runtimeDir: string) {
   addColumnIfMissing(db, "users", "last_user_agent", "TEXT");
   addColumnIfMissing(db, "users", "totp_secret_cipher", "TEXT");
   addColumnIfMissing(db, "users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0");
+  db.exec("PRAGMA user_version = 1");
   addColumnIfMissing(db, "sessions", "ip_address", "TEXT");
   addColumnIfMissing(db, "sessions", "user_agent", "TEXT");
 

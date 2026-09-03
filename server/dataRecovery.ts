@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -7,6 +8,25 @@ export type BackupGroup = {
   stamp: string;
   stateFile: string;
   authFile: string;
+};
+
+export const PERSONAL_DATA_BACKUP_SCHEMA_VERSION = 1;
+export const PERSONAL_DATA_ENTRIES = [
+  "credentials", "skills", "profiles", "providers", "agent-market", "mcp", "sessions",
+  "recovery", "transactions", "artifacts", "workflow-node-runtime", "skill-releases",
+  "data-location.json", "auth-encryption.key"
+] as const;
+export const PERSONAL_DATA_DATABASES = ["workbench-state.db", "auth.db", "codex-link.db", "session-management.db"] as const;
+
+export type PersonalDataBackupManifest = {
+  schemaVersion: 1;
+  productId: "meta-code";
+  createdAt: string;
+  appVersion: string;
+  dataSchemaVersion: number;
+  componentSchemas: Record<string, number>;
+  files: Array<{ path: string; size: number; sha256: string }>;
+  totalBytes: number;
 };
 
 const BACKUP_FILE = /^(workbench-state|auth)-([\w.-]+)\.db$/;
@@ -43,6 +63,196 @@ function durableCopy(source: string, destination: string) {
   fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
   const handle = fs.openSync(destination, "r+");
   try { fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+}
+
+function safeRelativePath(value: string) {
+  const normalized = value.replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) throw new Error(`备份清单路径无效：${value}`);
+  return normalized;
+}
+
+async function backupFiles(root: string) {
+  const files: PersonalDataBackupManifest["files"] = [];
+  async function visit(directory: string) {
+    for (const entry of await fsp.readdir(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(absolute);
+      else if (entry.isFile()) {
+        const content = await fsp.readFile(absolute);
+        files.push({
+          path: path.relative(root, absolute).replace(/\\/g, "/"),
+          size: content.byteLength,
+          sha256: crypto.createHash("sha256").update(content).digest("hex")
+        });
+      }
+    }
+  }
+  await visit(root);
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function backupManifest(directory: string) {
+  const file = path.join(directory, "manifest.json");
+  if (!fs.existsSync(file)) return null;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(file, "utf8")) as PersonalDataBackupManifest;
+    return manifest.schemaVersion === PERSONAL_DATA_BACKUP_SCHEMA_VERSION && manifest.productId === "meta-code" ? manifest : null;
+  } catch { return null; }
+}
+
+export function listPersonalDataBackups(backupDir: string) {
+  if (!fs.existsSync(backupDir)) return [];
+  return fs.readdirSync(backupDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("personal-"))
+    .flatMap((entry) => {
+      const directory = path.join(backupDir, entry.name);
+      const manifest = backupManifest(directory);
+      return manifest ? [{ name: entry.name, directory, manifest }] : [];
+    })
+    .sort((left, right) => right.manifest.createdAt.localeCompare(left.manifest.createdAt));
+}
+
+export async function createPersonalDataBackup(input: {
+  dataDir: string;
+  backupDir?: string;
+  appVersion: string;
+  dataSchemaVersion: number;
+  componentSchemas: Record<string, number>;
+  databases: Array<{ name: typeof PERSONAL_DATA_DATABASES[number]; db: DatabaseSync }>;
+  retain?: number;
+  maxTotalBytes?: number;
+}) {
+  const dataDir = path.resolve(input.dataDir);
+  const backupDir = path.resolve(input.backupDir || path.join(dataDir, "backups"));
+  await fsp.mkdir(backupDir, { recursive: true, mode: 0o700 });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const name = `personal-${stamp}`;
+  const temporary = path.join(backupDir, `.${name}.${process.pid}.tmp`);
+  const destination = path.join(backupDir, name);
+  const payload = path.join(temporary, "data");
+  await fsp.mkdir(payload, { recursive: true, mode: 0o700 });
+  try {
+    for (const database of input.databases) {
+      const target = path.join(payload, database.name);
+      database.db.prepare("VACUUM INTO ?").run(target);
+      verifySqliteDatabase(target);
+    }
+    for (const entry of PERSONAL_DATA_ENTRIES) {
+      const source = path.join(dataDir, entry);
+      if (!fs.existsSync(source)) continue;
+      await fsp.cp(source, path.join(payload, entry), {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        filter: (candidate) => !fs.lstatSync(candidate).isSymbolicLink()
+      });
+    }
+    const files = await backupFiles(payload);
+    const manifest: PersonalDataBackupManifest = {
+      schemaVersion: PERSONAL_DATA_BACKUP_SCHEMA_VERSION,
+      productId: "meta-code",
+      createdAt: new Date().toISOString(),
+      appVersion: input.appVersion,
+      dataSchemaVersion: input.dataSchemaVersion,
+      componentSchemas: { ...input.componentSchemas },
+      files,
+      totalBytes: files.reduce((total, file) => total + file.size, 0)
+    };
+    await fsp.writeFile(path.join(temporary, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await fsp.rename(temporary, destination);
+
+    const retain = Math.max(1, input.retain ?? 3);
+    const maxTotalBytes = Math.max(256 * 1024 * 1024, input.maxTotalBytes ?? 8 * 1024 * 1024 * 1024);
+    const snapshots = listPersonalDataBackups(backupDir);
+    let retainedBytes = 0;
+    for (const [index, snapshot] of snapshots.entries()) {
+      retainedBytes += snapshot.manifest.totalBytes;
+      if (index >= retain || (index > 0 && retainedBytes > maxTotalBytes)) await fsp.rm(snapshot.directory, { recursive: true, force: true });
+    }
+    return { name, createdAt: manifest.createdAt, files: files.length, totalBytes: manifest.totalBytes, manifest };
+  } catch (error) {
+    await fsp.rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export function verifyPersonalDataBackup(directory: string) {
+  const root = path.resolve(directory);
+  const manifest = backupManifest(root);
+  if (!manifest) throw new Error("个人数据备份清单缺失或版本不受支持");
+  const pending = [path.join(root, "data")];
+  while (pending.length) {
+    const current = pending.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const target = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`备份中不允许符号链接：${path.relative(root, target)}`);
+      if (entry.isDirectory()) pending.push(target);
+    }
+  }
+  for (const item of manifest.files) {
+    const relative = safeRelativePath(item.path);
+    const file = path.resolve(root, "data", relative);
+    const payloadRoot = path.resolve(root, "data");
+    if (path.relative(payloadRoot, file).startsWith("..")) throw new Error(`备份文件越界：${relative}`);
+    const content = fs.readFileSync(file);
+    const digest = crypto.createHash("sha256").update(content).digest("hex");
+    if (content.byteLength !== item.size || digest !== item.sha256) throw new Error(`备份文件校验失败：${relative}`);
+  }
+  for (const name of PERSONAL_DATA_DATABASES) {
+    const file = path.join(root, "data", name);
+    if (fs.existsSync(file)) verifySqliteDatabase(file);
+  }
+  return manifest;
+}
+
+export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: string; name?: string }) {
+  const dataDir = path.resolve(input.dataDir);
+  const backupDir = path.resolve(input.backupDir || path.join(dataDir, "backups"));
+  const snapshot = input.name
+    ? listPersonalDataBackups(backupDir).find((item) => item.name === input.name)
+    : listPersonalDataBackups(backupDir)[0];
+  if (!snapshot) throw new Error(input.name ? `个人数据备份不存在：${input.name}` : "没有完整的个人数据备份");
+  const manifest = verifyPersonalDataBackup(snapshot.directory);
+  const restoreId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
+  const recoveryDir = path.join(backupDir, `pre-restore-${restoreId}`);
+  const stagingDir = path.join(path.dirname(dataDir), `.metacode-restore-${restoreId}`);
+  fs.mkdirSync(recoveryDir, { recursive: false, mode: 0o700 });
+  fs.cpSync(path.join(snapshot.directory, "data"), stagingDir, { recursive: true, force: false, errorOnExist: true });
+  const names = [...PERSONAL_DATA_DATABASES, ...PERSONAL_DATA_ENTRIES];
+  const moved: Array<{ from: string; to: string }> = [];
+  const installed: string[] = [];
+  try {
+    for (const name of names) {
+      const live = path.join(dataDir, name);
+      if (!fs.existsSync(live)) continue;
+      const recovery = path.join(recoveryDir, name);
+      fs.mkdirSync(path.dirname(recovery), { recursive: true });
+      fs.renameSync(live, recovery);
+      moved.push({ from: recovery, to: live });
+    }
+    for (const name of names) {
+      const staged = path.join(stagingDir, name);
+      if (!fs.existsSync(staged)) continue;
+      const live = path.join(dataDir, name);
+      fs.mkdirSync(path.dirname(live), { recursive: true });
+      fs.renameSync(staged, live);
+      installed.push(live);
+    }
+    for (const name of PERSONAL_DATA_DATABASES) {
+      const file = path.join(dataDir, name);
+      if (fs.existsSync(file)) verifySqliteDatabase(file);
+    }
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    return { name: snapshot.name, restored: installed, recoveryDir, manifest };
+  } catch (error) {
+    for (const target of installed.reverse()) fs.rmSync(target, { recursive: true, force: true });
+    for (const item of moved.reverse()) {
+      fs.mkdirSync(path.dirname(item.to), { recursive: true });
+      fs.renameSync(item.from, item.to);
+    }
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    throw new Error(`个人数据恢复失败，原数据已回滚：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function moveIfPresent(source: string, destination: string) {

@@ -92,6 +92,7 @@ import { claimPendingInput, normalizePendingInputs, promotePendingInput, removeP
 import { PendingInputActionError, type PendingInput as QueuePendingInput } from "./sessionInputs/types.js";
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
+import { createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
 import { workbenchInventoryItem } from "./sessionManagement/health.js";
 import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
 import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
@@ -1375,33 +1376,34 @@ async function claimLegacyOwnership(ownerUserId: string | null) {
 async function createRuntimeBackup() {
   await saveState();
   await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
-  stateStore.checkpoint();
-  auth.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const stateTarget = path.join(BACKUP_DIR, `workbench-state-${stamp}.db`);
-  const authTarget = path.join(BACKUP_DIR, `auth-${stamp}.db`);
-  await fsp.copyFile(stateStore.file, stateTarget);
-  await fsp.copyFile(process.env.AUTH_DB_PATH || path.join(RUNTIME_DIR, "auth.db"), authTarget);
-  const completedAt = new Date();
-  await Promise.all([stateTarget, authTarget].map((target) => fsp.utimes(target, completedAt, completedAt)));
-  const entries = (await fsp.readdir(BACKUP_DIR, { withFileTypes: true })).filter((entry) => entry.isFile()).sort((a, b) => b.name.localeCompare(a.name));
-  const groups = new Map<string, string[]>();
-  for (const entry of entries) {
-    const stampKey = entry.name.replace(/^(workbench-state|state|auth)-/, "").replace(/\.(json|db)$/, "");
-    groups.set(stampKey, [...(groups.get(stampKey) || []), entry.name]);
+  if (activeRuns.size || activeDelegationTasks.size || activeWorkflowNodes.size || activeWorkflowPlanners.size || activeWorkflowIntegrations.size) {
+    throw new Error("仍有 Agent 或任务编排正在运行，请在任务完成后创建完整个人数据备份");
   }
-  for (const [, names] of [...groups.entries()].slice(14)) await Promise.all(names.map((name) => fsp.rm(path.join(BACKUP_DIR, name), { force: true })));
-  return { createdAt: completedAt.toISOString(), files: [path.basename(stateTarget), path.basename(authTarget)] };
+  return createPersonalDataBackup({
+    dataDir: RUNTIME_DIR,
+    backupDir: BACKUP_DIR,
+    appVersion: appUpdateService.config.currentVersion,
+    dataSchemaVersion: stateStore.schemaVersion(),
+    componentSchemas: { state: stateStore.schemaVersion(), auth: 1, codexLink: 1, sessionManagement: 1, agentMarket: 1 },
+    databases: [
+      { name: "workbench-state.db", db: stateStore.db },
+      { name: "auth.db", db: auth.db },
+      { name: "codex-link.db", db: codexLinkRepository.db },
+      { name: "session-management.db", db: sessionManagementRepository.db }
+    ]
+  });
 }
 
 async function listRuntimeBackups() {
   await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
-  const entries = await fsp.readdir(BACKUP_DIR, { withFileTypes: true });
-  const backups = await Promise.all(entries.filter((entry) => entry.isFile()).map(async (entry) => {
-    const stat = await fsp.stat(path.join(BACKUP_DIR, entry.name));
-    return { name: entry.name, size: stat.size, createdAt: stat.mtime.toISOString() };
+  return listPersonalDataBackups(BACKUP_DIR).map((item) => ({
+    name: item.name,
+    size: item.manifest.totalBytes,
+    createdAt: item.manifest.createdAt,
+    fileCount: item.manifest.files.length,
+    appVersion: item.manifest.appVersion,
+    dataSchemaVersion: item.manifest.dataSchemaVersion
   }));
-  return backups.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function redactLog(text: string) {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { completeBackupGroups, restoreWorkbenchBackup } from "../server/dataRecovery.ts";
+import { completeBackupGroups, createPersonalDataBackup, listPersonalDataBackups, restorePersonalDataBackup, restoreWorkbenchBackup, verifyPersonalDataBackup } from "../server/dataRecovery.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "metacode-recovery-"));
 const backups = path.join(root, "backups");
@@ -40,5 +40,40 @@ assert.throws(() => restoreWorkbenchBackup({ dataDir: root, stamp: "corrupt" }),
 assert.equal(marker(path.join(root, "workbench-state.db")), "backup-state");
 assert.equal(marker(path.join(root, "auth.db")), "backup-auth");
 
+const personalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "metacode-personal-recovery-"));
+const personalDbs = ["workbench-state.db", "auth.db", "codex-link.db", "session-management.db"];
+const handles = personalDbs.map((name) => {
+  const file = path.join(personalRoot, name);
+  database(file, `live-${name}`);
+  return { name, db: new DatabaseSync(file) };
+});
+fs.mkdirSync(path.join(personalRoot, "credentials"), { recursive: true });
+fs.writeFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "encrypted-secret");
+fs.mkdirSync(path.join(personalRoot, "profiles", "codex", "sessions"), { recursive: true });
+fs.writeFileSync(path.join(personalRoot, "profiles", "codex", "sessions", "thread.jsonl"), "history");
+fs.mkdirSync(path.join(personalRoot, "runtimes", "codex"), { recursive: true });
+fs.writeFileSync(path.join(personalRoot, "runtimes", "codex", "large-runtime.bin"), "re-downloadable");
+const personal = await createPersonalDataBackup({
+  dataDir: personalRoot,
+  appVersion: "0.1.2-dev",
+  dataSchemaVersion: 2,
+  componentSchemas: { state: 2, auth: 1, codexLink: 1, sessionManagement: 1 },
+  databases: handles,
+  retain: 2,
+  maxTotalBytes: 512 * 1024 * 1024
+});
+for (const item of handles) item.db.close();
+assert.equal(listPersonalDataBackups(path.join(personalRoot, "backups")).length, 1);
+assert.equal(verifyPersonalDataBackup(path.join(personalRoot, "backups", personal.name)).appVersion, "0.1.2-dev");
+assert.equal(fs.existsSync(path.join(personalRoot, "backups", personal.name, "data", "runtimes")), false, "managed runtimes are recoverable downloads, not personal data");
+fs.writeFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "changed");
+database(path.join(personalRoot, "temporary.db"), "unrelated");
+const personalRestore = restorePersonalDataBackup({ dataDir: personalRoot, name: personal.name });
+assert.equal(fs.readFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "utf8"), "encrypted-secret");
+assert.equal(marker(path.join(personalRoot, "codex-link.db")), "live-codex-link.db");
+assert.ok(personalRestore.restored.some((file) => file.endsWith("session-management.db")));
+assert.equal(fs.existsSync(path.join(personalRoot, "temporary.db")), true, "restore must not replace unrelated local files");
+fs.rmSync(personalRoot, { recursive: true, force: true });
+
 fs.rmSync(root, { recursive: true, force: true });
-console.log("database backup validation, atomic restore, and rollback preservation passed");
+console.log("legacy database and complete personal-data backup validation, restore, and rollback preservation passed");

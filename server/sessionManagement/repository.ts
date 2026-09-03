@@ -154,6 +154,7 @@ export class SessionManagementRepository {
     const trashColumns = this.db.prepare("PRAGMA table_info(session_trash)").all() as Array<{ name: string }>;
     if (!trashColumns.some((column) => column.name === "batch_id")) this.db.exec("ALTER TABLE session_trash ADD COLUMN batch_id TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_session_trash_batch ON session_trash(owner_user_id, batch_id)");
+    this.db.exec("PRAGMA user_version = 1");
   }
 
   preferences(ownerUserId: string) {
