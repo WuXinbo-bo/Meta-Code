@@ -1404,6 +1404,12 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 .settings-backup-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-backup-list em { color: #747c75; font-size: 9px; font-style: normal; white-space: nowrap; }
 .settings-backup-list > p { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; color: #7b827c; font-size: 9px; }
+.settings-backup-health { display: flex; align-items: flex-start; gap: 8px; margin-top: 11px; padding: 9px 10px; border-left: 2px solid #b9831f; background: #fffbf2; color: #66501f; }
+.settings-backup-health.failed { border-left-color: #c94747; background: #fff8f7; color: #873f3f; }
+.settings-backup-health > svg { flex: 0 0 auto; margin-top: 1px; }
+.settings-backup-health > span { display: grid; gap: 2px; }
+.settings-backup-health strong { color: inherit; }
+.settings-backup-health small { color: inherit; }
 .settings-diagnostic-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .settings-diagnostic-list > div { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 7px; min-width: 0; padding: 9px; border: 1px solid #e2e5e2; border-radius: 6px; }
 .settings-diagnostic-list > div.ready > svg { color: #477553; }
@@ -1760,6 +1766,8 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .settings-data-primary code,
 :root[data-theme="dark"] .settings-data-boundaries code,
 :root[data-theme="dark"] .settings-diagnostic-list code { color: #aeb5b0; }
+:root[data-theme="dark"] .settings-backup-health { background: #342f23; color: #dec27f; }
+:root[data-theme="dark"] .settings-backup-health.failed { background: #382929; color: #e3a3a3; }
 :root[data-theme="dark"] .runtime-install-progress { border-color: #484b49; }
 :root[data-theme="dark"] .runtime-install-progress-head strong { color: #dfe4e0; }
 :root[data-theme="dark"] .runtime-install-progress-head small,

@@ -3,6 +3,13 @@ import { Check, CircleAlert, DatabaseBackup, FolderOpen, HardDrive, LoaderCircle
 import { HelpButton } from "../help/HelpProvider";
 
 type BackupFile = { name: string; size: number; createdAt: string };
+type BackupHealth = {
+  status: "pending" | "running" | "healthy" | "busy" | "failed";
+  lastSuccessAt: string | null;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+  stale: boolean;
+};
 type RuntimeDiagnostic = {
   id: string;
   label: string;
@@ -27,6 +34,7 @@ function sourceLabel(source = "") {
 
 export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotice }: { dataHome: string; claudeHome: string; codexHome: string; request: Request; onNotice: (message: string, tone?: "success" | "warning" | "error") => void }) {
   const [backups, setBackups] = useState<BackupFile[]>([]);
+  const [backupHealth, setBackupHealth] = useState<BackupHealth | null>(null);
   const [loadingBackups, setLoadingBackups] = useState(true);
   const [creatingBackup, setCreatingBackup] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -35,7 +43,11 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
 
   const loadBackups = useCallback(async () => {
     setLoadingBackups(true);
-    try { setBackups((await request<{ backups: BackupFile[] }>("/api/data/backups")).backups); }
+    try {
+      const result = await request<{ backups: BackupFile[]; health: BackupHealth | null }>("/api/data/backups");
+      setBackups(result.backups);
+      setBackupHealth(result.health);
+    }
     catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
     finally { setLoadingBackups(false); }
   }, [onNotice, request]);
@@ -45,8 +57,9 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
   const createBackup = async () => {
     setCreatingBackup(true);
     try {
-      const result = await request<{ backup: { files: number }; backups: BackupFile[] }>("/api/data/backups", { method: "POST", timeoutMs: 30 * 60_000 });
+      const result = await request<{ backup: { files: number }; backups: BackupFile[]; health: BackupHealth | null }>("/api/data/backups", { method: "POST", timeoutMs: 30 * 60_000 });
       setBackups(result.backups);
+      setBackupHealth(result.health);
       onNotice(`个人数据备份已完成：${result.backup.files} 个文件`, "success");
     } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
     finally { setCreatingBackup(false); }
@@ -81,6 +94,7 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
     </section>
     <section className="settings-data-tool">
       <header><span><DatabaseBackup size={18} /><strong>个人数据备份</strong><small>会话、设置、凭据、Skill、MCP 与 Agent 配置，保留最近 3 组并限制总容量</small></span><div><button type="button" onClick={() => void openFolder("backups")}><FolderOpen size={14} />备份目录</button><button type="button" className="primary" disabled={creatingBackup} onClick={() => void createBackup()}>{creatingBackup ? <LoaderCircle className="spin" size={14} /> : <DatabaseBackup size={14} />}{creatingBackup ? "备份中" : "立即备份"}</button></div></header>
+      {backupHealth && (backupHealth.stale || backupHealth.status === "failed" || backupHealth.status === "busy") && <div className={`settings-backup-health ${backupHealth.status}`}><CircleAlert size={15} /><span><strong>{backupHealth.status === "busy" ? "任务运行中，备份已顺延" : backupHealth.status === "failed" ? "自动备份暂未成功" : "备份已超过建议周期"}</strong><small>{backupHealth.lastError || (backupHealth.nextAttemptAt ? `下次尝试 ${new Date(backupHealth.nextAttemptAt).toLocaleString()}` : "可立即创建一份完整备份")}</small></span></div>}
       <div className="settings-backup-list">{loadingBackups ? <p><LoaderCircle className="spin" size={14} />正在读取备份</p> : backups.length ? backups.slice(0, 6).map((backup) => <div key={backup.name}><span><strong>{backup.name}</strong><small>{new Date(backup.createdAt).toLocaleString()}</small></span><em>{bytes(backup.size)}</em></div>) : <p>还没有可用备份。</p>}</div>
     </section>
     <section className="settings-data-tool">

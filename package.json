@@ -95,6 +95,7 @@
     "data:restore": "node --import tsx scripts/restore-data.mjs",
     "data:compat:0.1.0": "node scripts/create-data-compatibility-snapshot.mjs",
     "test:data-recovery": "node --import tsx scripts/test-data-recovery.mjs",
+    "test:backup-scheduler": "node --import tsx scripts/test-backup-scheduler.mjs",
     "test:data-owner": "node --import tsx scripts/test-data-owner-lease.mjs",
     "test:data-compatibility": "node scripts/test-data-compatibility-snapshot.mjs",
     "test:backend-recovery": "npm run build && node scripts/test-backend-recovery.mjs",

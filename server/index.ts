@@ -96,6 +96,7 @@ import { PendingInputActionError, type PendingInput as QueuePendingInput } from 
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
 import { createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
+import { BackupBusyError, BackupScheduler } from "./persistence/backupScheduler.js";
 import { workbenchInventoryItem } from "./sessionManagement/health.js";
 import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
 import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
@@ -1432,11 +1433,11 @@ async function claimLegacyOwnership(ownerUserId: string | null) {
   if (changed) await saveState();
 }
 
-async function createRuntimeBackup() {
+async function performRuntimeBackup() {
   await saveState();
   await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
   if (activeRuns.size || activeDelegationTasks.size || activeWorkflowNodes.size || activeWorkflowPlanners.size || activeWorkflowIntegrations.size) {
-    throw new Error("仍有 Agent 或任务编排正在运行，请在任务完成后创建完整个人数据备份");
+    throw new BackupBusyError("仍有 Agent 或任务编排正在运行，将在任务空闲后自动重试完整个人数据备份");
   }
   return createPersonalDataBackup({
     dataDir: RUNTIME_DIR,
@@ -1453,6 +1454,12 @@ async function createRuntimeBackup() {
   });
 }
 
+let backupScheduler: BackupScheduler<Awaited<ReturnType<typeof performRuntimeBackup>>> | null = null;
+
+async function createRuntimeBackup() {
+  return backupScheduler ? backupScheduler.runNow() : performRuntimeBackup();
+}
+
 async function listRuntimeBackups() {
   await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
   return listPersonalDataBackups(BACKUP_DIR).map((item) => ({
@@ -1463,6 +1470,13 @@ async function listRuntimeBackups() {
     appVersion: item.manifest.appVersion,
     dataSchemaVersion: item.manifest.dataSchemaVersion
   }));
+}
+
+async function latestValidRuntimeBackupAt() {
+  await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
+  // Snapshots are checksumed and atomically published when created. Avoid re-reading
+  // every personal file on the server's startup path; restore performs full validation.
+  return listPersonalDataBackups(BACKUP_DIR)[0]?.manifest.createdAt || null;
 }
 
 function storageMaintenanceInput(): StorageMaintenanceInput {
@@ -7454,7 +7468,7 @@ app.get("/api/admin/backups", staffRead, async (_req, res) => {
 
 app.get("/api/data/backups", auth.requireRoles("owner", "admin"), async (_req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
-  res.json({ schemaVersion: 1, scope: "device", backups: await listRuntimeBackups() });
+  res.json({ schemaVersion: 1, scope: "device", backups: await listRuntimeBackups(), health: backupScheduler?.snapshot() || null });
 });
 
 app.get("/api/data/capabilities", auth.requireRoles("owner", "admin"), (_req, res) => {
@@ -7495,10 +7509,10 @@ app.post("/api/data/backups", auth.requireRoles("owner", "admin"), async (req, r
   try {
     const backup = await createRuntimeBackup();
     auth.auditRequest(req, { action: "data.backup", targetType: "workbench", summary: backup });
-    res.status(201).json({ schemaVersion: 1, scope: "device", backup, backups: await listRuntimeBackups() });
+    res.status(201).json({ schemaVersion: 1, scope: "device", backup, backups: await listRuntimeBackups(), health: backupScheduler?.snapshot() || null });
   } catch (error) {
     auth.auditRequest(req, { action: "data.backup", targetType: "workbench", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
-    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    res.status(error instanceof BackupBusyError ? 409 : 500).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -11013,16 +11027,30 @@ if (fs.existsSync(DIST_DIR)) {
   app.get("*splat", (_req, res) => res.sendFile(path.join(DIST_DIR, "index.html")));
 }
 
-setInterval(() => {
-  createRuntimeBackup()
-    .then((result) => {
-      auth.audit({ action: "system.backup", targetType: "server", summary: result });
-      return runStorageMaintenance(storageMaintenanceInput())
-        .then((maintenance) => auth.audit({ action: "system.storage_maintenance", targetType: "server", summary: { deletedItems: maintenance.deletedItems, deletedBytes: maintenance.deletedBytes } }))
-        .catch((error) => auth.audit({ action: "system.storage_maintenance", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) }));
-    })
-    .catch((error) => auth.audit({ action: "system.backup", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) }));
-}, 24 * 60 * 60 * 1000).unref();
+backupScheduler = new BackupScheduler({
+  healthFile: path.join(RUNTIME_DIR, "backup-health.json"),
+  runBackup: performRuntimeBackup,
+  getLatestBackupAt: latestValidRuntimeBackupAt,
+  onSuccess: async (result) => {
+    auth.audit({ action: "system.backup", targetType: "server", summary: result });
+    try {
+      const maintenance = await runStorageMaintenance(storageMaintenanceInput());
+      auth.audit({ action: "system.storage_maintenance", targetType: "server", summary: { deletedItems: maintenance.deletedItems, deletedBytes: maintenance.deletedBytes } });
+    } catch (error) {
+      auth.audit({ action: "system.storage_maintenance", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  onFailure: (error, status) => auth.audit({
+    action: "system.backup",
+    targetType: "server",
+    success: false,
+    summary: { status, nextAttemptAt: backupScheduler?.snapshot().nextAttemptAt },
+    errorMessage: error instanceof Error ? error.message : String(error)
+  })
+});
+void backupScheduler.start().catch((error) => {
+  auth.audit({ action: "system.backup_scheduler", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+});
 
 async function recoverStartupSessions() {
   const ids = [...startupRecoverySessionIds];
