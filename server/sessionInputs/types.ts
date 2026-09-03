@@ -10,6 +10,7 @@ export type PendingInput<TAttachment = unknown, TSkillPolicies = Record<string, 
   createdAt: string;
   updatedAt: string;
   revision: number;
+  clientMutationId?: string;
   skillName?: string;
   skillNames?: string[];
   agentMode?: "auto" | "all" | "off";

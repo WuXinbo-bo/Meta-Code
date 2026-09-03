@@ -28,6 +28,7 @@ assert.match(
   /runVerificationCommands\(current\.verificationCommands, workflow\.workDirectory,/,
   "工作流系统验收必须在独立任务目录执行，不能误用父工作区根目录"
 );
+assert.match(serverSource, /descriptor\.id === "codex"\s*\? \(await detectCodexRuntime\(\)\)\.available/, "Codex 工作流可用性必须由 CLI 运行时检测，不能依赖 API Key");
 assert.match(serverSource, /new WorkflowNodeStageRetryError\("snapshot"/, "快照异常必须进入阶段重试，不能重跑整个 Agent");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /并行产物一致性契约/, "规划官必须约束并行生产节点的共享数据口径");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /共享合同必须逐字可比/, "规划官必须逐字核对共享 schema 和枚举");

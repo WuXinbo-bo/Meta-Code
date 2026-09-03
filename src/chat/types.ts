@@ -16,6 +16,7 @@ export type PendingTurn<TAttachment = unknown> = {
   createdAt: string;
   updatedAt?: string;
   revision?: number;
+  clientMutationId?: string;
   skillNames?: string[];
   attachments?: TAttachment[];
 };

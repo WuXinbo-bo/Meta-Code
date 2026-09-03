@@ -416,6 +416,13 @@ type Bootstrap = {
   providerControls: ProviderControlSnapshot[];
   runtime: { dataHome: string; codexHome: string; claudeHome: string; sdk: string; codex: CodexRuntimeStatus; claude: CodexRuntimeStatus; providers: Record<string, CodexRuntimeStatus> };
 };
+function isSessionPayload(value: Session | null | undefined): value is Session {
+  return Boolean(value
+    && typeof value.id === "string"
+    && (value.scopeKind === "workspace" || value.scopeKind === "standalone")
+    && Array.isArray(value.messages)
+    && Array.isArray(value.pendingInputs));
+}
 type NavigationSnapshot = Pick<Bootstrap, "workspaces" | "sessions" | "workflows">;
 type SessionNavigationSource = "task" | "workspace" | "scope";
 type SessionNavigationState =
@@ -1981,6 +1988,7 @@ export function App() {
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [pendingNewTaskAttachments, setPendingNewTaskAttachments] = useState<DraftAttachment[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [submittingInput, setSubmittingInput] = useState(false);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [notice, setNoticeState] = useState<Notice | null>(null);
   const [agents, setAgents] = useState("");
@@ -2999,7 +3007,9 @@ export function App() {
     void requestCoordinatorRef.current.run(
       `session:${id}`,
       (signal) => api<Session>(`/api/sessions/${id}?messageLimit=${MESSAGE_INITIAL_RENDER}`, { signal, timeoutMs: 25_000 })
-    ).then((session) => sessionCacheRef.current.set(id, session)).catch(() => undefined);
+    ).then((session) => {
+      if (isSessionPayload(session)) sessionCacheRef.current.set(id, session);
+    }).catch(() => undefined);
   }, []);
   const scheduleSessionPrefetch = useCallback((id: string) => {
     if (sessionPrefetchTimerRef.current) window.clearTimeout(sessionPrefetchTimerRef.current);
@@ -3066,6 +3076,7 @@ export function App() {
   };
 
   const commitSessionSelection = (session: Session, source: SessionNavigationSource) => {
+    if (!isSessionPayload(session)) throw new Error("会话响应不完整，已保留当前界面，请重试");
     const isStandalone = session.scopeKind === "standalone";
     const workspaceId = isStandalone ? "" : session.workspaceId;
     const scopeKey = isStandalone ? "__standalone__" : workspaceId;
@@ -3103,6 +3114,11 @@ export function App() {
   };
 
   const navigateToSession = async (id: string, source: SessionNavigationSource = "task"): Promise<boolean> => {
+    const previousSelection = {
+      session: activeSession,
+      standaloneScope,
+      workspaceId: activeWorkspaceId
+    };
     const pending = sessionNavigationRef.current;
     if (pending.phase === "loading" && pending.sessionId === id) return false;
     if (activeSession?.id === id) {
@@ -3155,7 +3171,7 @@ export function App() {
     setSessionAreaMenu(null);
     setTaskFolderMenu(null);
     const cached = sessionCacheRef.current.getEntry(id);
-    if (cached && cached.ageMs <= SESSION_CACHE_FRESH_MS) {
+    if (cached && cached.ageMs <= SESSION_CACHE_FRESH_MS && isSessionPayload(cached.value)) {
       commitSessionSelection(cached.value, source);
       return true;
     }
@@ -3167,6 +3183,7 @@ export function App() {
         (signal) => api<Session>(`/api/sessions/${id}?messageLimit=${MESSAGE_INITIAL_RENDER}`, { signal, timeoutMs: 25_000 }),
         { generation }
       );
+      if (!isSessionPayload(session)) throw new Error("服务端返回了空会话，已保留原对话");
       const currentNavigation = sessionNavigationRef.current;
       if (
         !requestCoordinatorRef.current.isCurrentGeneration(generation)
@@ -3188,6 +3205,13 @@ export function App() {
         || selectionGeneration !== taskSelectionGenerationRef.current
       ) return false;
       updateSessionNavigation({ phase: "idle" });
+      if (previousSelection.session && isSessionPayload(previousSelection.session)) {
+        setActiveSession(previousSelection.session);
+        setStandaloneScope(previousSelection.standaloneScope);
+        setActiveWorkspaceId(previousSelection.workspaceId);
+        sessionStorage.setItem(ACTIVE_TASK_SCOPE_KEY, previousSelection.standaloneScope ? "standalone" : "workspace");
+        if (previousSelection.workspaceId) sessionStorage.setItem(ACTIVE_WORKSPACE_KEY, previousSelection.workspaceId);
+      }
       if (!(error instanceof Error) || error.name !== "AbortError") {
         sessionCacheRef.current.delete(id);
         dispatchWorkspaceBrowser({ type: "update-presentation", tabId: workspaceBrowserResourceKey(summaryBrowserResource), patch: { status: "error" } });
@@ -3647,30 +3671,62 @@ export function App() {
       setDialog("task-mode");
       return;
     }
-    setUploadingAttachments(true);
     if (running && activeSession) {
+      let optimisticId = "";
       try {
+        if (drafts.length) setUploadingAttachments(true);
         const preparedDrafts = await uploadDraftFiles(activeSession.id, drafts);
-        setDraftAttachments(preparedDrafts);
-        const updated = await api<Session>(`/api/sessions/${activeSession.id}/input?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
-          method: "POST",
-          body: JSON.stringify({ text, mode: runningInputMode, skillNames: explicitSkills, attachments: preparedDrafts.map((item) => item.uploaded).filter(Boolean) })
+        setUploadingAttachments(false);
+        const clientMutationId = crypto.randomUUID();
+        optimisticId = `optimistic-${clientMutationId}`;
+        const createdAt = new Date().toISOString();
+        const optimisticInput: PendingInput = {
+          schemaVersion: 1,
+          id: optimisticId,
+          clientMutationId,
+          text: text || "请处理以下附件。",
+          mode: runningInputMode,
+          status: runningInputMode === "steer" ? "steering" : "queued",
+          createdAt,
+          updatedAt: createdAt,
+          revision: 0,
+          skillNames: explicitSkills,
+          attachments: preparedDrafts.flatMap((item) => item.uploaded ? [item.uploaded] : [])
+        };
+        setActiveSession((current) => {
+          if (current?.id !== activeSession.id) return current;
+          const pendingInputs = runningInputMode === "steer"
+            ? [optimisticInput, ...current.pendingInputs.map((item) => item.status === "steering" ? { ...item, mode: "queue" as const, status: "queued" as const } : item)]
+            : [...current.pendingInputs, optimisticInput];
+          return { ...current, pendingInputs };
         });
         setPrompt("");
         setDraftAttachments([]);
         setInvokedSkillNames([]);
         setSkillMenuOpen(false);
         setFollowOutput(true);
+        setSubmittingInput(true);
+        const updated = await api<Session>(`/api/sessions/${activeSession.id}/input?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
+          method: "POST",
+          body: JSON.stringify({ clientMutationId, text, mode: runningInputMode, skillNames: explicitSkills, attachments: preparedDrafts.map((item) => item.uploaded).filter(Boolean) })
+        });
         setActiveSession((current) => current?.id === updated.id
           ? { ...mergeLatestSessionWindow(current, updated), usageSummary: current.usageSummary, usageSource: current.usageSource }
           : current);
       } catch (error) {
+        if (optimisticId) setActiveSession((current) => current?.id === activeSession.id
+          ? { ...current, pendingInputs: current.pendingInputs.filter((item) => item.id !== optimisticId) }
+          : current);
+        setPrompt((current) => current || text);
+        setDraftAttachments((current) => current.length ? current : drafts);
         setNotice(error instanceof Error ? error.message : String(error));
       } finally {
         setUploadingAttachments(false);
+        setSubmittingInput(false);
       }
       return;
     }
+    setUploadingAttachments(true);
     const session = activeSession;
     setFollowOutput(true);
     try {
@@ -3703,7 +3759,7 @@ export function App() {
       const updated = running
         ? await api<Session>(`/api/sessions/${activeSession.id}/input?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
             method: "POST",
-            body: JSON.stringify({ text: answer.trim(), mode: "steer", skillNames: [] })
+            body: JSON.stringify({ clientMutationId: crypto.randomUUID(), text: answer.trim(), mode: "steer", skillNames: [] })
           })
         : await api<Session>(`/api/sessions/${activeSession.id}/run?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
             method: "POST",
@@ -4816,7 +4872,7 @@ export function App() {
                   disabled={!activeFileScopeId || navigationPending}
                 />
                 <div className="composer-footer">
-                  <button type="button" className="attachment-button composer-control-button icon-only" onClick={() => attachmentInputRef.current?.click()} disabled={!activeFileScopeId || uploadingAttachments || navigationPending} title="添加附件"><Paperclip size={15} /></button>
+                  <button type="button" className="attachment-button composer-control-button icon-only" onClick={() => attachmentInputRef.current?.click()} disabled={!activeFileScopeId || uploadingAttachments || submittingInput || navigationPending} title="添加附件"><Paperclip size={15} /></button>
                   <ComposerPreferenceSelect label="项目权限" value={data.settings.sandboxMode} icon={<ShieldCheck size={14} />} options={[{ value: "danger-full-access", label: "完全访问" }, { value: "workspace-write", label: "仅工作区" }, { value: "read-only", label: "只读" }]} onChange={(sandboxMode) => updateExecutionSetting({ sandboxMode })} />
                   <ComposerPreferenceSelect label="联网模式" value={data.settings.webSearch} icon={<Globe2 size={14} />} options={[{ value: "live", label: "实时联网" }, { value: "cached", label: "缓存搜索" }, { value: "disabled", label: "关闭联网" }]} onChange={(webSearch) => updateExecutionSetting({ webSearch })} />
                   <CapabilityProfileControl
@@ -4852,7 +4908,7 @@ export function App() {
                         <button type="button" className={runningInputMode === "queue" ? "active" : ""} onClick={() => setRunningInputMode("queue")} title="当前轮次完成后发送"><ListPlus size={14} />排队</button>
                         <button type="button" className={runningInputMode === "steer" ? "active" : ""} onClick={() => setRunningInputMode("steer")} title="中断当前轮次并立即应用"><Route size={14} />引导</button>
                       </div>
-                      <button className={`send-button ${runningInputMode === "steer" ? "steer" : ""}`} onClick={run} disabled={uploadingAttachments || (!prompt.trim() && !draftAttachments.length)} title={runningInputMode === "steer" ? "立即引导" : "加入队列"}>{uploadingAttachments ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}</button>
+                      <button className={`send-button ${runningInputMode === "steer" ? "steer" : ""}`} onClick={run} disabled={uploadingAttachments || submittingInput || (!prompt.trim() && !draftAttachments.length)} title={submittingInput ? "正在确认消息" : runningInputMode === "steer" ? "立即引导" : "加入队列"}>{uploadingAttachments || submittingInput ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}</button>
                       <div className="run-controls">
                       <button className="send-button pause" onClick={pause} title="暂停任务"><Pause size={18} /></button>
                       <button className="send-button stop" onClick={stop} title="停止任务"><CircleStop size={18} /></button>
@@ -4860,7 +4916,7 @@ export function App() {
                     </>
                   ) : (
                     <>
-                      <button className="send-button" onClick={run} disabled={uploadingAttachments || (!prompt.trim() && !draftAttachments.length) || !activeFileScopeId || navigationPending} title="发送">{uploadingAttachments ? <LoaderCircle className="spin" size={17} /> : <Send size={18} />}</button>
+                      <button className="send-button" onClick={run} disabled={uploadingAttachments || submittingInput || (!prompt.trim() && !draftAttachments.length) || !activeFileScopeId || navigationPending} title="发送">{uploadingAttachments || submittingInput ? <LoaderCircle className="spin" size={17} /> : <Send size={18} />}</button>
                       {!navigationPending && activeSession?.status === "paused" && (
                         <div className="run-controls">
                           <button className="send-button resume" onClick={resume} title="继续任务" aria-label="继续任务"><Play size={18} /></button>

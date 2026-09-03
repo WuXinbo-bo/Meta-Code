@@ -41,6 +41,9 @@ export function normalizePendingInput<TAttachment = unknown, TSkillPolicies = Re
     createdAt,
     updatedAt,
     revision: Number.isInteger(source.revision) && Number(source.revision) >= 0 ? Number(source.revision) : 0,
+    ...(typeof source.clientMutationId === "string" && /^[a-zA-Z0-9._:-]{8,128}$/.test(source.clientMutationId)
+      ? { clientMutationId: source.clientMutationId }
+      : {}),
     ...(typeof source.skillName === "string" && source.skillName.trim() ? { skillName: source.skillName.trim() } : {}),
     ...(normalizedNames(source.skillNames)?.length ? { skillNames: normalizedNames(source.skillNames) } : {}),
     ...(agentMode ? { agentMode } : {}),

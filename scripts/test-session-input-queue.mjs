@@ -12,6 +12,7 @@ const legacy = normalizePendingInputs([{
   text: "first",
   mode: "queue",
   createdAt: "2026-01-01T00:00:00.000Z",
+  clientMutationId: "mutation-one",
   dispatchedToClaude: true
 }, {
   id: "two",
@@ -21,6 +22,7 @@ const legacy = normalizePendingInputs([{
 }]);
 assert.equal(legacy[0].schemaVersion, 1);
 assert.equal(legacy[0].status, "queued");
+assert.equal(legacy[0].clientMutationId, "mutation-one");
 assert.equal("dispatchedToClaude" in legacy[0], false);
 assert.equal(legacy[1].status, "steering");
 

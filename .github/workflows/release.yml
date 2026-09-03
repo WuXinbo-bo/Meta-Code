@@ -38,13 +38,7 @@ jobs:
         run: npm ci
 
       - name: Run release checks
-        shell: pwsh
-        run: |
-          npm run typecheck
-          npm run test:desktop-package
-          npm run test:release-manifest
-          npm run test:app-update
-          npm run test:repository
+        run: npm run test:ci
 
       - name: Build desktop packages
         run: npm run desktop:package

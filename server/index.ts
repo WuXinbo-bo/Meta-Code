@@ -91,6 +91,7 @@ import {
   type EventFileDiffPreview
 } from "./activity/fileDiff.js";
 import { claimPendingInput, normalizePendingInputs, promotePendingInput, removePendingInput, updatePendingInput } from "./sessionInputs/queue.js";
+import { GenerationSaveCoordinator } from "./persistence/generationSaveCoordinator.js";
 import { PendingInputActionError, type PendingInput as QueuePendingInput } from "./sessionInputs/types.js";
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
@@ -482,6 +483,7 @@ const workspaceTreeIndex = new WorkspaceTreeIndex();
 const publishedSessionRevisions = new Map<string, number>();
 const pendingSessionPublishes = new Map<string, Session>();
 const sessionPublishTimers = new Map<string, NodeJS.Timeout>();
+const pendingInputCommits = new Map<string, Promise<void>>();
 function emitSessionChanged(session: Session) {
   if ((publishedSessionRevisions.get(session.id) ?? -1) >= session.revision) return;
   publishedSessionRevisions.set(session.id, session.revision);
@@ -520,8 +522,7 @@ let detectedClaudeRuntimeAt = 0;
 let claudeRuntimeDetectionPromise: Promise<EngineRuntimeStatus> | null = null;
 const claudeModelValidationCache = new Map<string, number>();
 const codexModelValidationCache = new Map<string, number>();
-let saveInFlight: Promise<void> | null = null;
-let saveRequested = false;
+const stateSaveCoordinator = new GenerationSaveCoordinator(persistStateOnce);
 let deferredStateSaveTimer: NodeJS.Timeout | undefined;
 type PlainSkillRuntime = { root: string; instructions: string; cleanup: () => void };
 let bundledSkill: PlainSkillRuntime;
@@ -1336,61 +1337,51 @@ async function loadPlainSkill(): Promise<PlainSkillRuntime> {
   return { root, instructions, cleanup: () => undefined };
 }
 
+async function persistStateOnce() {
+  // Interactive reads get the next event-loop turn before the synchronous
+  // SQLite transaction. Each caller waits only for its own save generation.
+  await yieldToEventLoop();
+  const secrets: WorkbenchSecrets = {
+    codexApiKey: state.settings.apiKey,
+    claudeApiKey: state.settings.claude.apiKey,
+    mcp: Object.fromEntries(state.mcpServers.map((server) => [server.id, { env: server.env || {}, headers: server.headers || {} }])),
+    providerConnections: Object.fromEntries(state.providerConnections.map((profile) => [profile.id, { apiKey: profile.apiKey, secretEnv: profile.secretEnv }]))
+  };
+  const secretsChanged = secretVault.save(secrets);
+  // Session histories can be large. Copy only the secret-bearing branches so
+  // a live update does not clone every message on the Node event loop.
+  const persistedState: State = {
+    ...state,
+    settings: {
+      ...state.settings,
+      apiKey: "",
+      claude: { ...state.settings.claude, apiKey: "" }
+    },
+    mcpServers: state.mcpServers.map((server) => ({ ...server, env: {}, headers: {} })),
+    providerConnections: state.providerConnections.map((profile) => ({ ...profile, apiKey: "", secretEnv: {} }))
+  };
+  const changes = stateStore.save(persistedState);
+  for (const sessionId of changes.sessionIds) {
+    const session = state.sessions.find((item) => item.id === sessionId);
+    if (!session) continue;
+    publishSessionChanged(session);
+  }
+  for (const sessionId of changes.delegatedParentSessionIds) {
+    const session = state.sessions.find((item) => item.id === sessionId);
+    if (session) eventHub.publish("agents.changed", { sessionId }, [session.ownerUserId]);
+  }
+  const workspaceUsers = new Set(changes.workspaceOwnerUserIds);
+  for (const userId of workspaceUsers) eventHub.publish("sessions.changed", {}, [userId]);
+  if (changes.settings || secretsChanged) eventHub.publish("settings.changed", {});
+  if (changes.workspaceIds.length || changes.deletedWorkspaceIds.length) eventHub.publish("workspaces.changed", {}, [...workspaceUsers]);
+  if (changes.mcpServerIds.length || changes.deletedMcpServerIds.length || secretsChanged) eventHub.publish("mcp.changed", {}, [...new Set(changes.mcpServerOwnerUserIds)]);
+  if (changes.skillFolderIds.length || changes.deletedSkillFolderIds.length || changes.skillOrganizationIds.length || changes.deletedSkillOrganizationIds.length) {
+    eventHub.publish("skills.changed", {}, [...new Set(changes.skillOwnerUserIds)]);
+  }
+}
+
 function saveState() {
-  saveRequested = true;
-  if (saveInFlight) return saveInFlight;
-  saveInFlight = (async () => {
-    while (saveRequested) {
-      saveRequested = false;
-      // Interactive reads get the next event-loop turn before the synchronous
-      // SQLite transaction. The transaction remains atomic and typically takes
-      // only a few milliseconds, while navigation is no longer queued behind it.
-      await yieldToEventLoop();
-      const secrets: WorkbenchSecrets = {
-        codexApiKey: state.settings.apiKey,
-        claudeApiKey: state.settings.claude.apiKey,
-        mcp: Object.fromEntries(state.mcpServers.map((server) => [server.id, { env: server.env || {}, headers: server.headers || {} }])),
-        providerConnections: Object.fromEntries(state.providerConnections.map((profile) => [profile.id, { apiKey: profile.apiKey, secretEnv: profile.secretEnv }]))
-      };
-      const secretsChanged = secretVault.save(secrets);
-      // Session histories can be large. Copy only the secret-bearing branches so
-      // a live update does not clone every message on the Node event loop.
-      const persistedState: State = {
-        ...state,
-        settings: {
-          ...state.settings,
-          apiKey: "",
-          claude: { ...state.settings.claude, apiKey: "" }
-        },
-        mcpServers: state.mcpServers.map((server) => ({ ...server, env: {}, headers: {} })),
-        providerConnections: state.providerConnections.map((profile) => ({ ...profile, apiKey: "", secretEnv: {} }))
-      };
-      const changes = stateStore.save(persistedState);
-      for (const sessionId of changes.sessionIds) {
-        const session = state.sessions.find((item) => item.id === sessionId);
-        if (!session) continue;
-        publishSessionChanged(session);
-      }
-      for (const sessionId of changes.delegatedParentSessionIds) {
-        const session = state.sessions.find((item) => item.id === sessionId);
-        if (session) eventHub.publish("agents.changed", { sessionId }, [session.ownerUserId]);
-      }
-      const workspaceUsers = new Set(changes.workspaceOwnerUserIds);
-      for (const userId of workspaceUsers) {
-        eventHub.publish("sessions.changed", {}, [userId]);
-      }
-      if (changes.settings || secretsChanged) eventHub.publish("settings.changed", {});
-      if (changes.workspaceIds.length || changes.deletedWorkspaceIds.length) eventHub.publish("workspaces.changed", {}, [...workspaceUsers]);
-      if (changes.mcpServerIds.length || changes.deletedMcpServerIds.length || secretsChanged) eventHub.publish("mcp.changed", {}, [...new Set(changes.mcpServerOwnerUserIds)]);
-      if (changes.skillFolderIds.length || changes.deletedSkillFolderIds.length || changes.skillOrganizationIds.length || changes.deletedSkillOrganizationIds.length) {
-        eventHub.publish("skills.changed", {}, [...new Set(changes.skillOwnerUserIds)]);
-      }
-    }
-  })().finally(() => {
-    saveInFlight = null;
-    if (saveRequested) void saveState().catch((error) => console.error("Deferred state save failed", error));
-  });
-  return saveInFlight;
+  return stateSaveCoordinator.request();
 }
 
 function scheduleStateSave(delayMs = 400) {
@@ -3188,6 +3179,7 @@ function prepareTurn(session: Session, input: PendingInput) {
     attachments: input.attachments,
     payload: {
       inputMode: input.mode,
+      ...(input.clientMutationId ? { clientMutationId: input.clientMutationId } : {}),
       queuedAt: input.createdAt,
       skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
       skillNames: normalizeSkillNames(input.skillNames),
@@ -5250,7 +5242,7 @@ async function currentWorkflowProviderCapabilities(): Promise<WorkflowProviderCa
     const runtimeAvailable = descriptor.id === "claude"
       ? (await getClaudeRuntime()).available
       : descriptor.id === "codex"
-        ? Boolean(state.settings.apiKey.trim())
+        ? (await detectCodexRuntime()).available
         : (await cliRuntimeManager.detect(descriptor.runtimeId)).available;
     return [descriptor.id, {
       displayName: descriptor.shortName,
@@ -10381,6 +10373,19 @@ app.post("/api/sessions/:id/input", async (req, res) => {
   if (!activeRun) return res.status(409).json({ error: "任务当前未运行，请直接发送新消息" });
   const text = String(req.body.text || "").trim();
   const mode = req.body.mode === "steer" ? "steer" : "queue";
+  const clientMutationId = String(req.body.clientMutationId || "").trim();
+  const mutationCommitKey = clientMutationId ? `${session.ownerUserId}:${session.id}:${clientMutationId}` : "";
+  if (clientMutationId && !/^[a-zA-Z0-9._:-]{8,128}$/.test(clientMutationId)) return res.status(400).json({ error: "输入请求标识无效" });
+  if (clientMutationId) {
+    const inFlightCommit = pendingInputCommits.get(mutationCommitKey);
+    if (inFlightCommit) {
+      try { await inFlightCommit; }
+      catch { return res.status(503).json({ error: "输入暂时无法持久化，请重试" }); }
+    }
+    const pendingMatch = session.pendingInputs.some((item) => item.clientMutationId === clientMutationId);
+    const messageMatch = session.messages.some((message) => recordOf(message.payload)?.clientMutationId === clientMutationId);
+    if (pendingMatch || messageMatch) return res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
+  }
   let attachments: Attachment[] = [];
   try { attachments = await validateAttachments({ workspaceRoot: workspace.root, sessionId: session.id, value: req.body.attachments }); }
   catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
@@ -10401,22 +10406,45 @@ app.post("/api/sessions/:id/input", async (req, res) => {
     createdAt: inputCreatedAt,
     updatedAt: inputCreatedAt,
     revision: 0,
+    ...(clientMutationId ? { clientMutationId } : {}),
     skillPolicies: workspaceAgents.skillPolicies,
     skillNames: requestedSkillNames,
     attachments
   };
   try { promptWithAgents(displayText, input.skillPolicies, undefined, undefined, requestedSkillNames); } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  if (clientMutationId && session.pendingInputs.some((item) => item.clientMutationId === clientMutationId)) {
+    return res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
+  }
+  const previousPendingInputs = session.pendingInputs;
+  const previousUpdatedAt = session.updatedAt;
   if (mode === "steer") {
     const promoted = promotePendingInput([...session.pendingInputs, input], input.id, inputCreatedAt);
     session.pendingInputs = promoted.queue;
-    activeRun.steeringInputId = promoted.input.id;
+  } else session.pendingInputs = [...session.pendingInputs, input];
+  session.updatedAt = input.createdAt;
+  session.revision += 1;
+  const commit = saveState();
+  if (clientMutationId) pendingInputCommits.set(mutationCommitKey, commit);
+  try {
+    await commit;
+  } catch (error) {
+    const previousById = new Map(previousPendingInputs.map((item) => [item.id, item]));
+    session.pendingInputs = session.pendingInputs
+      .filter((item) => item.id !== input.id)
+      .map((item) => previousById.get(item.id) || item);
+    if (session.updatedAt === input.createdAt) session.updatedAt = previousUpdatedAt;
+    session.revision += 1;
+    scheduleStateSave(1_000);
+    return res.status(503).json({ error: `输入暂时无法持久化，请重试：${error instanceof Error ? error.message : String(error)}` });
+  } finally {
+    if (clientMutationId && pendingInputCommits.get(mutationCommitKey) === commit) pendingInputCommits.delete(mutationCommitKey);
+  }
+  if (mode === "steer") {
+    activeRun.steeringInputId = input.id;
     activeRun.abortIntent = "steer";
     abortDelegatedTasksForParent(session.id);
     activeRun.controller.abort();
-  } else session.pendingInputs.push(input);
-  session.updatedAt = input.createdAt;
-  session.revision += 1;
-  await saveState();
+  }
   res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
 });
 
