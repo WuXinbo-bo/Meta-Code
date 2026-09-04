@@ -86,6 +86,19 @@ try {
   assert.equal(status.sourceAttempts.at(-1)?.state, "succeeded");
   assert.equal(appUpdateResult(status).kind, "available");
 
+  const requestedManifestUrls = [];
+  const exactManifest = new AppUpdateService({
+    projectRoot: configuredRoot,
+    stateFile: path.join(configuredRoot, "data", "exact-manifest.json"),
+    fetch: async (input) => {
+      requestedManifestUrls.push(String(input));
+      return new Response(JSON.stringify(currentManifest), { status: 200, headers: { "content-type": "application/json" } });
+    }
+  });
+  await exactManifest.check(true);
+  assert.deepEqual(requestedManifestUrls, [manifestUrl], "update checks must only request the explicitly configured manifest URL");
+  exactManifest.close();
+
   status = await configured.skip("0.2.0", status.revision);
   assert.equal(status.announcementVisible, false);
   await assert.rejects(() => configured.updatePreferences({ autoCheck: false, expectedRevision: status.revision - 1 }), /其他窗口/);
@@ -162,12 +175,14 @@ try {
     projectRoot: configuredRoot,
     stateFile: path.join(configuredRoot, "data", "timeout.json"),
     requestTimeoutMs: 25,
+    checkTimeoutMs: 40,
     retryDelaysMs: [0, 0, 0],
     fetch: (_input, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }))
   });
   status = await timeout.check(true);
   assert.equal(status.source.state, "error");
   assert.match(status.lastError, /超时/);
+  assert.notEqual(status.checkState, "checking", "timed-out checks must always leave the checking state");
 
   currentManifest = manifest("0.3.2");
   const cachedStateFile = path.join(configuredRoot, "data", "cached-failure.json");

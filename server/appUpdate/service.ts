@@ -14,11 +14,13 @@ type ServiceOptions = {
   onChanged?: (status: AppUpdateStatus) => void;
   now?: () => Date;
   requestTimeoutMs?: number;
+  checkTimeoutMs?: number;
   getDataSchemaVersion?: () => number;
   retryDelaysMs?: number[];
 };
 
 const REQUEST_TIMEOUT_MS = 20_000;
+const CHECK_TIMEOUT_MS = 15_000;
 const MAX_UPDATE_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_RETRY_DELAYS_MS = [0, 250, 1_000];
 
@@ -77,6 +79,7 @@ export class AppUpdateService {
   private readonly onChanged?: (status: AppUpdateStatus) => void;
   private readonly now: () => Date;
   private readonly requestTimeoutMs: number;
+  private readonly checkTimeoutMs: number;
   private readonly getDataSchemaVersion: () => number;
   private readonly retryDelaysMs: number[];
   private readonly proxyAgent: EnvHttpProxyAgent | null;
@@ -98,6 +101,7 @@ export class AppUpdateService {
     this.onChanged = options.onChanged;
     this.now = options.now || (() => new Date());
     this.requestTimeoutMs = options.requestTimeoutMs || REQUEST_TIMEOUT_MS;
+    this.checkTimeoutMs = options.checkTimeoutMs || CHECK_TIMEOUT_MS;
     this.getDataSchemaVersion = options.getDataSchemaVersion || (() => this.config.dataSchemaVersion);
     this.retryDelaysMs = options.retryDelaysMs?.length ? options.retryDelaysMs : DEFAULT_RETRY_DELAYS_MS;
     this.state = this.readState();
@@ -208,17 +212,18 @@ export class AppUpdateService {
     this.sourceAttempts = [];
     this.emitChanged();
     this.state.lastCheckedAt = this.now().toISOString();
+    const deadlineAt = Date.now() + this.checkTimeoutMs;
     try {
       const channel = this.state.preferences.channel;
       let release: AppUpdateRelease | null = null;
       let manifestError = "";
       const manifestCandidates = this.manifestCandidates(channel);
       for (const candidate of manifestCandidates) {
+        const started = Date.now();
         try {
           this.checkPhase = "connecting";
           this.emitChanged();
-          const started = Date.now();
-          const payload = await this.fetchJson(candidate.url, {});
+          const payload = await this.fetchJson(candidate.url, {}, deadlineAt);
           this.checkPhase = "verifying";
           this.emitChanged();
           const manifest = parseAppUpdateManifest(payload, this.config);
@@ -230,7 +235,7 @@ export class AppUpdateService {
           break;
         } catch (error) {
           manifestError = error instanceof Error ? error.message : String(error);
-          this.sourceAttempts.push({ source: "manifest", label: candidate.label, url: candidate.url, state: "failed", durationMs: 0, error: manifestError });
+          this.sourceAttempts.push({ source: "manifest", label: candidate.label, url: candidate.url, state: "failed", durationMs: Date.now() - started, error: manifestError });
         }
       }
       if (!release && this.config.githubRepository) {
@@ -239,7 +244,7 @@ export class AppUpdateService {
         try {
           this.checkPhase = "connecting";
           this.emitChanged();
-          release = await this.checkGithub(channel);
+          release = await this.checkGithub(channel, deadlineAt);
           this.sourceAttempts.push({ source: "github", label: "GitHub Releases", url, state: "succeeded", durationMs: Date.now() - started, error: "" });
           this.sourceState = "github";
           this.sourceLabel = manifestError ? "GitHub Releases（清单线路不可用）" : "GitHub Releases 公告";
@@ -284,12 +289,12 @@ export class AppUpdateService {
     return this.status();
   }
 
-  private async checkGithub(channel: AppUpdateChannel): Promise<AppUpdateRelease> {
+  private async checkGithub(channel: AppUpdateChannel, deadlineAt: number): Promise<AppUpdateRelease> {
     if (!/^[\w.-]+\/[\w.-]+$/.test(this.config.githubRepository)) throw new Error("GitHub 更新仓库格式无效");
     const releases = await this.fetchJson(this.githubApiUrl(), {
       accept: "application/vnd.github+json",
       "user-agent": "Meta-Code-Workbench"
-    });
+    }, deadlineAt);
     if (!Array.isArray(releases)) throw new Error("GitHub Releases 返回格式无效");
     const candidate = releases.find((item) => item && typeof item === "object" && !(item as any).draft
       && (channel === "beta" ? Boolean((item as any).prerelease) : !(item as any).prerelease));
@@ -311,11 +316,13 @@ export class AppUpdateService {
     };
   }
 
-  private async fetchJson(url: string, headers: Record<string, string>) {
+  private async fetchJson(url: string, headers: Record<string, string>, deadlineAt: number) {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.retryDelaysMs.length; attempt += 1) {
-      if (this.retryDelaysMs[attempt] > 0) await new Promise((resolve) => setTimeout(resolve, this.retryDelaysMs[attempt]));
-      try { return await this.fetchJsonOnce(url, headers); }
+      const delay = this.retryDelaysMs[attempt];
+      if (Date.now() + delay >= deadlineAt) throw new Error("更新检查超时");
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      try { return await this.fetchJsonOnce(url, headers, deadlineAt); }
       catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
@@ -326,12 +333,14 @@ export class AppUpdateService {
     throw lastError;
   }
 
-  private async fetchJsonOnce(url: string, headers: Record<string, string>) {
+  private async fetchJsonOnce(url: string, headers: Record<string, string>, deadlineAt: number) {
     let parsed: URL;
     try { parsed = new URL(url); } catch { throw new Error("更新源地址无效"); }
     if (parsed.protocol !== "https:" && parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") throw new Error("更新源必须使用 HTTPS");
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error("更新检查超时");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(this.requestTimeoutMs, remainingMs));
     try {
       const response = await this.fetchImpl(parsed, { headers, signal: controller.signal, redirect: "follow" });
       if (!response.ok) throw new Error(`更新源请求失败（HTTP ${response.status}）`);
@@ -365,12 +374,7 @@ export class AppUpdateService {
   private manifestCandidates(channel: AppUpdateChannel) {
     const configured = this.manifestUrl(channel);
     if (!configured) return [];
-    const candidates: Array<{ label: string; url: string }> = [];
-    if (/\/latest\.json(?:$|\?)/i.test(configured)) {
-      candidates.push({ label: "发布清单 v2", url: configured.replace(/\/latest\.json(?=$|\?)/i, "/latest-v2.json") });
-    }
-    candidates.push({ label: "发布清单（兼容地址）", url: configured });
-    return candidates.filter((item, index) => candidates.findIndex((candidate) => candidate.url === item.url) === index);
+    return [{ label: "发布清单", url: configured }];
   }
 
   private refreshSourceState() {
