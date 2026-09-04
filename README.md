@@ -15,8 +15,6 @@
   <p>
     <img alt="Version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-24292f?style=flat-square" />
     <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?style=flat-square&amp;logo=windows11&amp;logoColor=white" />
-    <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-2f855a?style=flat-square" />
-    <img alt="ACP" src="https://img.shields.io/badge/ACP-ready-2563eb?style=flat-square" />
     <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-6f42c1?style=flat-square" />
   </p>
 </div>
@@ -167,7 +165,3 @@ npm run build
 ## License
 
 Meta Code 使用 [Apache License 2.0](./LICENSE)。第三方集成保留各自许可证。
-
-<p align="center">
-  <img src="./docs/images/readme/00-logo-concept.png" width="360" alt="Meta Code 品牌概念" />
-</p>
