@@ -96,7 +96,7 @@ import { PendingInputActionError, type PendingInput as QueuePendingInput } from 
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { sessionManagementFacets } from "./sessionManagement/facets.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
-import { createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
+import { createPersonalDataBackup, listPersonalDataBackups, verifyPersonalDataBackup } from "./dataRecovery.js";
 import { BackupBusyError, BackupScheduler } from "./persistence/backupScheduler.js";
 import { workbenchInventoryItem } from "./sessionManagement/health.js";
 import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
@@ -7514,6 +7514,20 @@ app.post("/api/data/backups", auth.requireRoles("owner", "admin"), async (req, r
   } catch (error) {
     auth.auditRequest(req, { action: "data.backup", targetType: "workbench", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
     res.status(error instanceof BackupBusyError ? 409 : 500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/data/backups/:name/verify", auth.requireRoles("owner", "admin"), async (req, res) => {
+  try {
+    const name = String(req.params.name || "");
+    const snapshot = listPersonalDataBackups(BACKUP_DIR).find((item) => item.name === name);
+    if (!snapshot) return res.status(404).json({ error: "个人数据备份不存在" });
+    const manifest = verifyPersonalDataBackup(snapshot.directory);
+    auth.auditRequest(req, { action: "data.backup_verify", targetType: "backup", targetId: name, summary: { files: manifest.files.length, totalBytes: manifest.totalBytes } });
+    res.json({ schemaVersion: 1, ok: true, name, files: manifest.files.length, totalBytes: manifest.totalBytes, appVersion: manifest.appVersion, dataSchemaVersion: manifest.dataSchemaVersion });
+  } catch (error) {
+    auth.auditRequest(req, { action: "data.backup_verify", targetType: "backup", targetId: String(req.params.name || ""), success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+    res.status(422).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 

@@ -18,3 +18,12 @@ export function providerStatusLabel(status: ProviderControlSnapshot["connection"
   if (status === "attention") return "需要配置";
   return "不可用";
 }
+
+export function providerMainAgentUnavailableReason(item: ProviderControlSnapshot | undefined) {
+  if (!item) return "尚未安装或完成连接配置，请前往设置处理。";
+  if (item.lifecycle.updating) return "Agent 正在安装或更新，完成后即可创建任务。";
+  if (!item.lifecycle.runtimeAvailable) return item.lifecycle.message || item.connection.message || "CLI 运行时不可用，请前往设置检查安装位置。";
+  if (item.connection.status !== "ready") return item.connection.message || "账号或连接尚未验证，请前往设置处理。";
+  if (!item.capabilities.sessions.create) return "当前 Agent 仅支持作为子 Agent 使用，不能直接创建主任务。";
+  return "当前 Agent 尚未开放主任务入口，请前往设置检查能力协商结果。";
+}

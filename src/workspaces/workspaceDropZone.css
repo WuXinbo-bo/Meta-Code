@@ -4,5 +4,6 @@
 .workspace-drop-zone small { font-size: 11px; }
 .workspace-drop-zone.dragging { border-color: var(--accent, #1f6f43); box-shadow: inset 0 0 0 1px var(--accent, #1f6f43); color: var(--accent, #1f6f43); }
 .workspace-drop-zone.disabled { cursor: not-allowed; opacity: .55; }
+.workspace-drop-zone.unavailable { min-height: 72px; border-style: solid; color: var(--muted); }
 .workspace-drop-zone p { display: inline-flex; align-items: center; gap: 5px; margin: 2px 0 0; color: var(--danger, #b42318); font-size: 11px; }
 :root[data-theme="dark"] .workspace-drop-zone { background: var(--surface); }

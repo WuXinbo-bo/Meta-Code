@@ -1407,6 +1407,8 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 .settings-backup-list > div > span { display: grid; min-width: 0; flex: 1 1 auto; gap: 2px; }
 .settings-backup-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-backup-list em { color: #747c75; font-size: 9px; font-style: normal; white-space: nowrap; }
+.settings-backup-list > div > button { display: inline-flex; min-height: 28px; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-secondary); background: transparent; font-size: 11px; cursor: pointer; }
+.settings-backup-list > div > button:disabled { cursor: wait; opacity: .55; }
 .settings-backup-list > p { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; color: #7b827c; font-size: 9px; }
 .settings-backup-health { display: flex; align-items: flex-start; gap: 8px; margin-top: 11px; padding: 9px 10px; border-left: 2px solid #b9831f; background: #fffbf2; color: #66501f; }
 .settings-backup-health.failed { border-left-color: #c94747; background: #fff8f7; color: #873f3f; }

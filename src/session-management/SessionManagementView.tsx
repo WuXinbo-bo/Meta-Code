@@ -581,7 +581,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
     </header>
 
     <nav className="session-management-tabs" aria-label="会话管理类别">
-      <button className={section === "inventory" ? "active" : ""} onClick={() => setSection("inventory")}><History size={15} />会话<span>{response?.summary.total || 0}</span></button>
+      <button className={section === "inventory" ? "active" : ""} onClick={() => setSection("inventory")} title="工作台与已同步原生会话的总库存"><History size={15} />全部库存<span>{response?.summary.total || 0}</span></button>
       <button className={section === "health" ? "active" : ""} onClick={() => setSection("health")}><HeartPulse size={15} />健康<span className={attentionCount ? "attention" : ""}>{attentionCount}</span></button>
       <button className={section === "trash" ? "active" : ""} onClick={() => setSection("trash")}><Trash2 size={15} />回收站<span>{trash.length + workspaceTrash.length}</span></button>
       <button className={section === "preferences" ? "active" : ""} onClick={() => setSection("preferences")}><Settings2 size={15} />设置</button>
@@ -640,7 +640,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
               }}><span className="session-row-title"><ProviderIcon provider={item.provider} size={19} /><i><strong>{item.title}</strong><small>{item.kind === "workflow" ? "任务编排" : sourceLabel(item.source)}{item.linked ? " · 已联动" : ""}{item.pinned ? " · 已置顶" : ""}</small></i></span><span><i className={`session-health-badge health-${item.health}`}>{item.health === "healthy" ? <Check size={11} /> : <CircleAlert size={11} />}{HEALTH_LABELS[item.health] || item.health}</i><small>{item.archivedAt ? "已归档" : STATUS_LABELS[item.status] || item.status}</small></span><span className="session-row-time"><strong>{relativeTime(item.updatedAt)}</strong><small>{item.messageCount} 条记录</small></span></button>
             </div>;
           }) : <div className="session-management-empty"><History size={20} /><strong>没有匹配的会话</strong><span>调整工作区或筛选条件后重试。</span></div>}
-          <footer className="session-pagination"><span>共 {response?.total || 0} 项</span><div><button disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}><ChevronLeft size={14} /></button><i>{page} / {totalPages}</i><button disabled={page >= totalPages || loading} onClick={() => setPage(page + 1)}><ChevronRight size={14} /></button></div></footer>
+          <footer className="session-pagination"><span>当前筛选 {response?.total || 0} 项{response && response.summary.total !== response.total ? ` · 总库存 ${response.summary.total}` : ""}</span><div><button disabled={page <= 1 || loading} onClick={() => setPage(page - 1)}><ChevronLeft size={14} /></button><i>{page} / {totalPages}</i><button disabled={page >= totalPages || loading} onClick={() => setPage(page + 1)}><ChevronRight size={14} /></button></div></footer>
         </div>
         {section === "health" && <section className="session-health-actions"><div><ShieldCheck size={19} /><span><strong>一致性检查</strong><small>扫描失效工作区、孤立子 Agent、过期租约和联动残留。</small></span></div><button disabled={acting} onClick={() => void runRepair(false)}>{acting ? <LoaderCircle className="spin" size={14} /> : <HeartPulse size={14} />}运行检查</button><button disabled={acting} onClick={() => void runRepair(true)}>应用安全修复</button>{repair && <p>最近检查 {relativeTime(repair.scannedAt)} · 发现 {repair.issueCount} 项 · 已修复 {repair.repairedCount} 项</p>}</section>}
       </main>

@@ -12,6 +12,8 @@ export function WorkspaceDropZone({ disabled, onFolder }: Props) {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
 
+  if (!window.metaCodeDesktop) return <div className="workspace-drop-zone unavailable"><CircleAlert size={20} aria-hidden="true" /><span><strong>网页版不支持拖入本地文件夹</strong><small>浏览器无法读取绝对路径，请使用上方“浏览”选择目录。</small></span></div>;
+
   return <div
     className={`workspace-drop-zone ${dragging ? "dragging" : ""} ${disabled ? "disabled" : ""}`}
     onDragEnter={(event) => { event.preventDefault(); if (!disabled) setDragging(true); }}

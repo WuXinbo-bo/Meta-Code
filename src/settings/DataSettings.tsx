@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, CircleAlert, DatabaseBackup, FolderOpen, HardDrive, LoaderCircle, RefreshCw, Terminal } from "lucide-react";
+import { Check, CircleAlert, DatabaseBackup, FolderOpen, HardDrive, LoaderCircle, RefreshCw, ShieldCheck, Terminal } from "lucide-react";
 import { HelpButton } from "../help/HelpProvider";
 
-type BackupFile = { name: string; size: number; createdAt: string };
+type BackupFile = { name: string; size: number; createdAt: string; fileCount: number; appVersion: string; dataSchemaVersion: number };
 type BackupHealth = {
   status: "pending" | "running" | "healthy" | "busy" | "failed";
   lastSuccessAt: string | null;
@@ -40,6 +40,8 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState("");
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostic[]>([]);
+  const [verifyingBackup, setVerifyingBackup] = useState("");
+  const [verifiedBackups, setVerifiedBackups] = useState<Set<string>>(new Set());
 
   const loadBackups = useCallback(async () => {
     setLoadingBackups(true);
@@ -82,6 +84,16 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
     catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
   };
 
+  const verifyBackup = async (backup: BackupFile) => {
+    setVerifyingBackup(backup.name);
+    try {
+      const result = await request<{ files: number; totalBytes: number }>(`/api/data/backups/${encodeURIComponent(backup.name)}/verify`, { method: "POST", timeoutMs: 5 * 60_000 });
+      setVerifiedBackups((current) => new Set(current).add(backup.name));
+      onNotice(`备份校验通过：${result.files} 个文件，${bytes(result.totalBytes)}`, "success");
+    } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
+    finally { setVerifyingBackup(""); }
+  };
+
   return <div className="settings-section settings-data-section">
     <div className="settings-page-heading"><div><span className="help-inline-heading"><h2>数据</h2><HelpButton topic="data-and-backups" /></span><p>个人数据独立于程序源码保存，可在卸载或升级后继续保留。</p></div></div>
     <section className="settings-data-primary">
@@ -95,7 +107,8 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
     <section className="settings-data-tool">
       <header><span><DatabaseBackup size={18} /><strong>个人数据备份</strong><small>会话、设置、凭据、Skill、MCP 与 Agent 配置，保留最近 3 组并限制总容量</small></span><div><button type="button" onClick={() => void openFolder("backups")}><FolderOpen size={14} />备份目录</button><button type="button" className="primary" disabled={creatingBackup} onClick={() => void createBackup()}>{creatingBackup ? <LoaderCircle className="spin" size={14} /> : <DatabaseBackup size={14} />}{creatingBackup ? "备份中" : "立即备份"}</button></div></header>
       {backupHealth && (backupHealth.stale || backupHealth.status === "failed" || backupHealth.status === "busy") && <div className={`settings-backup-health ${backupHealth.status}`}><CircleAlert size={15} /><span><strong>{backupHealth.status === "busy" ? "任务运行中，备份已顺延" : backupHealth.status === "failed" ? "自动备份暂未成功" : "备份已超过建议周期"}</strong><small>{backupHealth.lastError || (backupHealth.nextAttemptAt ? `下次尝试 ${new Date(backupHealth.nextAttemptAt).toLocaleString()}` : "可立即创建一份完整备份")}</small></span></div>}
-      <div className="settings-backup-list">{loadingBackups ? <p><LoaderCircle className="spin" size={14} />正在读取备份</p> : backups.length ? backups.slice(0, 6).map((backup) => <div key={backup.name}><span><strong>{backup.name}</strong><small>{new Date(backup.createdAt).toLocaleString()}</small></span><em>{bytes(backup.size)}</em></div>) : <p>还没有可用备份。</p>}</div>
+      <div className="settings-backup-list">{loadingBackups ? <p><LoaderCircle className="spin" size={14} />正在读取备份</p> : backups.length ? backups.slice(0, 6).map((backup) => <div key={backup.name}><span><strong>{backup.name}</strong><small>{new Date(backup.createdAt).toLocaleString()} · Meta Code {backup.appVersion} · 数据结构 {backup.dataSchemaVersion}</small></span><em>{bytes(backup.size)}</em><button type="button" disabled={Boolean(verifyingBackup)} onClick={() => void verifyBackup(backup)}>{verifyingBackup === backup.name ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}{verifiedBackups.has(backup.name) ? "已验证" : "验证"}</button></div>) : <p>还没有可用备份。</p>}</div>
+      <p className="settings-data-note">恢复会替换当前个人数据，必须完全退出 Meta Code 后执行；运行中仅允许创建和验证备份。</p>
     </section>
     <section className="settings-data-tool">
       <header><span><Terminal size={18} /><strong>CLI 运行诊断</strong><small>{checkedAt ? `上次检查 ${new Date(checkedAt).toLocaleString()}` : "检查来源、版本、路径和托管状态"}</small></span><button type="button" disabled={checking} onClick={() => void runDiagnostics()}>{checking ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}{checking ? "检查中" : diagnostics.length ? "重新检查" : "开始检查"}</button></header>

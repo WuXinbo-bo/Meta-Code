@@ -14,5 +14,7 @@ const preload = await fs.readFile(new URL("../desktop/preload.cjs", import.meta.
 const packaging = await fs.readFile(new URL("./build-desktop-package.mjs", import.meta.url), "utf8");
 assert.match(main, /preload: path\.join\(__dirname, "preload\.cjs"\)/);
 assert.match(preload, /webUtils\.getPathForFile/);
+const dropZone = await fs.readFile(new URL("../src/workspaces/WorkspaceDropZone.tsx", import.meta.url), "utf8");
+assert.match(dropZone, /网页版不支持拖入本地文件夹/);
 assert.match(packaging, /desktop", "preload\.cjs/);
 console.log("Electron workspace folder drop bridge and validation passed");
