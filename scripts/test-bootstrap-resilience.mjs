@@ -16,6 +16,12 @@ assert.doesNotMatch(
   "first-screen bootstrap must not scan third-party CLI runtimes"
 );
 assert.match(bootstrapRoute, /nativeProviders/, "bootstrap must expose cached native providers immediately");
+assert.match(server, /workflowRepository\.listNavigation\(ownerUserId\)/, "navigation must use lightweight workflow summaries");
+assert.doesNotMatch(
+  server.slice(server.indexOf("function navigationSnapshot"), bootstrapStart),
+  /workspaceAgentConfig\(workspace\)[\s\S]*workspaceAgentConfig\(workspace\)/,
+  "navigation must resolve each workspace Agent configuration once"
+);
 
 assert.equal(
   server.match(/app\.get\("\/api\/provider-controls"/g)?.length,
@@ -43,6 +49,11 @@ assert.match(
   realtimeEffect,
   /const next = await requestCoordinatorRef\.current\.run[\s\S]*setData\(\(current\)/,
   "provider data must only replace existing UI state after a successful response"
+);
+assert.match(
+  app,
+  /setData\(\(current\) => mergeBootstrapProviderState\(current, next\)\)/,
+  "a core bootstrap refresh must preserve background-loaded third-party providers"
 );
 
 const treeReconcileStart = app.indexOf("const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile", realtimeEffectEnd);

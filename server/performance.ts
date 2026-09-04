@@ -2,9 +2,11 @@ import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import type { NextFunction, Request, Response } from "express";
 
 type RouteSample = { route: string; method: string; durationMs: number; status: number; at: number };
+type StageSample = { route: string; stage: string; durationMs: number; at: number };
 type EventLoopSample = { meanMs: number; p95Ms: number; p99Ms: number; maxMs: number; at: number };
 
 const MAX_ROUTE_SAMPLES = 600;
+const MAX_STAGE_SAMPLES = 600;
 const MAX_LOOP_SAMPLES = 120;
 
 function percentile(values: number[], ratio: number) {
@@ -28,6 +30,7 @@ function normalizedRoute(req: Request) {
 export class WorkbenchPerformanceMonitor {
   private readonly delay = monitorEventLoopDelay({ resolution: 20 });
   private readonly routes: RouteSample[] = [];
+  private readonly stages: StageSample[] = [];
   private readonly loops: EventLoopSample[] = [];
   private readonly sampleTimer: NodeJS.Timeout;
 
@@ -54,6 +57,18 @@ export class WorkbenchPerformanceMonitor {
     next();
   };
 
+  async measure<T>(route: string, stage: string, operation: () => T | Promise<T>): Promise<T> {
+    const started = performance.now();
+    try {
+      return await operation();
+    } finally {
+      const durationMs = performance.now() - started;
+      this.stages.push({ route, stage, durationMs, at: Date.now() });
+      if (this.stages.length > MAX_STAGE_SAMPLES) this.stages.splice(0, this.stages.length - MAX_STAGE_SAMPLES);
+      if (durationMs >= 1_000) console.warn(`[performance] ${route} ${stage} ${Math.round(durationMs)}ms`);
+    }
+  }
+
   snapshot() {
     const recentRoutes = this.routes.filter((sample) => sample.at >= Date.now() - 5 * 60_000);
     const grouped = new Map<string, RouteSample[]>();
@@ -72,12 +87,29 @@ export class WorkbenchPerformanceMonitor {
         errors: samples.filter((sample) => sample.status >= 500).length
       };
     }).sort((left, right) => right.p95Ms - left.p95Ms);
+    const recentStages = this.stages.filter((sample) => sample.at >= Date.now() - 5 * 60_000);
+    const groupedStages = new Map<string, StageSample[]>();
+    for (const sample of recentStages) {
+      const key = `${sample.route} ${sample.stage}`;
+      groupedStages.set(key, [...(groupedStages.get(key) || []), sample]);
+    }
+    const stages = [...groupedStages.entries()].map(([stage, samples]) => {
+      const durations = samples.map((sample) => sample.durationMs);
+      return {
+        stage,
+        count: samples.length,
+        p50Ms: round(percentile(durations, 0.5)),
+        p95Ms: round(percentile(durations, 0.95)),
+        maxMs: round(Math.max(...durations))
+      };
+    }).sort((left, right) => right.p95Ms - left.p95Ms);
     const latestLoop = this.loops.at(-1) || { meanMs: 0, p95Ms: 0, p99Ms: 0, maxMs: 0, at: Date.now() };
     return {
       eventLoop: latestLoop,
       eventLoopHistory: this.loops.slice(-24),
       longRequests: recentRoutes.filter((sample) => sample.durationMs >= 200).length,
-      routes
+      routes,
+      stages
     };
   }
 

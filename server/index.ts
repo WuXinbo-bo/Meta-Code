@@ -3309,8 +3309,8 @@ function completeSkillPolicies(value: unknown) {
   return Object.fromEntries(Object.keys(defaults).map((name) => [name, requested[name] ?? defaults[name]])) as SkillPolicies;
 }
 
-function workspaceAgentConfig(workspace: Workspace) {
-  const defaults = defaultManagedSkillPolicies();
+function workspaceAgentConfig(workspace: Workspace, providedDefaults?: SkillPolicies) {
+  const defaults = providedDefaults || defaultManagedSkillPolicies();
   const available = Object.keys(defaults);
   const profile = capabilityProfileById(workspace.agentCapabilityProfileId, workspace.ownerUserId);
   const hasPolicyConfig = workspace.agentSkillPolicies && typeof workspace.agentSkillPolicies === "object";
@@ -7762,23 +7762,22 @@ app.post("/api/admin/server/:action", adminOnly, async (req, res) => {
 
 function navigationSnapshot(ownerUserId: string) {
   const activeWorkspaceIds = new Set(state.workspaces.filter((workspace) => workspace.ownerUserId === ownerUserId).map((workspace) => workspace.id));
+  const skillPolicyDefaults = defaultManagedSkillPolicies();
   return {
-    workspaces: state.workspaces.filter((workspace) => workspace.ownerUserId === ownerUserId).map((workspace) => ({
-      ...workspace,
-      agentSkillPolicies: workspaceAgentConfig(workspace).skillPolicies,
-      agentCapabilityProfileId: workspaceAgentConfig(workspace).capabilityProfileId,
-      agentSkillOverrides: workspaceAgentConfig(workspace).skillOverrides
-    })),
+    workspaces: state.workspaces.filter((workspace) => workspace.ownerUserId === ownerUserId).map((workspace) => {
+      const agentConfig = workspaceAgentConfig(workspace, skillPolicyDefaults);
+      return {
+        ...workspace,
+        agentSkillPolicies: agentConfig.skillPolicies,
+        agentCapabilityProfileId: agentConfig.capabilityProfileId,
+        agentSkillOverrides: agentConfig.skillOverrides
+      };
+    }),
     sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map(({ messages, ...session }) => ({
       ...session,
       messageCount: messages.length
     })),
-    workflows: workflowRepository.list(ownerUserId).filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId)).map((workflow) => ({
-      id: workflow.id, title: workflow.title, workspaceId: workflow.workspaceId, workDirectory: workflow.workDirectory,
-      plannerEngine: workflow.plannerEngine, maxConcurrentAgents: workflow.maxConcurrentAgents, status: workflow.status,
-      revision: workflow.revision, pinned: workflow.pinned, archivedAt: workflow.archivedAt, folderId: workflow.folderId,
-      updatedAt: workflow.updatedAt, createdAt: workflow.createdAt
-    }))
+    workflows: workflowRepository.listNavigation(ownerUserId).filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId))
   };
 }
 
@@ -7791,19 +7790,21 @@ function navigationEtag(snapshot: ReturnType<typeof navigationSnapshot>) {
   return `\"navigation-${crypto.createHash("sha1").update(marker).digest("base64url").slice(0, 16)}\"`;
 }
 
-app.get("/api/navigation", (req, res) => {
-  const snapshot = navigationSnapshot(req.authUser!.id);
+app.get("/api/navigation", async (req, res) => {
+  const snapshot = await performanceMonitor.measure("navigation", "snapshot", () => navigationSnapshot(req.authUser!.id));
   res.setHeader("Cache-Control", "private, no-cache");
   res.setHeader("ETag", navigationEtag(snapshot));
-  res.json(snapshot);
+  await performanceMonitor.measure("navigation", "json-response", () => res.json(snapshot));
 });
 
 app.get("/api/bootstrap", async (req, res) => {
-  const [codexRuntime, claudeRuntime] = await Promise.all([detectCodexRuntime(false, true), getClaudeRuntime(false, true)]);
+  const [codexRuntime, claudeRuntime] = await performanceMonitor.measure("bootstrap", "native-runtime", () =>
+    Promise.all([detectCodexRuntime(false, true), getClaudeRuntime(false, true)])
+  );
   const ownerUserId = req.authUser!.id;
   const canInspectLocalPaths = req.authUser!.role === "owner" || req.authUser!.role === "admin";
-  const skillLibrary = skillLibraryForUser(ownerUserId);
-  const agentProviders = agentAdapterRegistry.list();
+  const skillLibrary = await performanceMonitor.measure("bootstrap", "skill-library", () => skillLibraryForUser(ownerUserId));
+  const agentProviders = await performanceMonitor.measure("bootstrap", "provider-descriptors", () => agentAdapterRegistry.list());
   // Keep the first screen independent from third-party CLI scans. The full
   // provider snapshot is loaded in the background from /api/provider-controls.
   const nativeProviders = agentProviders.filter((provider) => provider.runtimeId === "codex" || provider.runtimeId === "claude");
@@ -7812,11 +7813,14 @@ app.get("/api/bootstrap", async (req, res) => {
     return [provider.id, canInspectLocalPaths ? status : publicRuntimeStatus(status)] as const;
   });
   const providerRuntimeMap = Object.fromEntries(providerRuntimeEntries);
-  const providerControls = await Promise.all(nativeProviders.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, providerRuntimeMap[provider.id])));
-  res.json({
+  const providerControls = await performanceMonitor.measure("bootstrap", "native-controls", () =>
+    Promise.all(nativeProviders.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, providerRuntimeMap[provider.id])))
+  );
+  const navigation = await performanceMonitor.measure("bootstrap", "navigation", () => navigationSnapshot(ownerUserId));
+  const payload = {
     user: { id: req.authUser!.id },
     settings: publicSettings(),
-    ...navigationSnapshot(ownerUserId),
+    ...navigation,
     skills: skillLibrary.skills,
     skillFolders: skillLibrary.folders,
     skillOrganizations: skillLibrary.organizations,
@@ -7834,7 +7838,8 @@ app.get("/api/bootstrap", async (req, res) => {
       claude: canInspectLocalPaths ? claudeRuntime : publicRuntimeStatus(claudeRuntime),
       providers: providerRuntimeMap
     }
-  });
+  };
+  await performanceMonitor.measure("bootstrap", "json-response", () => res.json(payload));
 });
 
 app.get("/api/runtime/codex", auth.requireRoles("owner", "admin"), async (_req, res) => {
@@ -8052,21 +8057,27 @@ async function providerControlBundle(ownerUserId: string, role: string, force = 
   }
   const load = (async () => {
     const canInspectLocalPaths = role === "owner" || role === "admin";
-    const [codexRuntime, claudeRuntime] = await Promise.all([
-      detectCodexRuntime(force, !force),
-      getClaudeRuntime(force, !force)
-    ]);
+    const [codexRuntime, claudeRuntime] = await performanceMonitor.measure("provider-controls", "native-runtime", () =>
+      Promise.all([
+        detectCodexRuntime(force, !force),
+        getClaudeRuntime(force, !force)
+      ])
+    );
     const providers = agentAdapterRegistry.list();
-    const runtimeEntries = await Promise.all(providers.map(async (provider) => {
-      const status = provider.runtimeId === "codex"
-        ? codexRuntime
-        : provider.runtimeId === "claude"
-          ? claudeRuntime
-          : await cliRuntimeManager.detect(provider.runtimeId);
-      return [provider.id, canInspectLocalPaths ? status : publicRuntimeStatus(status)] as const;
-    }));
+    const runtimeEntries = await performanceMonitor.measure("provider-controls", "runtime-detection", () =>
+      Promise.all(providers.map(async (provider) => {
+        const status = provider.runtimeId === "codex"
+          ? codexRuntime
+          : provider.runtimeId === "claude"
+            ? claudeRuntime
+            : await cliRuntimeManager.detect(provider.runtimeId);
+        return [provider.id, canInspectLocalPaths ? status : publicRuntimeStatus(status)] as const;
+      }))
+    );
     const runtimeMap = Object.fromEntries(runtimeEntries);
-    const providerControls = await Promise.all(providers.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, runtimeMap[provider.id])));
+    const providerControls = await performanceMonitor.measure("provider-controls", "control-snapshots", () =>
+      Promise.all(providers.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, runtimeMap[provider.id])))
+    );
     const value: ProviderControlBundle = {
       providerControls,
       providers: runtimeMap,

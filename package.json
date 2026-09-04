@@ -89,6 +89,8 @@
     "test:responsive-inspector": "node scripts/test-responsive-inspector.mjs",
     "test:request-resource-cache": "node --import tsx scripts/test-request-resource-cache.mjs",
     "test:bootstrap-resilience": "node scripts/test-bootstrap-resilience.mjs",
+    "test:performance-monitor": "node --import tsx scripts/test-performance-monitor.mjs",
+    "test:navigation-performance": "node --import tsx scripts/test-navigation-performance.mjs",
     "test:session-navigation": "node --import tsx scripts/test-session-navigation.mjs",
     "test:secret-vault": "node --import tsx scripts/test-secret-vault.mjs",
     "test:path-boundary": "node --import tsx scripts/test-path-boundary.mjs",

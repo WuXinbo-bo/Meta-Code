@@ -145,6 +145,35 @@ export class WorkflowRepository {
     return rows.map((row) => this.hydrate(row, false));
   }
 
+  listNavigation(ownerUserId: string) {
+    const rows = this.db.prepare(`
+      SELECT id, title, workspace_id, work_directory, planner_engine, max_concurrent_agents,
+             status, revision, pinned, archived_at, folder_id, updated_at, created_at
+      FROM workflow_runs
+      WHERE owner_user_id = ?
+      ORDER BY updated_at DESC
+    `).all(ownerUserId) as Array<Pick<WorkflowRow,
+      "id" | "title" | "workspace_id" | "work_directory" | "planner_engine" |
+      "max_concurrent_agents" | "status" | "revision" | "pinned" | "archived_at" |
+      "folder_id" | "updated_at" | "created_at"
+    >>;
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      workspaceId: row.workspace_id,
+      workDirectory: row.work_directory,
+      plannerEngine: row.planner_engine,
+      maxConcurrentAgents: row.max_concurrent_agents,
+      status: row.status,
+      revision: row.revision,
+      pinned: Boolean(row.pinned),
+      archivedAt: row.archived_at,
+      folderId: row.folder_id,
+      updatedAt: row.updated_at,
+      createdAt: row.created_at
+    }));
+  }
+
   listAll() {
     const rows = this.db.prepare("SELECT * FROM workflow_runs ORDER BY updated_at DESC").all() as WorkflowRow[];
     return rows.map((row) => this.hydrate(row, true));
