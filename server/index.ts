@@ -93,6 +93,7 @@ import {
 import { claimPendingInput, normalizePendingInputs, promotePendingInput, removePendingInput, updatePendingInput } from "./sessionInputs/queue.js";
 import { GenerationSaveCoordinator } from "./persistence/generationSaveCoordinator.js";
 import { PendingInputActionError, type PendingInput as QueuePendingInput } from "./sessionInputs/types.js";
+import { runTransitionConflict, type RunAbortIntent } from "./sessionRuns/transitions.js";
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { sessionManagementFacets } from "./sessionManagement/facets.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
@@ -440,7 +441,7 @@ const emptyState: State = {
 type ActiveRun = {
   controller: AbortController;
   promise: Promise<void>;
-  abortIntent?: "pause" | "stop" | "steer" | "shutdown" | "timeout";
+  abortIntent?: RunAbortIntent;
   steeringInputId?: string;
   skillName?: string;
   skillNames?: string[];
@@ -10621,12 +10622,17 @@ app.post("/api/sessions/:id/stop", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const activeRun = activeRuns.get(req.params.id);
-  if (activeRun?.controller.signal.aborted) return res.status(409).json({ error: "任务正在切换运行状态，请稍后再停止" });
+  if (activeRun?.controller.signal.aborted) {
+    const conflict = runTransitionConflict(activeRun.abortIntent, "stop");
+    if (conflict) return res.status(409).json({ error: conflict });
+  }
   abortDelegatedTasksForParent(session.id);
-  if (activeRun) {
+  if (activeRun && !activeRun.controller.signal.aborted) {
     activeRun.abortIntent = "stop";
     activeRun.controller.abort();
-  } else if (session.status !== "running") {
+  } else if (!activeRun && session.status === "stopped") {
+    return res.json({ ok: true, session: sessionWithMessageWindow(session, req.query.messageLimit) });
+  } else if (!activeRun && session.status !== "running") {
     return res.status(409).json({ error: "任务当前未运行" });
   }
   if (activeRun) {
@@ -10650,12 +10656,17 @@ app.post("/api/sessions/:id/pause", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const activeRun = activeRuns.get(req.params.id);
-  if (activeRun?.controller.signal.aborted) return res.status(409).json({ error: "任务正在应用引导或结束当前轮次，请稍后再暂停" });
+  if (activeRun?.controller.signal.aborted) {
+    const conflict = runTransitionConflict(activeRun.abortIntent, "pause");
+    if (conflict) return res.status(409).json({ error: conflict });
+  }
   abortDelegatedTasksForParent(session.id);
-  if (activeRun) {
+  if (activeRun && !activeRun.controller.signal.aborted) {
     activeRun.abortIntent = "pause";
     activeRun.controller.abort();
-  } else if (session.status !== "running") {
+  } else if (!activeRun && session.status === "paused") {
+    return res.json({ ok: true, session: sessionWithMessageWindow(session, req.query.messageLimit) });
+  } else if (!activeRun && session.status !== "running") {
     return res.status(409).json({ error: "任务当前未运行" });
   }
   if (activeRun) {

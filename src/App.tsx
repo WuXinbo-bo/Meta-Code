@@ -2007,6 +2007,7 @@ export function App() {
   const [pendingNewTaskAttachments, setPendingNewTaskAttachments] = useState<DraftAttachment[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [submittingInput, setSubmittingInput] = useState(false);
+  const [runControlAction, setRunControlAction] = useState<"pause" | "stop" | "">("");
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [notice, setNoticeState] = useState<Notice | null>(null);
   const [agents, setAgents] = useState("");
@@ -3895,25 +3896,27 @@ export function App() {
   };
 
   const stop = async () => {
-    if (!activeSession) return;
+    if (!activeSession || runControlAction) return;
+    setRunControlAction("stop");
     try {
       const result = await api<{ session: Session }>(`/api/sessions/${activeSession.id}/stop?messageLimit=${MESSAGE_INITIAL_RENDER}`, { method: "POST" });
       setActiveSession((current) => mergeLatestSessionWindow(current, result.session));
       await refresh();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
-    }
+    } finally { setRunControlAction(""); }
   };
 
   const pause = async () => {
-    if (!activeSession) return;
+    if (!activeSession || runControlAction) return;
+    setRunControlAction("pause");
     try {
       const result = await api<{ session: Session }>(`/api/sessions/${activeSession.id}/pause?messageLimit=${MESSAGE_INITIAL_RENDER}`, { method: "POST" });
       setActiveSession((current) => mergeLatestSessionWindow(current, result.session));
       await refresh();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
-    }
+    } finally { setRunControlAction(""); }
   };
 
   const resume = async () => {
@@ -4956,8 +4959,8 @@ export function App() {
                       </div>
                       <button className={`send-button ${runningInputMode === "steer" ? "steer" : ""}`} onClick={run} disabled={uploadingAttachments || submittingInput || (!prompt.trim() && !draftAttachments.length)} title={submittingInput ? "正在确认消息" : runningInputMode === "steer" ? "立即引导" : "加入队列"}>{uploadingAttachments || submittingInput ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />}</button>
                       <div className="run-controls">
-                      <button className="send-button pause" onClick={pause} title="暂停任务"><Pause size={18} /></button>
-                      <button className="send-button stop" onClick={stop} title="停止任务"><CircleStop size={18} /></button>
+                      <button type="button" className="send-button pause" onClick={pause} disabled={Boolean(runControlAction)} title={runControlAction === "pause" ? "正在暂停" : "暂停任务"}>{runControlAction === "pause" ? <LoaderCircle className="spin" size={18} /> : <Pause size={18} />}</button>
+                      <button type="button" className="send-button stop" onClick={stop} disabled={Boolean(runControlAction)} title={runControlAction === "stop" ? "正在停止" : "停止任务"}>{runControlAction === "stop" ? <LoaderCircle className="spin" size={18} /> : <CircleStop size={18} />}</button>
                       </div>
                     </>
                   ) : (
@@ -4966,7 +4969,7 @@ export function App() {
                       {!navigationPending && activeSession?.status === "paused" && (
                         <div className="run-controls">
                           <button className="send-button resume" onClick={resume} title="继续任务" aria-label="继续任务"><Play size={18} /></button>
-                          <button className="send-button stop" onClick={stop} title="停止任务" aria-label="停止任务"><CircleStop size={18} /></button>
+                          <button type="button" className="send-button stop" onClick={stop} disabled={Boolean(runControlAction)} title={runControlAction === "stop" ? "正在停止" : "停止任务"} aria-label="停止任务">{runControlAction === "stop" ? <LoaderCircle className="spin" size={18} /> : <CircleStop size={18} />}</button>
                         </div>
                       )}
                     </>
