@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { canonicalActivity, normalizeCanonicalActivity } from "../server/activity/normalize.ts";
 import { canonicalActivityFromEngineEvent } from "../server/activity/fromEngineEvent.ts";
-import { codexActivityFromEvent } from "../server/engines/codex/events.ts";
+import { codexActivityFromEvent, isCodexContextCompactionNotice } from "../server/engines/codex/events.ts";
 import { normalizeAgentStreamLog } from "../src/components/activityModel.ts";
 import { compactStoredActivityDetails } from "../server/activity/redaction.ts";
 
@@ -35,6 +35,20 @@ const unknownItem = codexActivityFromEvent({ type: "item.completed", item: { id:
 assert.equal(unknownItem.category, "unknown");
 assert.equal(unknownItem.phase, "completed");
 assert.equal(unknownItem.diagnostics?.[0]?.code, "unknown_codex_item");
+
+const compactionMessage = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
+assert.equal(isCodexContextCompactionNotice(compactionMessage), true);
+const compactionNotice = codexActivityFromEvent({ type: "item.completed", item: { id: "compact-1", type: "error", message: compactionMessage } });
+assert.equal(compactionNotice.rawType, "context_compaction");
+assert.equal(compactionNotice.category, "status");
+assert.equal(compactionNotice.phase, "completed");
+assert.equal(compactionNotice.title, "上下文已整理");
+
+assert.equal(isCodexContextCompactionNotice("Context compaction failed: server disconnected"), false);
+const genuineError = codexActivityFromEvent({ type: "item.completed", item: { id: "error-1", type: "error", message: "sandbox initialization failed" } });
+assert.equal(genuineError.rawType, "error");
+assert.equal(genuineError.category, "error");
+assert.equal(genuineError.phase, "failed");
 
 const legacy = normalizeAgentStreamLog({ id: "legacy", kind: "tool", title: "Bash", text: "echo ok" });
 assert.equal(legacy.id, "legacy");

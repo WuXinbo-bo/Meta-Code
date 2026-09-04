@@ -31,6 +31,14 @@ function recordOf(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+export function isCodexContextCompactionNotice(message: string) {
+  const normalized = String(message || "").trim();
+  if (!normalized || /\b(?:failed|failure|unable)\b/i.test(normalized)) return false;
+  return /\blong threads?\b[\s\S]*\bmultiple compactions?\b/i.test(normalized)
+    || /\bmultiple compactions?\b[\s\S]*\bless accurate\b/i.test(normalized)
+    || /\bcontext (?:was )?compacted\b/i.test(normalized);
+}
+
 function itemPhase(rawType: string, item: Record<string, unknown>): CodexActivityPhase {
   const status = String(item.status || "");
   if (status === "failed" || item.type === "error") return "failed";
@@ -72,6 +80,13 @@ export function codexActivityFromEvent(event: ThreadEvent | unknown): CodexActiv
   const itemType = String(item.type || "unknown");
   const id = String(item.id || `${rawType}:${itemType}`);
   const phase = itemPhase(rawType, item);
+  if (itemType === "error") {
+    const message = String(item.message || "Codex 执行异常");
+    if (isCodexContextCompactionNotice(message)) {
+      return presentation({ id, rawType: "context_compaction", category: "status", phase: "completed", title: "上下文已整理", summary: "当前会话已多次自动整理上下文，继续运行可能降低准确性", detail: { message, sourceType: itemType } });
+    }
+    return presentation({ id, rawType: itemType, category: "error", phase: "failed", title: "Codex 执行异常", summary: message, detail: { message } });
+  }
   if (itemType === "agent_message") return presentation({ id, rawType: itemType, category: "message", phase, title: "Codex 回复", summary: String(item.text || "") });
   if (itemType === "reasoning") return presentation({ id, rawType: itemType, category: "reasoning", phase, title: "分析与推理", summary: String(item.text || "") });
   if (itemType === "command_execution") return presentation({ id, rawType: itemType, category: "command", phase, title: "执行命令", summary: String(item.command || "命令执行"), detail: { command: item.command, status: item.status, exitCode: item.exit_code ?? null, output: item.aggregated_output } });
