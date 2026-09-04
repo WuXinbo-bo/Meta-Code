@@ -429,6 +429,20 @@ type ProviderControlBundle = Pick<Bootstrap["runtime"], "codex" | "claude" | "pr
   providerControls: ProviderControlSnapshot[];
   generatedAt: string;
 };
+
+function mergeBootstrapProviderState(current: Bootstrap | null, next: Bootstrap): Bootstrap {
+  if (!current) return next;
+  const controlsById = new Map(current.providerControls.map((control) => [control.providerId, control]));
+  for (const control of next.providerControls) controlsById.set(control.providerId, control);
+  return {
+    ...next,
+    providerControls: next.agentProviders.map((provider) => controlsById.get(provider.id)).filter(Boolean) as ProviderControlSnapshot[],
+    runtime: {
+      ...next.runtime,
+      providers: { ...current.runtime.providers, ...next.runtime.providers }
+    }
+  };
+}
 type SessionNavigationSource = "task" | "workspace" | "scope";
 type SessionNavigationState =
   | { phase: "idle" }
@@ -2326,7 +2340,7 @@ export function App() {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         try {
           const next = normalizeBootstrap(await api<Bootstrap>("/api/bootstrap"));
-          setData(next);
+          setData((current) => mergeBootstrapProviderState(current, next));
           const restoreStandalone = sessionStorage.getItem(ACTIVE_TASK_SCOPE_KEY) === "standalone"
             && next.sessions.some((session) => session.scopeKind === "standalone" && !session.archivedAt);
           if (restoreStandalone) {
