@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { AppUpdateService } from "../server/appUpdate/service.ts";
 import { canonicalManifestPayload } from "../server/appUpdate/manifest.ts";
+import { appUpdateResult } from "../src/settings/appUpdatePresentation.ts";
 
 const signingKeys = crypto.generateKeyPairSync("ed25519");
 const signingKeyId = "test-release-key";
@@ -83,6 +84,7 @@ try {
   assert.deepEqual(status.capabilities, { check: true, download: false, apply: false, launcher: false });
   assert.equal(status.checkPhase, "completed");
   assert.equal(status.sourceAttempts.at(-1)?.state, "succeeded");
+  assert.equal(appUpdateResult(status).kind, "available");
 
   status = await configured.skip("0.2.0", status.revision);
   assert.equal(status.announcementVisible, false);
@@ -94,7 +96,9 @@ try {
 
   currentManifest = manifest("0.1.0");
   const current = new AppUpdateService({ projectRoot: configuredRoot, stateFile: path.join(configuredRoot, "data", "current.json") });
-  assert.equal((await current.check(true)).updateAvailable, false);
+  const currentStatus = await current.check(true);
+  assert.equal(currentStatus.updateAvailable, false);
+  assert.equal(appUpdateResult(currentStatus).kind, "current");
 
   const replacedBuildRoot = await project({ manifestUrls: { stable: manifestUrl, beta: manifestUrl } });
   await fs.writeFile(path.join(replacedBuildRoot, "build-info.json"), JSON.stringify({ schemaVersion: 1, version: "0.1.0", buildId: "0.1.0-original" }));
@@ -110,6 +114,7 @@ try {
   assert.equal(status.updateAvailable, true);
   assert.equal(status.release?.compatible, false);
   assert.match(status.release?.incompatibilityReason || "", /数据架构/);
+  assert.equal(appUpdateResult(status).kind, "incompatible");
 
   currentManifest = manifest("0.3.0", { compatibility: { data: { readsFrom: { min: 2, max: 2 }, writesTo: 2, migratesFrom: { min: 1, max: 2 }, migrationProtocolVersion: 2, downgradePolicy: "blocked" }, launcherProtocol: { min: 1, max: 1 } } });
   const migrationProtocol = new AppUpdateService({ projectRoot: configuredRoot, stateFile: path.join(configuredRoot, "data", "migration-protocol.json") });
@@ -181,6 +186,7 @@ try {
   assert.equal(status.source.usingCachedRelease, true);
   assert.equal(status.checkPhase, "failed");
   assert.equal(status.release?.version, "0.3.2", "检查失败时必须保留上次成功结果");
+  assert.equal(appUpdateResult(status).kind, "failed", "失败后的缓存版本不能伪装成本次检查成功");
   assert.equal(status.source.lastSuccessfulState, "manifest");
   cachedFailure.close();
 

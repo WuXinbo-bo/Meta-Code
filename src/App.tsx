@@ -5058,7 +5058,7 @@ export function App() {
           setDialog("workspace");
         }}
       />}
-      <AppUpdateAnnouncement hidden={view === "settings"} onOpen={() => { cancelSessionNavigation(); setSettingsTarget("updates"); setView("settings"); }} />
+      <AppUpdateAnnouncement hidden={view === "settings"} />
       {notice && <div className={`toast ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"}><span>{notice.message}</span><button aria-label="关闭提示" onClick={() => setNotice("")}><X size={15} /></button></div>}
     </div>
   );
