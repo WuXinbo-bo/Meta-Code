@@ -2012,9 +2012,25 @@ export function App() {
   const [agents, setAgents] = useState("");
   const [agentsWorkspaceId, setAgentsWorkspaceId] = useState("");
   const [followOutput, setFollowOutput] = useState(true);
+  const [touchActionMessageId, setTouchActionMessageId] = useState("");
   const [previewFile, setPreviewFile] = useState<PreviewFile | null>(null);
   const [previewScopeId, setPreviewScopeId] = useState("");
   const [previewWorkspaceRoot, setPreviewWorkspaceRoot] = useState("");
+
+  useEffect(() => {
+    setTouchActionMessageId("");
+  }, [activeSession?.id]);
+
+  useEffect(() => {
+    if (!touchActionMessageId) return;
+    const dismissTouchActions = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const message = target?.closest<HTMLElement>(".message.assistant");
+      if (message?.dataset.messageId !== touchActionMessageId) setTouchActionMessageId("");
+    };
+    document.addEventListener("pointerdown", dismissTouchActions, true);
+    return () => document.removeEventListener("pointerdown", dismissTouchActions, true);
+  }, [touchActionMessageId]);
   const pagePreferencesRef = useRef(DEFAULT_WORKBENCH_INTERFACE_SETTINGS.workspaceBrowser);
   if (data?.settings.interface) pagePreferencesRef.current = normalizeWorkbenchInterfaceSettings(data.settings.interface).workspaceBrowser;
   const workspaceBrowserReducer = useCallback((state: WorkspaceBrowserTabsState, action: WorkspaceBrowserTabsAction) => (
@@ -4736,7 +4752,16 @@ export function App() {
                       />
                     ) : (() => {
                       const editing = message.role === "user" && editingMessageId === message.id;
-                      return <article className={`message ${message.role}`}>
+                      return <article
+                        className={`message ${message.role}${touchActionMessageId === message.id ? " touch-actions-open" : ""}`}
+                        data-message-id={message.id}
+                        onPointerUp={(event) => {
+                          if (message.role !== "assistant" || event.pointerType === "mouse") return;
+                          const target = event.target instanceof Element ? event.target : null;
+                          if (target?.closest("button, a, input, textarea, summary")) return;
+                          setTouchActionMessageId((current) => current === message.id ? "" : message.id);
+                        }}
+                      >
                         {message.role !== "user" && <div className="avatar"><Bot size={17} /></div>}
                         <div className="message-body">
                           {editing ? (

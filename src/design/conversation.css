@@ -53,7 +53,7 @@
 .message.assistant {
   grid-template-columns: 30px minmax(0, 1fr);
   gap: 12px;
-  margin-bottom: 30px;
+  margin-bottom: 0;
 }
 .message.assistant .avatar {
   width: 30px;
@@ -99,7 +99,8 @@
 .message-actions .icon-button,
 .message-actions .copy-message-button { width: 22px; height: 22px; }
 .message:hover .message-actions,
-.message:focus-within .message-actions {
+.message:focus-within .message-actions,
+.message.touch-actions-open .message-actions {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
@@ -108,10 +109,6 @@
   .message.assistant .message-body { padding-right: 52px; }
   .message-actions { right: 0; left: auto; }
 }
-@media (hover: none) {
-  .message-actions { opacity: .72; pointer-events: auto; transform: none; }
-}
-
 .markdown-body,
 .agent-markdown-message { color: var(--mc-text); font-size: 14.5px; line-height: 1.74; }
 .markdown-body h1,
