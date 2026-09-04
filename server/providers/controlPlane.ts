@@ -94,12 +94,37 @@ export type ProviderConfigurationField = {
 
 type ProviderConfigurationDefinition = {
   homeEnv?: string;
+  authMethods?: Array<{ id: string; name: string; description: string; type: "agent" | "terminal" }>;
   fields: ProviderConfigurationField[];
 };
 
 // Provider-specific facts live in one declarative catalog. The market UI and
 // session runtime consume the same generic control-plane contract.
 const DEFINITIONS: Record<string, ProviderConfigurationDefinition> = {
+  codex: {
+    authMethods: [
+      { id: "workbench-account", name: "工作台独立账号", description: "使用 Meta Code 独立的 Codex 配置和登录状态，不影响系统 Codex。", type: "agent" },
+      { id: "system-account", name: "复用系统账号", description: "读取当前 Windows 用户的 Codex 登录状态，不复制或修改系统账号。", type: "agent" },
+      { id: "openai-api-key", name: "OpenAI API", description: "使用 OpenAI API Key 和官方接口。", type: "agent" },
+      { id: "openai-compatible", name: "兼容接口", description: "使用自定义 OpenAI Responses 兼容端点。", type: "agent" }
+    ],
+    fields: [
+      { env: "OPENAI_BASE_URL", label: "Base URL", kind: "url", authMethodIds: ["openai-compatible"], placeholder: "https://api.example.com" },
+      { env: "OPENAI_API_KEY", label: "API Key", kind: "secret", authMethodIds: ["openai-api-key", "openai-compatible"], placeholder: "sk-..." }
+    ]
+  },
+  claude: {
+    authMethods: [
+      { id: "workbench-account", name: "工作台独立账号", description: "使用 Meta Code 独立的 Claude 配置和登录状态，不影响系统 Claude。", type: "agent" },
+      { id: "system-account", name: "复用系统账号", description: "读取当前 Windows 用户的 Claude 登录状态，不复制或修改系统账号。", type: "agent" },
+      { id: "anthropic-api-key", name: "Anthropic API", description: "使用 Anthropic API Key 和官方接口。", type: "agent" },
+      { id: "anthropic-compatible", name: "兼容接口", description: "使用自定义 Anthropic Messages 兼容端点。", type: "agent" }
+    ],
+    fields: [
+      { env: "ANTHROPIC_BASE_URL", label: "Base URL", kind: "url", authMethodIds: ["anthropic-compatible"], placeholder: "https://api.example.com" },
+      { env: "ANTHROPIC_API_KEY", label: "API Key", kind: "secret", authMethodIds: ["anthropic-api-key", "anthropic-compatible"], placeholder: "sk-ant-..." }
+    ]
+  },
   gemini: {
     homeEnv: "GEMINI_CLI_HOME",
     fields: [
@@ -117,12 +142,12 @@ export function providerConfiguration(providerId: string, authMethods: AuthMetho
   const definition = DEFINITIONS[providerId] || { fields: [] };
   return {
     providerId,
-    authMethods: authMethods.map((method) => ({
+    authMethods: authMethods.length ? authMethods.map((method) => ({
       id: method.id,
       name: method.name,
       description: method.description || "",
       type: "type" in method && method.type === "terminal" ? "terminal" as const : "agent" as const
-    })),
+    })) : structuredClone(definition.authMethods || []),
     fields: definition.fields
   };
 }
@@ -151,9 +176,18 @@ export function createProviderControlSnapshot(input: ProviderControlSnapshotInpu
   let status: ProviderControlStatus = "unavailable";
   let connectionMessage = runtime.message || "CLI 不可用";
 
-  if (runtime.available && transport === "native") {
+  if (runtime.available && transport === "native" && !profile) {
     status = "ready";
-    connectionMessage = "原生增强运行时可用";
+    connectionMessage = "原生增强运行时可用，正在使用兼容配置";
+  } else if (runtime.available && transport === "native" && profile?.healthStatus === "ready") {
+    status = "ready";
+    connectionMessage = profile.healthMessage || "账号与连接已验证";
+  } else if (runtime.available && transport === "native" && profile?.healthStatus === "checking") {
+    status = "checking";
+    connectionMessage = profile.healthMessage || "正在验证账号与连接";
+  } else if (runtime.available && transport === "native") {
+    status = "attention";
+    connectionMessage = profile?.healthMessage || "连接方案尚未验证";
   } else if (runtime.available && !profile) {
     status = "attention";
     connectionMessage = "CLI 可用，尚未配置连接方案";
@@ -202,7 +236,7 @@ export function createProviderControlSnapshot(input: ProviderControlSnapshotInpu
     },
     connection: {
       profileId: profile?.id || "",
-      profileName: profile?.name || (transport === "native" ? "原生配置" : ""),
+      profileName: profile?.name || (transport === "native" ? "兼容配置" : ""),
       profileCount: profiles.length,
       authMode: profile?.authMode || (transport === "native" ? "native" : "native-account"),
       status: input.updating ? "checking" : status,

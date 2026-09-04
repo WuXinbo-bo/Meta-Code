@@ -383,6 +383,7 @@ const STANDALONE_RUNTIME_DIR = APP_PATHS.standaloneSessionsDir;
 const CODEX_HOME = APP_PATHS.codexHome;
 const OFFICIAL_CODEX_HOME = path.resolve(process.env.META_CODEX_LINK_HOME || path.join(os.homedir(), ".codex"));
 const CLAUDE_HOME = APP_PATHS.claudeHome;
+const OFFICIAL_CLAUDE_HOME = path.resolve(process.env.META_CLAUDE_LINK_HOME || path.join(os.homedir(), ".claude"));
 const MCP_CONFIG_DIR = APP_PATHS.mcpConfigDir;
 const WORKFLOW_PLANNER_TRANSACTION_DIR = APP_PATHS.workflowTransactionsDir;
 const ACTIVITY_ARTIFACTS_DIR = APP_PATHS.activityArtifactsDir;
@@ -2412,7 +2413,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
   upsertCodexBridgeMessage(parentSession, agent);
   await saveState();
   try {
-    const codex = buildCodex(state.settings, undefined, true, workspace);
+    const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [], nativeProviderHome("codex", parentSession.ownerUserId));
     const executionWorkspace = { ...workspace, root: cwd } satisfies Workspace;
     const workerThreadOptions = delegatedThreadOptions(executionWorkspace, state.settings);
     const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map((item) => String(item).trim()).filter(Boolean) : [];
@@ -3028,7 +3029,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
       baseUrl: state.settings.claude.baseUrl,
       apiKey: state.settings.claude.apiKey,
       resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey }),
-      configDir: CLAUDE_HOME,
+      configDir: nativeProviderHome("claude", parentSession.ownerUserId),
       mcpConfigPath,
       permissionMode: "bypassPermissions",
       ownerId: taskId,
@@ -3911,7 +3912,7 @@ async function runCodexTurn(session: Session, workspace: Workspace, prompt: stri
     const capabilities = orchestrationCapabilities("codex", delegationEnabled);
     const binding = codexLinkRepository.findBySession(session.ownerUserId, session.id);
     if (binding?.accessMode === "resume") linkedRun = await codexLink.prepareLinkedRun(binding);
-    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : undefined);
+    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
     const options = mainCodexThreadOptions(session, workspace, state.settings, activeRun.skillPolicies);
     const fileBaseline = await createActivityTurnFileBaseline(workspace.root);
     const terminalState = await runCodexSessionTurn({
@@ -4039,7 +4040,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
         sessionId, model: state.settings.claude.model,
         effort: state.settings.claude.effort,
         baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
-        configDir: CLAUDE_HOME, mcpConfigPath, permissionMode: state.settings.claude.permissionMode,
+        configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: state.settings.claude.permissionMode,
         bridgeUrl: delegationEnabled ? CODEX_BRIDGE_URL : undefined,
         bridgeToken: delegationEnabled ? CODEX_BRIDGE_TOKEN : undefined,
         claudeWorkerBridgeUrl: delegationEnabled ? CLAUDE_WORKER_BRIDGE_URL : undefined,
@@ -5372,7 +5373,7 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
       return new ClaudeSessionHandle({
         executable: command.executable, executableArgs: command.args, cwd: workflow.workDirectory || workspace.root,
         sessionId: resumeSessionId, model: state.settings.claude.model, effort: state.settings.claude.effort,
-        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, configDir: CLAUDE_HOME,
+        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, configDir: nativeProviderHome("claude", workflow.ownerUserId),
         mcpConfigPath: plannerMcpConfigFile, permissionMode: "default", disallowNativeAgents: true,
         disallowedTools: [...CLAUDE_PLANNER_DISALLOWED_TOOLS],
         allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, "mcp__workbench-workflow-plan__*"],
@@ -7856,10 +7857,86 @@ function providerControlOperations(providerId: string) {
     testConnection: Boolean(modelAdapter?.testConnection) || transport === "acp",
     discoverModels: Boolean(modelAdapter) || transport === "acp",
     selectModel: Boolean(modelAdapter) || transport === "acp",
-    authenticate: transport === "acp",
-    manageProfiles: transport === "acp",
+    authenticate: transport === "acp" || providerId === "codex" || providerId === "claude",
+    manageProfiles: transport === "acp" || providerId === "codex" || providerId === "claude",
     dynamicSessionConfig: transport === "acp"
   };
+}
+
+function isNativeEnhancedProvider(providerId: string): providerId is "codex" | "claude" {
+  return providerId === "codex" || providerId === "claude";
+}
+
+function nativeProviderHome(providerId: "codex" | "claude", ownerUserId: string) {
+  const profile = ownerProviderProfiles(ownerUserId, providerId).find((item) => item.isDefault)
+    || ownerProviderProfiles(ownerUserId, providerId)[0];
+  const systemAccount = profile?.authMode === "system-profile" || profile?.authMethodId === "system-account";
+  return systemAccount
+    ? providerId === "codex" ? OFFICIAL_CODEX_HOME : OFFICIAL_CLAUDE_HOME
+    : providerId === "codex" ? CODEX_HOME : CLAUDE_HOME;
+}
+
+function nativeProviderConnection(profile: ProviderConnectionProfile) {
+  const environment = providerConnectionEnvironment(profile);
+  if (profile.providerId === "codex") return {
+    baseUrl: profile.authMethodId === "openai-compatible" ? String(environment.OPENAI_BASE_URL || profile.baseUrl || "") : "",
+    apiKey: ["openai-api-key", "openai-compatible"].includes(profile.authMethodId) ? String(environment.OPENAI_API_KEY || profile.apiKey || "") : ""
+  };
+  return {
+    baseUrl: profile.authMethodId === "anthropic-compatible" ? String(environment.ANTHROPIC_BASE_URL || profile.baseUrl || "") : "https://api.anthropic.com",
+    apiKey: ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId) ? String(environment.ANTHROPIC_API_KEY || profile.apiKey || "") : ""
+  };
+}
+
+function applyNativeProviderProfile(profile: ProviderConnectionProfile) {
+  if (!isNativeEnhancedProvider(profile.providerId) || !profile.isDefault) return;
+  const connection = nativeProviderConnection(profile);
+  if (profile.providerId === "codex") {
+    state.settings.baseUrl = connection.baseUrl;
+    state.settings.apiKey = connection.apiKey;
+    if (typeof profile.configValues.model === "string" && profile.configValues.model) state.settings.model = profile.configValues.model;
+  } else {
+    state.settings.claude.baseUrl = connection.baseUrl;
+    state.settings.claude.apiKey = connection.apiKey;
+    if (typeof profile.configValues.model === "string" && profile.configValues.model) state.settings.claude.model = profile.configValues.model;
+  }
+}
+
+function ensureLegacyNativeProviderProfile(ownerUserId: string, providerId: "codex" | "claude") {
+  const existing = ownerProviderProfiles(ownerUserId, providerId);
+  if (existing.length) return existing;
+  const baseUrl = providerId === "codex" ? state.settings.baseUrl : state.settings.claude.baseUrl;
+  const apiKey = providerId === "codex" ? state.settings.apiKey : state.settings.claude.apiKey;
+  const officialHost = providerId === "codex" ? "api.openai.com" : "api.anthropic.com";
+  const customEndpoint = Boolean(baseUrl && !baseUrl.includes(officialHost));
+  const authMethodId = apiKey
+    ? customEndpoint ? providerId === "codex" ? "openai-compatible" : "anthropic-compatible" : providerId === "codex" ? "openai-api-key" : "anthropic-api-key"
+    : "workbench-account";
+  const keyEnv = providerId === "codex" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+  const urlEnv = providerId === "codex" ? "OPENAI_BASE_URL" : "ANTHROPIC_BASE_URL";
+  const model = providerId === "codex" ? state.settings.model : state.settings.claude.model;
+  const profile = normalizeProviderConnection({
+    providerId,
+    name: "默认连接",
+    authMode: customEndpoint ? "custom-endpoint" : apiKey ? "official-api" : "native-account",
+    authMethodId,
+    env: customEndpoint && baseUrl ? { [urlEnv]: baseUrl } : {},
+    secretEnv: apiKey ? { [keyEnv]: apiKey } : {},
+    isDefault: true,
+    healthStatus: "ready",
+    healthCheckedAt: new Date().toISOString(),
+    healthMessage: "已从原有配置安全迁移",
+    configOptions: [nativeProviderModelOption(providerId)],
+    configValues: { model }
+  }, ownerUserId, undefined, { trustPersistedHealth: true });
+  state.providerConnections.push(profile);
+  scheduleStateSave();
+  return [profile];
+}
+
+function nativeProviderModelOption(providerId: "codex" | "claude") {
+  const model = providerId === "codex" ? state.settings.model : state.settings.claude.model;
+  return { type: "select" as const, id: "model", name: "模型", category: "model", currentValue: model, options: [{ value: model, name: model }] };
 }
 
 async function providerControlSnapshotFor(providerId: string, ownerUserId: string, runtimeOverride?: ProviderControlSnapshotInput["runtime"]) {
@@ -7888,6 +7965,28 @@ async function providerControlSnapshotFor(providerId: string, ownerUserId: strin
     updating: Boolean(marketInstallStates.get(provider.id)?.active),
     operations: providerControlOperations(provider.id)
   });
+}
+
+async function providerReadiness(providerId: string, ownerUserId: string, workspace?: Workspace) {
+  const issues: Array<{ code: string; message: string; action: "open-provider" | "open-runtime" | "choose-workspace" }> = [];
+  const descriptor = agentAdapterRegistry.descriptor(providerId);
+  if (!descriptor || !agentAdapterRegistry.mainRunner(providerId) || !descriptor.capabilities.sessions.create) {
+    issues.push({ code: "provider-unregistered", message: "该 Agent 不支持创建主任务", action: "open-provider" });
+    return { ready: false, providerId, issues };
+  }
+  const control = await providerControlSnapshotFor(providerId, ownerUserId);
+  if (!control.lifecycle.runtimeAvailable) issues.push({ code: "runtime-unavailable", message: control.lifecycle.message || `${control.identity.shortName} CLI 不可用`, action: "open-runtime" });
+  else if (control.connection.status !== "ready") issues.push({ code: "connection-unverified", message: control.connection.message || "账号与连接尚未验证", action: "open-provider" });
+  if (workspace) {
+    try {
+      const stat = await fsp.stat(workspace.root);
+      if (!stat.isDirectory()) issues.push({ code: "workspace-invalid", message: "工作区路径不是文件夹", action: "choose-workspace" });
+      else await fsp.access(workspace.root, descriptor.capabilities.workspace.write ? fs.constants.R_OK | fs.constants.W_OK : fs.constants.R_OK);
+    } catch {
+      issues.push({ code: "workspace-unavailable", message: descriptor.capabilities.workspace.write ? "工作区不可读写，请检查目录权限" : "工作区不可读取，请检查目录权限", action: "choose-workspace" });
+    }
+  }
+  return { ready: issues.length === 0, providerId, control, issues };
 }
 
 function enforceSingleDefaultProfile(ownerUserId: string, providerId: string, selectedId: string) {
@@ -7995,13 +8094,27 @@ app.get("/api/agent-market/:id/install-status", auth.requireRoles("owner", "admi
 
 app.get("/api/agent-market/:id/profiles", auth.requireRoles("owner", "admin"), (req, res) => {
   const providerId = normalizeProviderId(req.params.id);
-  res.json({ items: ownerProviderProfiles(req.authUser!.id, providerId).map(publicProviderConnection) });
+  const profiles = isNativeEnhancedProvider(providerId)
+    ? ensureLegacyNativeProviderProfile(req.authUser!.id, providerId)
+    : ownerProviderProfiles(req.authUser!.id, providerId);
+  res.json({ items: profiles.map(publicProviderConnection) });
 });
 
 app.get("/api/agent-market/:id/configuration", auth.requireRoles("owner", "admin"), async (req, res) => {
   let backend: AcpStdioBackend | null = null;
   try {
     const providerId = normalizeProviderId(req.params.id);
+    if (isNativeEnhancedProvider(providerId)) {
+      const runtime = providerId === "codex" ? await detectCodexRuntime(false, true) : await getClaudeRuntime(false, true);
+      return res.json({
+        schemaVersion: 1,
+        ...providerConfiguration(providerId),
+        agentInfo: { name: providerId, title: agentAdapterRegistry.requireDescriptor(providerId).displayName, version: runtime.version || "" },
+        capabilities: agentAdapterRegistry.requireDescriptor(providerId).capabilities,
+        runtime,
+        profileId: ownerProviderProfiles(req.authUser!.id, providerId).find((item) => item.isDefault)?.id || null
+      });
+    }
     const opened = await openMarketControlBackend(providerId, req.authUser!.id, String(req.query.profileId || "") || undefined);
     backend = opened.backend;
     res.json({
@@ -8035,6 +8148,30 @@ app.post("/api/agent-market/:id/authenticate", auth.requireRoles("owner", "admin
       profile.healthMessage = "正在验证账号与连接";
       await saveState();
       eventHub.publish("provider-control.changed", { providerId, profileId: profile.id, status: "checking" }, [req.authUser!.id]);
+    }
+    if (isNativeEnhancedProvider(providerId)) {
+      if (!profile) throw new Error("请先保存连接方案");
+      const runtime = providerId === "codex" ? await detectCodexRuntime(false, true) : await getClaudeRuntime(false, true);
+      if (!runtime.available) throw new Error(`${agentAdapterRegistry.requireDescriptor(providerId).shortName} CLI 不可用：${runtime.message}`);
+      const connection = nativeProviderConnection(profile);
+      const apiMode = providerId === "codex"
+        ? ["openai-api-key", "openai-compatible"].includes(profile.authMethodId)
+        : ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId);
+      if (apiMode) {
+        if (!connection.apiKey) throw new Error("请先填写 API Key");
+        if (providerId === "codex") await validateCodexModel({ baseUrl: connection.baseUrl || "https://api.openai.com", apiKey: connection.apiKey, model: state.settings.model });
+        else await validateClaudeModel({ baseUrl: connection.baseUrl || "https://api.anthropic.com", apiKey: connection.apiKey, model: state.settings.claude.model });
+      }
+      profile.healthStatus = "ready";
+      profile.healthCheckedAt = new Date().toISOString();
+      profile.healthLatencyMs = Date.now() - startedAt;
+      profile.healthMessage = apiMode ? "API 与模型验证成功" : profile.authMethodId === "system-account" ? "系统账号目录与原生 CLI 已就绪" : "工作台账号目录与原生 CLI 已就绪";
+      profile.configOptions = profile.configOptions.length ? profile.configOptions : [nativeProviderModelOption(providerId)];
+      profile.configValues = { ...profile.configValues, model: providerId === "codex" ? state.settings.model : state.settings.claude.model };
+      applyNativeProviderProfile(profile);
+      await saveState();
+      eventHub.publish("provider-control.changed", { providerId, profileId: profile.id, status: "ready" }, [req.authUser!.id]);
+      return res.json({ ok: true, methodId: profile.authMethodId, configOptions: profile.configOptions, message: profile.healthMessage });
     }
     const opened = await openMarketControlBackend(providerId, req.authUser!.id, profileId);
     backend = opened.backend;
@@ -8095,6 +8232,30 @@ app.post("/api/agent-market/:id/models", auth.requireRoles("owner", "admin"), as
       ? ownerProviderProfiles(req.authUser!.id, providerId).find((item) => item.id === profileId)
       : ownerProviderProfiles(req.authUser!.id, providerId).find((item) => item.isDefault) || ownerProviderProfiles(req.authUser!.id, providerId)[0];
     if (!profile) throw new Error("请先保存连接方案");
+    if (isNativeEnhancedProvider(providerId)) {
+      const connection = nativeProviderConnection(profile);
+      const apiMode = providerId === "codex"
+        ? ["openai-api-key", "openai-compatible"].includes(profile.authMethodId)
+        : ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId);
+      const discovered = apiMode
+        ? providerId === "codex"
+          ? await discoverCodexModels({ baseUrl: connection.baseUrl || "https://api.openai.com", apiKey: connection.apiKey })
+          : await discoverClaudeModels({ baseUrl: connection.baseUrl || "https://api.anthropic.com", apiKey: connection.apiKey })
+        : { models: [{ id: providerId === "codex" ? state.settings.model : state.settings.claude.model, displayName: providerId === "codex" ? state.settings.model : state.settings.claude.model }] };
+      const currentModel = providerId === "codex" ? state.settings.model : state.settings.claude.model;
+      const models = discovered.models.length ? discovered.models : [{ id: currentModel, displayName: currentModel }];
+      profile.configOptions = [{ type: "select", id: "model", name: "模型", category: "model", currentValue: models.some((item) => item.id === currentModel) ? currentModel : models[0].id, options: models.map((item) => ({ value: item.id, name: item.displayName || item.id })) }];
+      profile.configValues = { ...profile.configValues, model: profile.configOptions[0].currentValue };
+      if (providerId === "codex") state.settings.model = String(profile.configOptions[0].currentValue);
+      else state.settings.claude.model = String(profile.configOptions[0].currentValue);
+      profile.healthStatus = "ready";
+      profile.healthCheckedAt = new Date().toISOString();
+      profile.healthMessage = apiMode ? `已探测到 ${models.length} 个模型` : "原生账号的模型目录由 CLI 管理，已保留当前模型";
+      profile.updatedAt = profile.healthCheckedAt;
+      await saveState();
+      eventHub.publish("provider-control.changed", { providerId, profileId: profile.id, status: "ready" }, [req.authUser!.id]);
+      return res.json({ ok: true, configOptions: profile.configOptions, models, message: profile.healthMessage });
+    }
     const opened = await openMarketControlBackend(providerId, req.authUser!.id, profile.id);
     backend = opened.backend;
     const methodId = String(req.body?.methodId || profile.authMethodId || "").trim();
@@ -8137,6 +8298,7 @@ app.post("/api/agent-market/:id/profiles", auth.requireRoles("owner", "admin"), 
     const profile = normalizeProviderConnection({ ...req.body, providerId, configOptions: [], configValues: {}, isDefault: req.body?.isDefault ?? profiles.length === 0 }, req.authUser!.id);
     state.providerConnections.push(profile);
     if (profile.isDefault) enforceSingleDefaultProfile(req.authUser!.id, providerId, profile.id);
+    applyNativeProviderProfile(profile);
     await acpSessionRuntimes.get(providerId)?.closeAll();
     await saveState();
     eventHub.publish("agent-market.changed", { providerId, action: "profile-created" }, [req.authUser!.id]);
@@ -8157,6 +8319,7 @@ app.put("/api/agent-market/:id/profiles/:profileId", auth.requireRoles("owner", 
     const profile = normalizeProviderConnection(input, req.authUser!.id, existing);
     state.providerConnections[index] = profile;
     if (profile.isDefault) enforceSingleDefaultProfile(req.authUser!.id, providerId, profile.id);
+    applyNativeProviderProfile(profile);
     await acpSessionRuntimes.get(providerId)?.closeAll();
     await saveState();
     eventHub.publish("agent-market.changed", { providerId, action: "profile-updated" }, [req.authUser!.id]);
@@ -8181,6 +8344,15 @@ app.delete("/api/agent-market/:id/profiles/:profileId", auth.requireRoles("owner
 
 app.get("/api/agent-providers", (_req, res) => {
   res.json({ schemaVersion: 1, items: agentAdapterRegistry.list(), transports: agentAdapterRegistry.providerSnapshots() });
+});
+
+app.get("/api/agent-providers/:providerId/readiness", async (req, res) => {
+  try {
+    const providerId = normalizeProviderId(req.params.providerId);
+    const workspace = req.query.workspaceId ? workspaceById(String(req.query.workspaceId), req.authUser!.id) : undefined;
+    if (req.query.workspaceId && !workspace) return res.status(404).json({ error: "工作区不存在" });
+    res.json(await providerReadiness(providerId, req.authUser!.id, workspace));
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.get("/api/provider-controls", auth.requireRoles("owner", "admin"), async (req, res) => {
@@ -10714,6 +10886,12 @@ app.post("/api/sessions/:id/run", async (req, res) => {
   if (activeRuns.has(session.id)) return res.status(409).json({ error: "任务正在运行" });
   const admission = sessionRunAdmissionError(req.authUser!.id, req.authUser!.role);
   if (admission) return res.status(admission.status).json({ error: admission.error });
+  const readiness = await providerReadiness(session.engine, req.authUser!.id, workspace);
+  if (!readiness.ready) return res.status(409).json({
+    error: readiness.issues[0]?.message || "Agent 尚未准备好",
+    code: "provider-not-ready",
+    readiness
+  });
 
   const prompt = String(req.body.prompt || "").trim();
   let attachments: Attachment[] = [];
