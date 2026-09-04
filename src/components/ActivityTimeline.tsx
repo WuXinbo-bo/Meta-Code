@@ -8,10 +8,14 @@ import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPl
 
 type ActivityItem =
   | { type: "log"; log: ActivityViewLog }
+  | { type: "current"; log: ActivityViewLog }
   | { type: "group"; id: string; logs: ActivityViewLog[] }
+  | { type: "summary"; id: string; category: ActivityViewLog["category"]; logs: ActivityViewLog[] }
   | { type: "plan"; id: string; snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] };
 
 const COLLAPSIBLE_CATEGORIES = new Set(["command", "file", "read", "search", "tool", "mcp", "todo", "status"]);
+const SUMMARY_CATEGORIES = new Set<ActivityViewLog["category"]>(["command", "file", "read", "search", "tool", "mcp", "todo"]);
+const LIVE_STATUSES = new Set(["active", "integrating", "planning", "queued", "running", "validating", "waiting"]);
 function canCollapse(left: ActivityViewLog, right: ActivityViewLog) {
   return COLLAPSIBLE_CATEGORIES.has(left.category) && left.category === right.category;
 }
@@ -69,6 +73,76 @@ function activityGroupLabel(category: ActivityViewLog["category"], count: number
   return `${activityCategoryLabel(category)} ${count} 项`;
 }
 
+function normalizedStatus(status: string) {
+  return status.trim().toLowerCase().replace(/[ -]/g, "_");
+}
+
+function isLiveTimeline(status: string) {
+  return LIVE_STATUSES.has(normalizedStatus(status));
+}
+
+function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
+  const summaries = new Map<ActivityViewLog["category"], Extract<ActivityItem, { type: "summary" }>>();
+  const retained: ActivityItem[] = [];
+  for (const log of logs) {
+    if (SUMMARY_CATEGORIES.has(log.category)) {
+      const current = summaries.get(log.category);
+      if (current) {
+        current.logs.push(log);
+      } else {
+        const summary: Extract<ActivityItem, { type: "summary" }> = {
+          type: "summary",
+          id: `activity-summary-${log.category}-${log.id}`,
+          category: log.category,
+          logs: [log]
+        };
+        summaries.set(log.category, summary);
+        retained.push(summary);
+      }
+      continue;
+    }
+    if (log.category === "error" || log.kind === "error" || log.category === "message" || log.category === "result") {
+      retained.push({ type: "log", log });
+    }
+  }
+  return retained;
+}
+
+function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityItem[] {
+  const latestOperational = [...logs].reverse().find((log) => !["message", "result", "error"].includes(log.category));
+  const retained = logs.filter((log) => log.category === "message" || log.category === "result" || log.category === "error" || log.kind === "error");
+  if (latestOperational && !retained.some((log) => log.id === latestOperational.id)) retained.push(latestOperational);
+  retained.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return planAwareActivities(retained, provider).map((item) => item.type === "log" && item.log.id === latestOperational?.id
+    ? { type: "current", log: item.log }
+    : item);
+}
+
+function CompletedActivitySummary({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
+  item: Extract<ActivityItem, { type: "summary" }>;
+  status: string;
+  provider: string;
+  providerLabel?: string;
+  providerIcon?: string;
+  providerAccent?: string;
+  messageLabel?: string;
+  renderMessage?: (text: string) => ReactNode;
+  workspaceId?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const categoryLabel = activityCategoryLabel(item.category);
+  return <details className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
+      <span className="agent-event-icon completed">{categoryIcon(item.category)}</span>
+      <strong>{activityGroupLabel(item.category, item.logs.length)}</strong>
+      <ChevronRight className="agent-event-chevron" size={14} />
+    </summary>
+    {open && <div className="activity-summary-details">
+      {item.logs.map((log) => <ActivityRenderer key={log.id} log={log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />)}
+    </div>}
+  </details>;
+}
+
 function CollapsedActivityGroup({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
   item: Extract<ActivityItem, { type: "group" }>;
   status: string;
@@ -113,7 +187,7 @@ function minimalActivities(logs: readonly unknown[], provider: string, status: s
     if (displayLog.category === "reasoning" && visible.at(-1)?.category === "reasoning") visible[visible.length - 1] = displayLog;
     else visible.push(displayLog);
   }
-  return planAwareActivities(visible, provider);
+  return isLiveTimeline(status) ? liveActivityItems(visible, provider) : settledActivityItems(visible);
 }
 
 export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
@@ -141,6 +215,10 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
 
   const renderItem = (item: ActivityItem) => item.type === "group"
     ? <CollapsedActivityGroup key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+    : item.type === "summary"
+      ? <CompletedActivitySummary key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+    : item.type === "current"
+      ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} /></div>
     : item.type === "plan"
       ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
     : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />;
