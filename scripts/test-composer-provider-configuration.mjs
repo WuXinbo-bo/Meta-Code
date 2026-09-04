@@ -26,6 +26,8 @@ assert.deepEqual(reasoningChoices({ type: "none" }), []);
 const runtimeControl = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../src/chat/ComposerRuntimeControl.tsx", import.meta.url), "utf8"));
 assert.match(runtimeControl, /control\?\.configuration\.sessionOptions/);
 assert.match(runtimeControl, /onProfileConfigurationChange\(provider, configId, value\)/);
+assert.match(runtimeControl, /control\.identity\.transport === "native" \|\| control\.capabilities\.tools\.shell/);
+assert.match(runtimeControl, /该 Agent 当前仅支持原生运行/);
 assert.doesNotMatch(runtimeControl, /创建任务后可配置此 Agent/);
 
 console.log("Composer Provider configuration contract passed.");

@@ -94,7 +94,8 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .agent-market-card-copy small { display: -webkit-box; overflow: hidden; color: var(--mc-text-tertiary); font-size: 11px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .agent-market-card-copy i { color: var(--mc-text-secondary); font-size: 11px; font-style: normal; }
 .agent-market-state { display: inline-flex; min-width: 54px; align-items: center; justify-content: flex-end; gap: 3px; color: var(--mc-text-tertiary); font-size: 11px; }
-.agent-market-state.installed { color: var(--mc-success); }
+.agent-market-state.ready { color: var(--mc-success); }
+.agent-market-state.attention { color: var(--mc-warning-text); }
 .agent-market-state.working { color: var(--mc-text); }
 .agent-market-detail { min-width: 0; min-height: 0; padding: 16px; overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid var(--mc-line); background: var(--mc-surface); scrollbar-gutter: stable; }
 .agent-market-detail > header { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
@@ -102,7 +103,8 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .agent-market-detail > header strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .agent-market-detail > header span { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-market-detail > header > i { color: var(--mc-text-tertiary); font-size: 11px; font-style: normal; }
-.agent-market-detail > header > i.installed { color: var(--mc-success); }
+.agent-market-detail > header > i.ready { color: var(--mc-success); }
+.agent-market-detail > header > i.attention { color: var(--mc-warning-text); }
 .agent-market-detail > p { margin: 14px 0; color: var(--mc-text-secondary); font-size: 12px; line-height: 1.55; }
 .agent-market-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: -5px 0 12px; }
 .agent-market-badges span { padding: 3px 6px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-sm); color: var(--mc-text-secondary); font-size: 11px; }
@@ -209,13 +211,14 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .settings-market-view > .settings-back-button { justify-self: start; }
 
 @media (max-width: 780px) {
-  .settings-shell { grid-template-columns: 1fr; gap: 16px; width: min(100% - 20px, 680px); }
+  .settings-view { overflow-x: clip; }
+  .settings-shell { min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr); gap: 16px; width: min(100% - 20px, 680px); }
   .settings-shell > .settings-navigation { position: static; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid var(--mc-line); }
-  .settings-section-list { display: flex; flex-wrap: wrap; overflow-x: auto; }
+  .settings-section-list { display: flex; width: 100%; min-width: 0; max-width: 100%; flex-wrap: wrap; overflow-x: auto; }
   .settings-navigation-group { flex: 0 0 auto; }
   .settings-navigation-group.agent-navigation-group { display: contents; }
   .settings-section-list > .settings-navigation-group > button { width: auto; white-space: nowrap; }
-  .settings-agent-subnav { display: flex; order: 2; width: 100%; overflow-x: auto; gap: 2px; margin: 5px 0 0; padding: 6px 0 0; border-top: 1px solid var(--mc-line); border-left: 0; }
+  .settings-agent-subnav { display: flex; order: 2; width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; gap: 2px; margin: 5px 0 0; padding: 6px 0 0; border-top: 1px solid var(--mc-line); border-left: 0; }
   .settings-agent-subnav > button { width: auto; flex: 0 0 auto; padding-inline: 9px; white-space: nowrap; }
   .settings-provider-page-heading { grid-template-columns: 1fr; }
   .settings-provider-page-heading > button { justify-self: start; }
@@ -736,6 +739,7 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
   .codex-link-turns { margin-left: 12px; }
   .agent-market-toolbar { align-items: stretch; flex-direction: column; }
   .agent-market-toolbar > label { width: 100%; }
+  .agent-market-settings, .agent-market-toolbar, .agent-market-toolbar > div { width: 100%; min-width: 0; max-width: 100%; }
   .agent-market-toolbar > div { overflow-x: auto; }
   .agent-market-layout { height: auto; min-height: 0; grid-template-columns: 1fr; }
   .agent-market-list { max-height: min(420px, 48vh); grid-template-columns: 1fr; }

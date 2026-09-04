@@ -7,8 +7,12 @@ import { providerBrandAccent } from "../server/providers/branding.ts";
 import { acpDelegationEnvironment, acpProviderManifest, createAcpRuntimeDefinition } from "../server/providers/acp/runtime.ts";
 
 const serverSource = fs.readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
+const marketViewSource = fs.readFileSync(new URL("../src/settings/AgentMarketSettings.tsx", import.meta.url), "utf8");
 assert.match(serverSource, /app\.post\("\/api\/runtime\/:runtimeId\/check-update"/);
 assert.doesNotMatch(serverSource, /for \(const runtimeId of cliRuntimeManager\.ids\(\)\)/, "CLI routes must remain available for providers installed after startup");
+assert.match(serverSource, /controls: Object\.fromEntries\(controlEntries\)/, "Agent 市场必须返回统一 Provider 控制状态");
+assert.match(marketViewSource, /label: "可使用"/, "已连接 Agent 必须区别于仅已安装状态");
+assert.match(marketViewSource, /label: "待连接"/, "已安装但未连接的 Agent 必须显示下一步");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-agent-market-"));
 let requests = 0;

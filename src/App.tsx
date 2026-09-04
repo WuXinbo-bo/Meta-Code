@@ -5150,7 +5150,8 @@ function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine,
   const [scopeKind, setScopeKind] = useState<"workspace" | "standalone">(hasWorkspace ? "workspace" : "standalone");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" : engineReady(selected);
+  const workflowReady = providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
+  const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" && workflowReady : engineReady(selected);
   const taskTypes = [...engines.map((item) => ({ ...item, engine: item.engine as EngineName | "workflow" })), { engine: "workflow" as const, title: "Meta 任务编排", description: "先规划审批，再并行调度多个子 Agent", detail: "适合可拆分的大任务；会在当前工作区创建独立任务文件夹。" }];
   return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
     <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务选择对话协议；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
@@ -5160,12 +5161,12 @@ function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine,
     </div>
     <div className="task-mode-grid">
       {taskTypes.map((item) => {
-        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone"} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : item.detail}</p></span><i>{selected === "workflow" ? <Check size={15} /> : null}</i></button>;
+        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone" || !workflowReady} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : item.detail}</p></span><i>{workflowReady && selected === "workflow" ? <Check size={15} /> : !workflowReady ? "不可用" : null}</i></button>;
         const control = providerControls.find((candidate) => candidate.providerId === item.engine);
         const available = engineReady(item.engine);
         return <button type="button" key={item.engine} className={`task-mode-card ${selected === item.engine ? "selected" : ""}`} disabled={!available || busy} onClick={() => setSelected(item.engine)}>
           <span className="task-mode-icon"><ProviderIcon provider={item.engine} icon={control?.identity.icon} accent={control?.identity.accent} size={21} /></span>
-          <span><strong>{item.title}</strong><small>{control?.identity.transport === "acp" ? "ACP 标准接入" : "原生增强"} · {item.description}</small><p>{available ? item.detail : providerMainAgentUnavailableReason(control)}</p></span>
+          <span><strong>{item.title}</strong><small>{control?.identity.transport === "acp" ? "ACP 标准接入" : "原生增强"} · {item.description}</small><p>{available ? control?.identity.transport === "acp" && !control.capabilities.tools.shell ? "支持原生任务；该 Agent 未声明终端能力，因此不开放工作台协作模式。" : item.detail : providerMainAgentUnavailableReason(control)}</p></span>
           <i>{available ? selected === item.engine ? <Check size={15} /> : null : "不可用"}</i>
         </button>;
       })}

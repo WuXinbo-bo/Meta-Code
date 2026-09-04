@@ -3,6 +3,7 @@ import { ArrowLeft, Check, Download, ExternalLink, LoaderCircle, RefreshCw, Sear
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import { ProviderConnectionControl } from "./ProviderConnectionControl";
+import type { ProviderControlSnapshot } from "../providers/types";
 
 type MarketRuntimeStatus = {
   available: boolean;
@@ -59,8 +60,18 @@ type MarketResponse = {
   registrySource: "network" | "cache";
   items: MarketItem[];
   runtimes: Record<string, MarketRuntimeStatus>;
+  controls: Record<string, ProviderControlSnapshot>;
   installStates: Record<string, MarketInstallState>;
 };
+
+function marketState(item: MarketItem, install: MarketInstallState | undefined, control: ProviderControlSnapshot | undefined) {
+  if (install?.active) return { key: "working", label: "处理中" };
+  if (!item.installed) return { key: "missing", label: item.installable ? "可安装" : "不可用" };
+  if (!control?.lifecycle.runtimeAvailable) return { key: "attention", label: "需修复" };
+  if (control.connection.status === "checking") return { key: "working", label: "检测中" };
+  if (control.connection.status === "ready") return { key: "ready", label: "可使用" };
+  return { key: "attention", label: "待连接" };
+}
 
 async function marketApi<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, {
@@ -188,17 +199,19 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
       <div className="agent-market-list" aria-busy={loading}>
         {loading && !market ? <div className="agent-market-loading"><LoaderCircle className="spin" size={18} />正在读取市场</div> : visibleItems.map((item) => {
           const install = market?.installStates[item.id];
+          const control = market?.controls[item.id];
+          const state = marketState(item, install, control);
           return <button type="button" key={item.id} className={`agent-market-card ${selectedId === item.id ? "selected" : ""}`} onClick={() => { setSelectedId(item.id); setActionNotice(""); setDetailOpen(true); }}>
             <MarketIcon item={item} />
             <span className="agent-market-card-copy"><strong>{item.name}</strong><small>{item.description || item.id}</small><i>{item.native ? "原生增强" : "ACP"} · {item.verified ? "官方" : "社区"}{item.maturity === "preview" ? " · 预览版" : ""}</i></span>
-            <span className={`agent-market-state ${install?.active ? "working" : item.installed ? "installed" : ""}`}>{install?.active ? <LoaderCircle className="spin" size={12} /> : item.installed ? <Check size={12} /> : null}{install?.active ? "处理中" : item.installed ? "已安装" : item.installable ? "可安装" : "不可用"}</span>
+            <span className={`agent-market-state ${state.key}`}>{state.key === "working" ? <LoaderCircle className="spin" size={12} /> : state.key === "ready" ? <Check size={12} /> : null}{state.label}</span>
           </button>;
         })}
         {!loading && !visibleItems.length && <div className="agent-market-empty">没有匹配的 Agent</div>}
       </div>
       {selected && <aside className="agent-market-detail">
         <button type="button" className="agent-market-back" onClick={() => setDetailOpen(false)}><ArrowLeft size={14} />返回 Agent 列表</button>
-        <header><MarketIcon item={selected} size={34} /><div><strong>{selected.name}</strong><span>{selected.native ? "原生增强" : "ACP 标准接入"}</span></div><i className={selected.installed ? "installed" : ""}>{selected.installed ? "已安装" : selected.installable ? "未安装" : "不可用"}</i></header>
+        <header><MarketIcon item={selected} size={34} /><div><strong>{selected.name}</strong><span>{selected.native ? "原生增强" : "ACP 标准接入"}</span></div><i className={marketState(selected, selectedInstall, market?.controls[selected.id]).key}>{marketState(selected, selectedInstall, market?.controls[selected.id]).label}</i></header>
         <p>{selected.description}</p>
         <div className="agent-market-badges"><span>{selected.verified ? "官方发布" : "社区维护"}</span><span>{selected.maturity === "stable" ? "稳定" : selected.maturity === "preview" ? "开发者预览" : "社区生态"}</span>{selected.region === "china" && <span>国产 Agent</span>}</div>
         <dl><div><dt>版本</dt><dd>{selected.version || "未知"}</dd></div><div><dt>许可</dt><dd>{selected.license}</dd></div><div><dt>分发</dt><dd>{selected.distributionTypes.join(" / ")}</dd></div><div><dt>运行时</dt><dd>{market?.runtimes[selected.id]?.source || (selected.installed ? "待检测" : "未安装")}</dd></div></dl>

@@ -5252,17 +5252,13 @@ function workflowPlannerRequestKey(workflow: NonNullable<ReturnType<WorkflowRepo
   })).digest("hex");
 }
 
-async function currentWorkflowProviderCapabilities(): Promise<WorkflowProviderCapabilities> {
+async function currentWorkflowProviderCapabilities(ownerUserId: string, workspace?: Workspace): Promise<WorkflowProviderCapabilities> {
   const descriptors = agentAdapterRegistry.list();
   const entries = await Promise.all(descriptors.map(async (descriptor) => {
-    const runtimeAvailable = descriptor.id === "claude"
-      ? (await getClaudeRuntime()).available
-      : descriptor.id === "codex"
-        ? (await detectCodexRuntime()).available
-        : (await cliRuntimeManager.detect(descriptor.runtimeId)).available;
+    const readiness = await providerReadiness(descriptor.id, ownerUserId, workspace);
     return [descriptor.id, {
       displayName: descriptor.shortName,
-      available: runtimeAvailable && descriptor.capabilities.workflow.worker && Boolean(agentAdapterRegistry.workflowWorkerRunner(descriptor.id)),
+      available: readiness.ready && descriptor.capabilities.workflow.worker && Boolean(agentAdapterRegistry.workflowWorkerRunner(descriptor.id)),
       workspaceRead: descriptor.capabilities.workspace.read,
       workspaceWrite: descriptor.capabilities.workspace.write
     }] as const;
@@ -5272,6 +5268,20 @@ async function currentWorkflowProviderCapabilities(): Promise<WorkflowProviderCa
   const read = providers.claude?.available ? "claude" : available.find(([, provider]) => provider.workspaceRead)?.[0] || "claude";
   const write = providers.codex?.available ? "codex" : available.find(([, provider]) => provider.workspaceWrite)?.[0] || read;
   return { providers, defaults: { read, write } };
+}
+
+async function assertWorkflowExecutionReady(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, ownerUserId: string) {
+  const workspace = workspaceById(workflow.workspaceId, ownerUserId);
+  if (!workspace) throw new Error("工作区不存在");
+  const capabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
+  for (const node of workflow.nodes) {
+    if (["completed", "skipped", "canceled"].includes(node.status)) continue;
+    const providerId = resolveWorkflowProvider(node.provider, node.workspaceAccess, capabilities);
+    const provider = capabilities.providers[providerId];
+    if (!provider?.available) throw new Error(`节点「${node.title}」需要的 Agent「${provider?.displayName || providerId}」尚未连接或不可用`);
+    if (node.workspaceAccess === "write" && !provider.workspaceWrite) throw new Error(`节点「${node.title}」需要写入工作区，但 Agent「${provider.displayName}」未声明写入能力`);
+    if (node.workspaceAccess === "read" && !provider.workspaceRead) throw new Error(`节点「${node.title}」需要读取工作区，但 Agent「${provider.displayName}」未声明读取能力`);
+  }
 }
 
 function workflowExecutionProvider(node: Pick<WorkflowNodeRecord, "provider" | "workspaceAccess">) {
@@ -6542,7 +6552,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
   }
   if (workflow.status === "queued") { workflowRepository.updateRun(workflowId, "running"); syncWorkflowProtocolFiles(workflowId, ownerUserId); }
   const running = workflow.nodes.filter((node) => node.status === "running" || node.status === "queued");
-  const providerCapabilities = await currentWorkflowProviderCapabilities();
+  const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
   for (const node of workflow.nodes) {
     if (node.status !== "pending" && node.status !== "ready" && node.status !== "interrupted") continue;
     if (!node.dependsOn.every((id) => completed.has(id))) continue;
@@ -6815,7 +6825,7 @@ app.get("/api/workflows", (req, res) => {
   res.json(workflowRepository.list(req.authUser!.id, req.query.workspaceId ? String(req.query.workspaceId) : undefined));
 });
 
-app.post("/api/workflows", (req, res) => {
+app.post("/api/workflows", async (req, res) => {
   try {
     const workspace = workspaceById(String(req.body?.workspaceId || ""), req.authUser!.id);
     const prompt = String(req.body?.prompt || "").trim();
@@ -6825,6 +6835,8 @@ app.post("/api/workflows", (req, res) => {
     const maxConcurrentAgents = requestedWorkflowConcurrency(req.body?.maxConcurrentAgents);
     if (!workspace) return res.status(400).json({ error: "请选择工作区" });
     if (!prompt) return res.status(400).json({ error: "请输入完整任务" });
+    const readiness = await providerReadiness(plannerEngine, req.authUser!.id, workspace);
+    if (!readiness.ready) return res.status(409).json({ error: readiness.issues[0]?.message || "规划 Agent 尚未准备好", code: "provider-not-ready", readiness });
     const id = uid("workflow");
     const workDirectory = createWorkflowDirectory(workspace, prompt.split(/\r?\n/, 1)[0]);
     const workflow = workflowRepository.create({ id, ownerUserId: req.authUser!.id, workspaceId: workspace.id, workDirectory, prompt, plannerEngine, maxConcurrentAgents });
@@ -6848,7 +6860,7 @@ app.get("/api/workflows/:id/branches", (req, res) => {
   res.json(workflowRepository.listBranches(workflow.originId, req.authUser!.id));
 });
 
-app.post("/api/workflows/:id/branches", (req, res) => {
+app.post("/api/workflows/:id/branches", async (req, res) => {
   const source = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!source) return res.status(404).json({ error: "工作流不存在" });
   try {
@@ -6857,6 +6869,8 @@ app.post("/api/workflows/:id/branches", (req, res) => {
     const plannerEngine = normalizeProviderId(req.body?.plannerEngine || source.plannerEngine);
     const plannerProvider = agentAdapterRegistry.descriptor(plannerEngine);
     if (!plannerProvider?.capabilities.workflow.planner || !agentAdapterRegistry.workflowPlannerRunner(plannerEngine)) throw new Error("规划 Provider 未注册或不支持工作流规划");
+    const readiness = await providerReadiness(plannerEngine, req.authUser!.id, workspace);
+    if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "规划 Agent 尚未准备好");
     const maxConcurrentAgents = req.body?.maxConcurrentAgents === undefined ? source.maxConcurrentAgents : requestedWorkflowConcurrency(req.body.maxConcurrentAgents);
     const branchIndex = workflowRepository.nextBranchIndex(source.originId, req.authUser!.id);
     const id = uid("workflow");
@@ -6973,7 +6987,7 @@ async function executeWorkflowPlanningRun(input: {
       .filter((skill) => !skill.builtIn && (policies[skill.name] === "auto" || policies[skill.name] === "always"))
       .map((skill) => skill.name);
     const availableMcpServers = mcpServersForWorkspace(workspace).map((server) => server.name);
-    const providerCapabilities = await currentWorkflowProviderCapabilities();
+    const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
     await fsp.mkdir(WORKFLOW_PLANNER_TRANSACTION_DIR, { recursive: true });
     transactionPath = path.join(WORKFLOW_PLANNER_TRANSACTION_DIR, `${workflowId}-${mode}.json`);
     const openedTransaction = openWorkflowPlanTransaction(transactionPath, {
@@ -7059,7 +7073,7 @@ async function executeWorkflowPlanningRun(input: {
   }
 }
 
-app.post("/api/workflows/:id/plan", (req, res) => {
+app.post("/api/workflows/:id/plan", async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   const existingController = activeWorkflowPlanners.get(workflow.id);
@@ -7068,6 +7082,10 @@ app.post("/api/workflows/:id/plan", (req, res) => {
   }
   const maintenance = req.body?.source === "maintenance";
   try {
+    const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
+    if (!workspace) throw new Error("工作区不存在");
+    const readiness = await providerReadiness(workflow.plannerEngine, req.authUser!.id, workspace);
+    if (!readiness.ready) return res.status(409).json({ error: readiness.issues[0]?.message || "规划 Agent 尚未准备好", code: "provider-not-ready", readiness });
     const mode: WorkflowPlanningMode = req.body?.mode === "fresh" ? "fresh" : req.body?.mode === "refine" ? "refine" : workflow.activePlanVersion > 0 && workflow.reviewNote ? "refine" : "initial";
     if (mode === "refine" && !workflow.plan) throw new Error("当前没有可追加修改的完整计划");
     const previousPlan = mode === "refine" ? workflow.plan : null;
@@ -7095,10 +7113,11 @@ app.post("/api/workflows/:id/plan", (req, res) => {
   }
 });
 
-app.post("/api/workflows/:id/approve", (req, res) => {
+app.post("/api/workflows/:id/approve", async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   try {
+    await assertWorkflowExecutionReady(workflow, req.authUser!.id);
     const approved = workflowRepository.approve(workflow.id, req.authUser!.id, Number(req.body?.revision));
     workflowStateFiles.sync(approved);
     workflowStateFiles.applyMaintenance(approved);
@@ -7272,11 +7291,17 @@ app.post("/api/workflows/:id/pause", (req, res) => {
   } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-app.post("/api/workflows/:id/resume", (req, res) => {
+app.post("/api/workflows/:id/resume", async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   try {
     if (activeWorkflowPlanners.has(workflow.id) || activeWorkflowIntegrations.has(workflow.id) || [...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflow.id}:`))) throw new Error("工作流仍在安全暂停中，请稍后继续");
+    if (workflow.pausedPlanningMode) {
+      const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
+      if (!workspace) throw new Error("工作区不存在");
+      const readiness = await providerReadiness(workflow.plannerEngine, req.authUser!.id, workspace);
+      if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "规划 Agent 尚未准备好");
+    } else await assertWorkflowExecutionReady(workflow, req.authUser!.id);
     const from = workflow.pausedFromStatus;
     const mode = workflow.pausedPlanningMode || "initial";
     const maintenance = workflow.pausedPlanningMaintenance;
@@ -8036,7 +8061,11 @@ app.get("/api/agent-market", auth.requireRoles("owner", "admin"), async (req, re
       const status = id === "codex" ? codexRuntime : id === "claude" ? claudeRuntime : await cliRuntimeManager.detect(id);
       return [id, status] as const;
     }));
-    res.json({ ...catalog, runtimes: Object.fromEntries(runtimeEntries), installStates: Object.fromEntries([...marketInstallStates]) });
+    const controlEntries = await Promise.all(agentAdapterRegistry.list().map(async (descriptor) => [
+      descriptor.id,
+      await providerControlSnapshotFor(descriptor.id, req.authUser!.id)
+    ] as const));
+    res.json({ ...catalog, runtimes: Object.fromEntries(runtimeEntries), controls: Object.fromEntries(controlEntries), installStates: Object.fromEntries([...marketInstallStates]) });
   } catch (error) { res.status(502).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
@@ -10953,6 +10982,15 @@ app.post("/api/sessions/:id/run", async (req, res) => {
   const internal = req.body.internal === true;
   const workspaceAgents = workspaceAgentConfig(workspace);
   const skillPolicies = internal ? {} : workspaceAgents.skillPolicies;
+  if (!internal && isWorkbenchDelegationEnabled(session, skillPolicies)
+    && readiness.control?.identity.transport === "acp"
+    && !readiness.control.capabilities.tools.shell) {
+    return res.status(409).json({
+      error: "当前 ACP Agent 未声明终端能力，无法调用工作台委派桥接；请切换为原生模式",
+      code: "delegation-not-supported",
+      readiness
+    });
+  }
   let requestedSkillNames: string[] = [];
   try {
     requestedSkillNames = internal ? [] : explicitSkillNamesForPolicies(req.body.skillNames, skillPolicies);
