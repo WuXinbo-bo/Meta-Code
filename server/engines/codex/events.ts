@@ -130,6 +130,7 @@ export async function consumeCodexTurnEvents(
     durableResultGraceMs?: number;
     pollIntervalMs?: number;
     onTerminal?: () => void;
+    signal?: AbortSignal;
   } = {}
 ): Promise<CodexTurnConsumption> {
   const iterator = events[Symbol.asyncIterator]();
@@ -142,11 +143,13 @@ export async function consumeCodexTurnEvents(
   const durableResultGraceMs = Math.max(0, options.durableResultGraceMs ?? 3_000);
   try {
     while (true) {
+      if (options.signal?.aborted) throw options.signal.reason || new DOMException("Codex task aborted", "AbortError");
       const next = await Promise.race([
         pending.then((result) => ({ kind: "event" as const, result })),
         new Promise<{ kind: "poll" }>((resolve) => setTimeout(() => resolve({ kind: "poll" }), pollIntervalMs))
       ]);
       if (next.kind === "poll") {
+        if (options.signal?.aborted) throw options.signal.reason || new DOMException("Codex task aborted", "AbortError");
         if (!options.isDurableResultCommitted?.()) { durableResultObservedAt = null; continue; }
         durableResultObservedAt ??= Date.now();
         if (Date.now() - durableResultObservedAt < durableResultGraceMs) continue;
@@ -189,6 +192,7 @@ export async function runCodexSessionTurn(options: CodexSessionTurnOptions): Pro
   }, {
     isDurableResultCommitted: options.isDurableResultCommitted,
     durableResultGraceMs: options.durableResultGraceMs,
+    signal: options.signal,
     onTerminal: () => streamController.abort(new Error(options.terminalReason || "Codex 任务已到达终态"))
   });
   return { ...terminal, threadId, failure: codexTurnFailure(terminal, terminal.lastError, options.missingCompletionMessage) };

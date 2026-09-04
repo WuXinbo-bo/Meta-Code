@@ -72,6 +72,17 @@ const durableResult = await consumeCodexTurnEvents(stalledStream, () => undefine
 assert.equal(durableResult.completed, true);
 assert.equal(durableResult.forcedByDurableResult, true);
 assert.equal(forcedTerminal, true);
+
+const interruptedStream = { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined), return: () => Promise.resolve({ done: true }) }) };
+const interruptController = new AbortController();
+setTimeout(() => interruptController.abort(new Error("guide interrupt")), 10);
+await assert.rejects(
+  Promise.race([
+    consumeCodexTurnEvents(interruptedStream, () => undefined, { signal: interruptController.signal, pollIntervalMs: 5 }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("aborted stream did not release")), 250))
+  ]),
+  /guide interrupt/
+);
 console.log("codex terminal stream takeover contracts OK");
 
 const sessionEvents = [];

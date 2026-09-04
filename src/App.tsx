@@ -1836,6 +1836,23 @@ function CopyMarkdownButton({ text, onError }: { text: string; onError: (error: 
   >{copied ? <Check size={14} /> : <Copy size={14} />}</button>;
 }
 
+function AssistantMessageActions({
+  text,
+  branching,
+  onBranch,
+  onError
+}: {
+  text: string;
+  branching: boolean;
+  onBranch: () => void;
+  onError: (error: unknown) => void;
+}) {
+  return <div className="message-actions" aria-label="回复操作">
+      <CopyMarkdownButton text={text} onError={onError} />
+      <IconButton label="从此回复创建分支" disabled={branching} onClick={onBranch}><GitBranch size={14} /></IconButton>
+  </div>;
+}
+
 class PreviewErrorBoundary extends Component<{ resetKey: string; children: ReactNode; onClose: () => void }, { error: string }> {
   state = { error: "" };
   static getDerivedStateFromError(error: unknown) {
@@ -3885,6 +3902,11 @@ export function App() {
 
   const resume = async () => {
     if (!activeSession || activeSession.status !== "paused") return;
+    const pendingGuidance = activeSession.pendingInputs.find((item) => item.mode === "steer" || item.status === "steering");
+    if (pendingGuidance) {
+      await promotePendingInput(pendingGuidance.id);
+      return;
+    }
     try {
       const started = await api<Session>(`/api/sessions/${activeSession.id}/run?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
         method: "POST",
@@ -4701,7 +4723,7 @@ export function App() {
                     key={virtualItem.key}
                     data-index={virtualItem.index}
                     ref={virtualizeMessages ? messageVirtualizer.measureElement : undefined}
-                    className="message-virtual-row"
+                    className={`message-virtual-row message-virtual-row-${message.role}`}
                     style={virtualizeMessages ? { position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualItem.start}px)` } : undefined}
                   >
                     {message.role === "activity-group" ? <ActivityMessageGroupView group={message} engine={activeSession?.engine || "codex"} providerLabel={agentProviderLabel(activeSession?.engine || "codex", agentProviders)} providerControl={data.providerControls.find((control) => control.providerId === (activeSession?.engine || "codex"))} workspaceId={activeFileScopeId || undefined} /> : message.role === "event" ? (
@@ -4739,10 +4761,12 @@ export function App() {
                             />} />
                           ) : <p>{message.text}</p>}
                           {!editing && <AttachmentList attachments={message.attachments} onOpen={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
-                          {!editing && message.role === "assistant" && <div className="message-actions">
-                            <CopyMarkdownButton text={message.text} onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)} />
-                            <IconButton label="从此回复创建分支" disabled={branching} onClick={() => void branchFromAssistantMessage(message.id)}><GitBranch size={14} /></IconButton>
-                          </div>}
+                          {!editing && message.role === "assistant" && <AssistantMessageActions
+                            text={message.text}
+                            branching={branching}
+                            onBranch={() => void branchFromAssistantMessage(message.id)}
+                            onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)}
+                          />}
                         </div>
                         {message.role === "user" && !editing && (
                           <button
@@ -4778,7 +4802,7 @@ export function App() {
             )}
             <div className={`composer-wrap ${navigationPending ? "switching" : ""}`} aria-busy={navigationPending}>
               <PendingTurnTray
-                items={activeSession?.pendingInputs || []}
+                items={(activeSession?.pendingInputs || []).filter((item) => item.mode !== "steer" && item.status !== "steering")}
                 running={running}
                 onEdit={editPendingInput}
                 onRemove={cancelPendingInput}

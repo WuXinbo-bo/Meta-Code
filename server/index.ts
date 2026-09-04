@@ -3211,18 +3211,26 @@ function delegatedRecoveryBlock(session: Session) {
 type TurnOutcome = "completed" | "failed" | "paused" | "stopped" | "steered";
 
 function prepareTurn(session: Session, input: PendingInput) {
-  appendMessage(session, {
-    role: "user",
-    text: input.text,
-    attachments: input.attachments,
-    payload: {
-      inputMode: input.mode,
-      ...(input.clientMutationId ? { clientMutationId: input.clientMutationId } : {}),
-      queuedAt: input.createdAt,
-      skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
-      skillNames: normalizeSkillNames(input.skillNames),
-    }
+  const alreadyVisible = session.messages.some((message) => {
+    const payload = recordOf(message.payload) || {};
+    return message.role === "user" && (payload.pendingInputId === input.id
+      || Boolean(input.clientMutationId && payload.clientMutationId === input.clientMutationId));
   });
+  if (!alreadyVisible) {
+    appendMessage(session, {
+      role: "user",
+      text: input.text,
+      attachments: input.attachments,
+      payload: {
+        inputMode: input.mode,
+        pendingInputId: input.id,
+        ...(input.clientMutationId ? { clientMutationId: input.clientMutationId } : {}),
+        queuedAt: input.createdAt,
+        skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
+        skillNames: normalizeSkillNames(input.skillNames),
+      }
+    });
+  }
   const startedAt = new Date().toISOString();
   session.status = "running";
   session.stopReason = undefined;
@@ -10613,6 +10621,7 @@ app.post("/api/sessions/:id/stop", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const activeRun = activeRuns.get(req.params.id);
+  if (activeRun?.controller.signal.aborted) return res.status(409).json({ error: "任务正在切换运行状态，请稍后再停止" });
   abortDelegatedTasksForParent(session.id);
   if (activeRun) {
     activeRun.abortIntent = "stop";
@@ -10620,17 +10629,20 @@ app.post("/api/sessions/:id/stop", async (req, res) => {
   } else if (session.status !== "running") {
     return res.status(409).json({ error: "任务当前未运行" });
   }
-  const now = new Date().toISOString();
-  session.status = "stopped";
-  session.stopReason = "user";
-  session.runFinishedAt = now;
-  session.updatedAt = now;
-  session.revision += 1;
-  appendMessage(session, { role: "event", text: "任务已停止", eventType: "turn.stopped" });
-  await saveState();
-  if (activeRun) await waitForActiveRunRelease(session.id, activeRun).catch((error) => {
-    console.error(`Task ${session.id} stop cleanup did not settle`, error);
-  });
+  if (activeRun) {
+    try { await waitForActiveRunRelease(session.id, activeRun); }
+    catch (error) { return res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (session.status !== "stopped") {
+    const now = new Date().toISOString();
+    session.status = "stopped";
+    session.stopReason = "user";
+    session.runFinishedAt = now;
+    session.updatedAt = now;
+    session.revision += 1;
+    appendMessage(session, { role: "event", text: "任务已停止", eventType: "turn.stopped" });
+    await saveState();
+  }
   res.json({ ok: true, session: sessionWithMessageWindow(session, req.query.messageLimit) });
 });
 
@@ -10638,6 +10650,7 @@ app.post("/api/sessions/:id/pause", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const activeRun = activeRuns.get(req.params.id);
+  if (activeRun?.controller.signal.aborted) return res.status(409).json({ error: "任务正在应用引导或结束当前轮次，请稍后再暂停" });
   abortDelegatedTasksForParent(session.id);
   if (activeRun) {
     activeRun.abortIntent = "pause";
@@ -10645,17 +10658,20 @@ app.post("/api/sessions/:id/pause", async (req, res) => {
   } else if (session.status !== "running") {
     return res.status(409).json({ error: "任务当前未运行" });
   }
-  const now = new Date().toISOString();
-  session.status = "paused";
-  session.stopReason = "pause";
-  session.runFinishedAt = now;
-  session.updatedAt = now;
-  session.revision += 1;
-  appendMessage(session, { role: "event", text: "任务已暂停，可沿用当前上下文继续", eventType: "turn.paused" });
-  await saveState();
-  if (activeRun) await waitForActiveRunRelease(session.id, activeRun).catch((error) => {
-    console.error(`Task ${session.id} pause cleanup did not settle`, error);
-  });
+  if (activeRun) {
+    try { await waitForActiveRunRelease(session.id, activeRun); }
+    catch (error) { return res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (session.status !== "paused") {
+    const now = new Date().toISOString();
+    session.status = "paused";
+    session.stopReason = "pause";
+    session.runFinishedAt = now;
+    session.updatedAt = now;
+    session.revision += 1;
+    appendMessage(session, { role: "event", text: "任务已暂停，可沿用当前上下文继续", eventType: "turn.paused" });
+    await saveState();
+  }
   res.json({ ok: true, session: sessionWithMessageWindow(session, req.query.messageLimit) });
 });
 
@@ -10683,6 +10699,7 @@ app.post("/api/sessions/:id/input", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "任务工作区不存在" });
   const activeRun = activeRuns.get(session.id);
   if (!activeRun) return res.status(409).json({ error: "任务当前未运行，请直接发送新消息" });
+  if (activeRun.controller.signal.aborted) return res.status(409).json({ error: "任务正在切换轮次，请稍后重试" });
   const text = String(req.body.text || "").trim();
   const mode = req.body.mode === "steer" ? "steer" : "queue";
   const clientMutationId = String(req.body.clientMutationId || "").trim();
@@ -10729,12 +10746,28 @@ app.post("/api/sessions/:id/input", async (req, res) => {
   }
   const previousPendingInputs = session.pendingInputs;
   const previousUpdatedAt = session.updatedAt;
+  let immediateMessage: Message | undefined;
   if (mode === "steer") {
     const promoted = promotePendingInput([...session.pendingInputs, input], input.id, inputCreatedAt);
     session.pendingInputs = promoted.queue;
-  } else session.pendingInputs = [...session.pendingInputs, input];
-  session.updatedAt = input.createdAt;
-  session.revision += 1;
+    immediateMessage = appendMessage(session, {
+      role: "user",
+      text: input.text,
+      attachments: input.attachments,
+      payload: {
+        inputMode: "steer",
+        pendingInputId: input.id,
+        ...(input.clientMutationId ? { clientMutationId: input.clientMutationId } : {}),
+        queuedAt: input.createdAt,
+        skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
+        skillNames: normalizeSkillNames(input.skillNames)
+      }
+    });
+  } else {
+    session.pendingInputs = [...session.pendingInputs, input];
+    session.updatedAt = input.createdAt;
+    session.revision += 1;
+  }
   const commit = saveState();
   if (clientMutationId) pendingInputCommits.set(mutationCommitKey, commit);
   try {
@@ -10744,7 +10777,8 @@ app.post("/api/sessions/:id/input", async (req, res) => {
     session.pendingInputs = session.pendingInputs
       .filter((item) => item.id !== input.id)
       .map((item) => previousById.get(item.id) || item);
-    if (session.updatedAt === input.createdAt) session.updatedAt = previousUpdatedAt;
+    if (immediateMessage) session.messages = session.messages.filter((message) => message.id !== immediateMessage.id);
+    if (session.updatedAt === immediateMessage?.createdAt || session.updatedAt === input.createdAt) session.updatedAt = previousUpdatedAt;
     session.revision += 1;
     scheduleStateSave(1_000);
     return res.status(503).json({ error: `输入暂时无法持久化，请重试：${error instanceof Error ? error.message : String(error)}` });

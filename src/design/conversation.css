@@ -1,4 +1,8 @@
-.chat-view { background: var(--mc-surface); }
+.chat-view {
+  container-name: conversation;
+  container-type: inline-size;
+  background: var(--mc-surface);
+}
 .session-switch-loading {
   position: absolute;
   z-index: 5;
@@ -35,6 +39,16 @@
 .subagent-card-grid { max-width: var(--mc-content); }
 
 .message { color: var(--mc-text); }
+.message-virtual-row { padding-bottom: 4px; }
+.message-virtual-row > .message,
+.message-virtual-row > .event-row,
+.message-virtual-row > .error-group,
+.message-virtual-row > .working-line { margin-bottom: 0; }
+.message-virtual-row-user { padding-bottom: 14px; }
+.message-virtual-row-assistant,
+.message-virtual-row-error { padding-bottom: 10px; }
+.message-virtual-row-activity-group { padding-bottom: 3px; }
+.message-virtual-row-activity-group .activity-timeline.single-layer { margin-bottom: 2px; }
 .message .avatar { color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
 .message.assistant {
   grid-template-columns: 30px minmax(0, 1fr);
@@ -53,6 +67,8 @@
 .message.assistant .agent-markdown-message { font-size: 15.5px; line-height: 1.76; }
 .message.assistant .markdown-body p,
 .message.assistant .agent-markdown-message p { margin: 0 0 16px; }
+.message.assistant .markdown-body > :last-child,
+.message.assistant .agent-markdown-message > :last-child { margin-bottom: 0; }
 .message.user .avatar { color: var(--mc-brand-inverse); background: var(--mc-brand); }
 .message.user { grid-template-columns: minmax(0, 1fr) 26px; padding-left: 42px; }
 .message.error .avatar { color: var(--mc-danger); background: color-mix(in srgb, var(--mc-danger) 10%, var(--mc-surface)); }
@@ -64,13 +80,20 @@
 }
 .message-body > p { color: var(--mc-text); font-size: 14.5px; line-height: 1.72; }
 .message.agent .message-body { padding-top: 2px; }
-.message.assistant { margin-bottom: 10px; }
+.message.assistant .message-body { position: relative; }
 .message-actions {
-  height: 22px;
-  margin-top: 2px;
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: calc(100% + 6px);
+  display: flex;
+  width: max-content;
+  height: auto;
+  gap: 1px;
+  margin: 0;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-2px);
+  transform: translateX(-2px);
   transition: opacity var(--mc-fast) ease, transform var(--mc-fast) ease;
 }
 .message-actions .icon-button,
@@ -79,7 +102,11 @@
 .message:focus-within .message-actions {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  transform: translateX(0);
+}
+@container conversation (max-width: 980px) {
+  .message.assistant .message-body { padding-right: 52px; }
+  .message-actions { right: 0; left: auto; }
 }
 @media (hover: none) {
   .message-actions { opacity: .72; pointer-events: auto; transform: none; }
