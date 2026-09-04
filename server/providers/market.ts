@@ -31,10 +31,64 @@ export type AgentMarketCatalogItem = {
   installable: boolean;
   installReason: string;
   distributionTypes: string[];
+  rank: number;
+  tier: "featured" | "recommended" | "ecosystem" | "experimental";
+  region: "global" | "china";
+  verified: boolean;
+  maturity: "stable" | "preview" | "community";
+  hiddenByDefault: boolean;
 };
 
 const NATIVE_IDS = new Set(["codex", "claude"]);
 const NATIVE_WRAPPER_IDS = new Set(["codex-acp", "claude-acp"]);
+
+const DEEPSEEK_HARNESS: AcpRegistryAgent = {
+  id: "deepseek-harness",
+  name: "DeepSeek Harness",
+  version: "0.1.1-rc.2",
+  description: "DeepSeek 官方开源 Agent Harness，使用 ACP 标准接入（开发者预览版）",
+  repository: "https://github.com/deepseek-ai/deepseek-harness",
+  website: "https://deepseek-harness.github.io/deepseek-harness/",
+  authors: ["DeepSeek AI"],
+  license: "MIT",
+  icon: "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/master/apps/web/public/favicon.svg",
+  distribution: { npx: { package: "@deepseek-ai/dsh@0.1.1-rc.2", args: ["--profile", "acp"] } }
+};
+
+const CURATION: Record<string, Partial<Pick<AgentMarketCatalogItem, "rank" | "tier" | "region" | "verified" | "maturity" | "hiddenByDefault">>> = {
+  codex: { rank: 10, tier: "featured", verified: true, maturity: "stable" },
+  claude: { rank: 20, tier: "featured", verified: true, maturity: "stable" },
+  gemini: { rank: 30, tier: "featured", verified: true, maturity: "stable" },
+  "codebuddy-code": { rank: 40, tier: "featured", region: "china", verified: true, maturity: "stable" },
+  "deepseek-harness": { rank: 50, tier: "featured", region: "china", verified: true, maturity: "preview" },
+  "github-copilot-cli": { rank: 60, tier: "recommended", verified: true, maturity: "stable" },
+  opencode: { rank: 70, tier: "recommended", verified: true, maturity: "stable" },
+  cline: { rank: 80, tier: "recommended", verified: true, maturity: "stable" },
+  "grok-build": { rank: 90, tier: "recommended", verified: true, maturity: "stable" },
+  goose: { rank: 100, tier: "recommended", verified: true, maturity: "stable" },
+  kimi: { rank: 110, tier: "recommended", region: "china", verified: true, maturity: "stable" },
+  "qwen-code": { rank: 120, tier: "recommended", region: "china", verified: true, maturity: "stable" },
+  "glm-acp-agent": { rank: 130, tier: "recommended", region: "china", verified: false, maturity: "community" },
+  qoder: { rank: 140, tier: "recommended", region: "china", verified: true, maturity: "stable" },
+  kilo: { rank: 150, tier: "recommended", verified: true, maturity: "stable" }
+};
+
+function withWorkbenchAgents(document: AcpRegistryDocument): AcpRegistryDocument {
+  if (document.agents.some((agent) => agent.id === DEEPSEEK_HARNESS.id)) return document;
+  return { ...document, agents: [...document.agents, DEEPSEEK_HARNESS] };
+}
+
+function curation(id: string) {
+  const configured = CURATION[id] || {};
+  return {
+    rank: configured.rank ?? 1_000,
+    tier: configured.tier ?? "ecosystem" as AgentMarketCatalogItem["tier"],
+    region: configured.region ?? "global" as AgentMarketCatalogItem["region"],
+    verified: configured.verified ?? false,
+    maturity: configured.maturity ?? "community" as AgentMarketCatalogItem["maturity"],
+    hiddenByDefault: configured.hiddenByDefault ?? !CURATION[id]
+  };
+}
 
 function writeJsonAtomic(file: string, value: unknown) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -64,12 +118,12 @@ export class AgentMarketStore {
 
   async registry(force = false): Promise<{ document: AcpRegistryDocument; source: "network" | "cache" }> {
     try {
-      const document = await this.registryClient.list(force);
+      const document = withWorkbenchAgents(await this.registryClient.list(force));
       writeJsonAtomic(this.registryFile(), document);
       return { document, source: "network" };
     } catch (error) {
       try {
-        const document = parseAcpRegistry(JSON.parse(await fsp.readFile(this.registryFile(), "utf8")));
+        const document = withWorkbenchAgents(parseAcpRegistry(JSON.parse(await fsp.readFile(this.registryFile(), "utf8"))));
         return { document, source: "cache" };
       } catch {
         throw error;
@@ -121,7 +175,7 @@ export class AgentMarketStore {
     const nativeItems: AgentMarketCatalogItem[] = native.map((item) => ({
       ...item, authors: [], license: "native", transport: "native", native: true, installed: true,
       accent: item.id === "claude" ? "#d97757" : "#111111",
-      installable: false, installReason: "工作台原生增强 Provider", distributionTypes: ["native"]
+      installable: false, installReason: "工作台原生增强 Provider", distributionTypes: ["native"], ...curation(item.id)
     }));
     const registryItems = document.agents.filter((agent) => !NATIVE_WRAPPER_IDS.has(agent.id)).map((agent): AgentMarketCatalogItem => {
       const availability = installability(agent);
@@ -130,9 +184,10 @@ export class AgentMarketStore {
         repository: agent.repository, website: agent.website, authors: agent.authors, license: agent.license,
         icon: agent.icon, accent: providerBrandAccent(agent.id), transport: "acp", native: false, installed: installedIds.has(agent.id),
         installable: availability.installable, installReason: availability.reason,
-        distributionTypes: Object.keys(agent.distribution)
+        distributionTypes: Object.keys(agent.distribution), ...curation(agent.id)
       };
     });
-    return { schemaVersion: 1 as const, registryVersion: document.version, registrySource: source, items: [...nativeItems, ...registryItems] };
+    const items = [...nativeItems, ...registryItems].sort((left, right) => left.rank - right.rank || left.name.localeCompare(right.name));
+    return { schemaVersion: 2 as const, registryVersion: document.version, registrySource: source, items };
   }
 }

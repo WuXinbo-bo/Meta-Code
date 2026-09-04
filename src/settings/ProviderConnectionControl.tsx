@@ -180,7 +180,7 @@ export function ProviderConnectionControl({ providerId, control, title = "账号
     finally { setBusy(false); }
   };
 
-  return <div className="agent-market-profiles provider-connection-control">
+  return <form className="agent-market-profiles provider-connection-control" onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <header><strong>{title}</strong><button type="button" onClick={() => setProfileDraft(newProfileDraft(providerId, configuration, profiles.length === 0))}>新建</button></header>
     {loading ? <div className="agent-market-control-loading"><LoaderCircle className="spin" size={13} />正在读取 Agent 配置能力</div> : <>
       {profiles.length > 0 && <div className="agent-market-profile-tabs">{profiles.map((profile) => <button type="button" key={profile.id} className={profileDraft.id === profile.id ? "active" : ""} onClick={() => setProfileDraft(draftFromProfile(profile))}>{profile.name}{profile.isDefault ? <Check size={10} /> : null}</button>)}</div>}
@@ -195,9 +195,9 @@ export function ProviderConnectionControl({ providerId, control, title = "账号
           : <select value={String(profileDraft.configValues[option.id] ?? option.currentValue)} onChange={(event) => setProfileDraft((current) => ({ ...current, configValues: { ...current.configValues, [option.id]: event.target.value } }))}>{selectOptions(option).map((item) => <option key={item.value} value={item.value}>{item.name}</option>)}</select>}{option.description && <small>{option.description}</small>}</label>)}
         <label className="agent-market-default"><input type="checkbox" checked={profileDraft.isDefault} onChange={(event) => setProfileDraft((current) => ({ ...current, isDefault: event.target.checked }))} /><span>设为默认连接</span></label>
       </div>
-      <footer>{profileDraft.id && <button type="button" className="provider-connection-delete" title="删除连接方案" disabled={busy} onClick={() => void remove()}><Trash2 size={13} /></button>}{control?.operations.discoverModels !== false && <button type="button" disabled={busy} onClick={() => void discoverModels()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}探测模型</button>}{control?.operations.testConnection !== false && <button type="button" disabled={busy} onClick={() => void authenticate()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Settings2 size={13} />}{selectedAuthMethod?.id === "oauth-personal" ? "登录并验证" : "测试连接"}</button>}<button type="button" className="primary" disabled={busy} onClick={() => void save()}><Check size={13} />保存</button></footer>
+      <footer>{profileDraft.id && <button type="button" className="provider-connection-delete" title="删除连接方案" disabled={busy} onClick={() => void remove()}><Trash2 size={13} /></button>}{control?.operations.discoverModels !== false && <button type="button" disabled={busy} onClick={() => void discoverModels()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}探测模型</button>}{control?.operations.testConnection !== false && <button type="button" disabled={busy} onClick={() => void authenticate()}>{busy ? <LoaderCircle className="spin" size={13} /> : <Settings2 size={13} />}{selectedAuthMethod?.id === "oauth-personal" ? "登录并验证" : "测试连接"}</button>}<button type="submit" className="primary" disabled={busy}><Check size={13} />保存</button></footer>
     </>}
     {profileDraft.healthMessage && <div className={`provider-connection-health ${profileDraft.healthStatus}`}><i />{profileDraft.healthMessage}{profileDraft.healthLatencyMs > 0 ? <small>{profileDraft.healthLatencyMs} ms</small> : null}</div>}
     {notice && <div className="agent-market-notice">{notice}</div>}
-  </div>;
+  </form>;
 }

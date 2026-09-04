@@ -13,6 +13,7 @@ const execFileAsync = promisify(execFile);
 const COMMAND_NAMES: Record<string, string> = {
   gemini: "gemini", "github-copilot-cli": "copilot", "grok-build": "grok", "qwen-code": "qwen",
   kimi: "kimi", opencode: "opencode", "mistral-vibe": "vibe-acp", goose: "goose", cline: "cline", kilo: "kilo"
+  , "deepseek-harness": "dsh"
 };
 const BLOCKED_ENV = new Set(["PATH", "PATHEXT", "COMSPEC", "HOME", "USERPROFILE", "NODE_OPTIONS", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
 

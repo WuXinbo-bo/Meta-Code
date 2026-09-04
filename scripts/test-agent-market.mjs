@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { AgentMarketStore } from "../server/providers/market.ts";
 import { providerBrandAccent } from "../server/providers/branding.ts";
-import { acpDelegationEnvironment, acpProviderManifest } from "../server/providers/acp/runtime.ts";
+import { acpDelegationEnvironment, acpProviderManifest, createAcpRuntimeDefinition } from "../server/providers/acp/runtime.ts";
 
 const serverSource = fs.readFileSync(new URL("../server/index.ts", import.meta.url), "utf8");
 assert.match(serverSource, /app\.post\("\/api\/runtime\/:runtimeId\/check-update"/);
@@ -27,7 +27,14 @@ const catalog = await store.catalog([
   { id: "claude", name: "Claude CLI", version: "1", description: "native" }
 ]);
 assert.equal(requests, 1);
-assert.equal(catalog.items.length, 3);
+assert.equal(catalog.items.length, 4);
+assert.deepEqual(catalog.items.slice(0, 2).map((item) => item.id), ["codex", "claude"]);
+assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.verified, true);
+assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.maturity, "preview");
+assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.installable, true);
+const deepseek = await store.agent("deepseek-harness");
+assert.equal(deepseek.distribution.npx?.package, "@deepseek-ai/dsh@0.1.1-rc.2");
+assert.equal(createAcpRuntimeDefinition(deepseek)?.command, "dsh");
 assert.equal(catalog.items.find((item) => item.id === "fixture-agent")?.installed, false);
 assert.equal(catalog.items.find((item) => item.id === "fixture-agent")?.accent, providerBrandAccent("fixture-agent"));
 assert.equal(providerBrandAccent("gemini"), "#4285f4");
@@ -45,7 +52,7 @@ assert.deepEqual(acpDelegationEnvironment({ enabled: true, bridgeUrl: "http://12
   WORKBENCH_AGENT_DEPTH: "0"
 });
 assert.throws(() => acpDelegationEnvironment({ enabled: true }), /缺少工作台委派桥接配置/);
-assert.equal((await store.catalog([])).items[0].installed, true);
+assert.equal((await store.catalog([])).items.find((item) => item.id === "fixture-agent")?.installed, true);
 
 const offline = new AgentMarketStore(root, { list: async () => { throw new Error("offline"); } });
 const cached = await offline.registry();

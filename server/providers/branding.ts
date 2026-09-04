@@ -12,6 +12,7 @@ const PROVIDER_ACCENTS: Record<string, string> = {
   "glm-acp-agent": "#2563eb",
   cursor: "#6b7280",
   "factory-droid": "#4f46e5"
+  , "deepseek-harness": "#4d6bfe"
 };
 
 const FALLBACK_ACCENTS = ["#2563eb", "#7c3aed", "#0891b2", "#0f766e", "#c2410c", "#be123c"];

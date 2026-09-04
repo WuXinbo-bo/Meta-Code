@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Download, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, Download, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Undo2 } from "lucide-react";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import { ProviderConnectionControl } from "./ProviderConnectionControl";
@@ -46,6 +46,12 @@ type MarketItem = {
   installable: boolean;
   installReason: string;
   distributionTypes: string[];
+  rank: number;
+  tier: "featured" | "recommended" | "ecosystem" | "experimental";
+  region: "global" | "china";
+  verified: boolean;
+  maturity: "stable" | "preview" | "community";
+  hiddenByDefault: boolean;
 };
 
 type MarketResponse = {
@@ -84,10 +90,11 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "installed" | "available" | "native" | "acp">("all");
+  const [filter, setFilter] = useState<"featured" | "installed" | "available" | "china" | "all">("featured");
   const [selectedId, setSelectedId] = useState("codex");
   const [actionBusy, setActionBusy] = useState("");
   const [actionNotice, setActionNotice] = useState("");
+  const [detailOpen, setDetailOpen] = useState(false);
   const [installProgress, setInstallProgress] = useState<Record<string, MarketInstallProgress | null>>({});
 
   const loadMarket = useCallback(async (refresh = false) => {
@@ -142,10 +149,10 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
   const visibleItems = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return (market?.items || []).filter((item) => {
+      if (!normalized && filter === "featured" && item.hiddenByDefault) return false;
       if (filter === "installed" && !item.installed) return false;
       if (filter === "available" && (item.installed || !item.installable)) return false;
-      if (filter === "native" && !item.native) return false;
-      if (filter === "acp" && item.transport !== "acp") return false;
+      if (filter === "china" && item.region !== "china") return false;
       return !normalized || `${item.name} ${item.id} ${item.description}`.toLowerCase().includes(normalized);
     });
   }, [market?.items, filter, query]);
@@ -167,31 +174,33 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
 
   return <div className="agent-market-settings">
     <header className="agent-market-heading">
-      <div><h2>Agent 市场</h2><span>{market ? `${market.items.filter((item) => item.installed).length} 已安装 · ${market.items.length} 可查看` : "加载中"}</span></div>
+      <div><h2>Agent 市场</h2><span>{market ? `${market.items.filter((item) => item.installed).length} 已安装 · ${market.items.filter((item) => !item.hiddenByDefault).length} 个精选` : "加载中"}</span></div>
       <button type="button" title="刷新市场" onClick={() => void loadMarket(true)} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={15} /></button>
     </header>
     <div className="agent-market-toolbar">
       <label><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Agent" /></label>
       <div role="group" aria-label="筛选 Agent">
-        {([['all', '全部'], ['installed', '已安装'], ['available', '可安装'], ['native', '原生'], ['acp', 'ACP']] as const).map(([value, label]) => <button type="button" key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{label}</button>)}
+        {([['featured', '精选'], ['installed', '已安装'], ['available', '可安装'], ['china', '国产 Agent'], ['all', '全部生态']] as const).map(([value, label]) => <button type="button" key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{label}</button>)}
       </div>
     </div>
     {error && <div className="agent-market-error">{error}</div>}
-    <div className="agent-market-layout">
+    <div className={`agent-market-layout ${detailOpen ? "detail-open" : ""}`}>
       <div className="agent-market-list" aria-busy={loading}>
         {loading && !market ? <div className="agent-market-loading"><LoaderCircle className="spin" size={18} />正在读取市场</div> : visibleItems.map((item) => {
           const install = market?.installStates[item.id];
-          return <button type="button" key={item.id} className={`agent-market-card ${selectedId === item.id ? "selected" : ""}`} onClick={() => { setSelectedId(item.id); setActionNotice(""); }}>
+          return <button type="button" key={item.id} className={`agent-market-card ${selectedId === item.id ? "selected" : ""}`} onClick={() => { setSelectedId(item.id); setActionNotice(""); setDetailOpen(true); }}>
             <MarketIcon item={item} />
-            <span className="agent-market-card-copy"><strong>{item.name}</strong><small>{item.description || item.id}</small><i>{item.native ? "原生" : "ACP"} · {item.version || "版本未知"}</i></span>
+            <span className="agent-market-card-copy"><strong>{item.name}</strong><small>{item.description || item.id}</small><i>{item.native ? "原生增强" : "ACP"} · {item.verified ? "官方" : "社区"}{item.maturity === "preview" ? " · 预览版" : ""}</i></span>
             <span className={`agent-market-state ${install?.active ? "working" : item.installed ? "installed" : ""}`}>{install?.active ? <LoaderCircle className="spin" size={12} /> : item.installed ? <Check size={12} /> : null}{install?.active ? "处理中" : item.installed ? "已安装" : item.installable ? "可安装" : "不可用"}</span>
           </button>;
         })}
         {!loading && !visibleItems.length && <div className="agent-market-empty">没有匹配的 Agent</div>}
       </div>
       {selected && <aside className="agent-market-detail">
+        <button type="button" className="agent-market-back" onClick={() => setDetailOpen(false)}><ArrowLeft size={14} />返回 Agent 列表</button>
         <header><MarketIcon item={selected} size={34} /><div><strong>{selected.name}</strong><span>{selected.native ? "原生增强" : "ACP 标准接入"}</span></div><i className={selected.installed ? "installed" : ""}>{selected.installed ? "已安装" : selected.installable ? "未安装" : "不可用"}</i></header>
         <p>{selected.description}</p>
+        <div className="agent-market-badges"><span>{selected.verified ? "官方发布" : "社区维护"}</span><span>{selected.maturity === "stable" ? "稳定" : selected.maturity === "preview" ? "开发者预览" : "社区生态"}</span>{selected.region === "china" && <span>国产 Agent</span>}</div>
         <dl><div><dt>版本</dt><dd>{selected.version || "未知"}</dd></div><div><dt>许可</dt><dd>{selected.license}</dd></div><div><dt>分发</dt><dd>{selected.distributionTypes.join(" / ")}</dd></div><div><dt>运行时</dt><dd>{market?.runtimes[selected.id]?.source || (selected.installed ? "待检测" : "未安装")}</dd></div></dl>
         {(selected.repository || selected.website) && <div className="agent-market-links">{selected.repository && <a href={selected.repository} target="_blank" rel="noreferrer"><ExternalLink size={12} />源码</a>}{selected.website && <a href={selected.website} target="_blank" rel="noreferrer"><ExternalLink size={12} />官网</a>}</div>}
         {selectedInstall?.active && <div className="agent-market-progress"><div><span>{selectedInstall.message}</span>{percent !== null && <b>{percent}%</b>}</div><i>{percent !== null ? <span style={{ width: `${percent}%` }} /> : <span className="indeterminate" />}</i>{progress?.downloadedBytes ? <small>{bytes(progress.downloadedBytes)}{progress.totalBytes ? ` / ${bytes(progress.totalBytes)}` : ""}{progress.bytesPerSecond ? ` · ${bytes(progress.bytesPerSecond)}/s` : ""}</small> : null}</div>}
