@@ -78,6 +78,7 @@
     "test:runtime-progress": "node --import tsx scripts/test-runtime-progress.mjs",
     "test:page-preferences": "node --import tsx scripts/test-page-preferences.mjs",
     "test:help": "node --import tsx scripts/test-help-system.mjs",
+    "test:ux-foundations": "node scripts/test-ux-foundations.mjs",
     "test:first-run": "node --import tsx scripts/test-first-run-guide.mjs",
     "test:repository": "node scripts/test-repository-readiness.mjs",
     "test:session-management": "node --import tsx scripts/test-session-management.mjs",

@@ -10263,6 +10263,57 @@ app.get("/api/data/diagnostics", auth.requireRoles("owner", "admin"), async (_re
   res.json({ schemaVersion: 1, scope: "device", checkedAt: new Date().toISOString(), runtimes });
 });
 
+function redactDiagnosticText(value: unknown) {
+  return String(value || "")
+    .replace(/\b(?:sk|ghp|github_pat|xoxb|xoxp|AIza)[-_A-Za-z0-9]{8,}\b/gi, "[REDACTED]")
+    .replace(/(api[_-]?key|authorization|token|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .slice(0, 2_000);
+}
+
+app.get("/api/data/diagnostics/export", auth.requireRoles("owner", "admin"), async (req, res) => {
+  try {
+    const ownerUserId = req.authUser!.id;
+    const runtimes = await Promise.all(cliRuntimeManager.catalog().map(async (definition) => {
+      const status = await cliRuntimeManager.detect(definition.id);
+      return { id: definition.id, label: definition.label, available: status.available, version: status.version || "", source: status.source, message: redactDiagnosticText(status.message) };
+    }));
+    const providers = await Promise.all(agentAdapterRegistry.list().map(async (descriptor) => {
+      const control = await providerControlSnapshotFor(descriptor.id, ownerUserId);
+      return {
+        id: descriptor.id,
+        transport: control.identity.transport,
+        lifecycle: control.lifecycle.stage,
+        connection: control.connection.status,
+        message: redactDiagnosticText(control.connection.message),
+        capabilities: control.capabilities
+      };
+    }));
+    const recentFailures = state.sessions.filter((item) => item.ownerUserId === ownerUserId && item.lastError).slice(0, 20)
+      .map((item) => ({ sessionId: item.id, providerId: item.engine, status: item.status, updatedAt: item.updatedAt, error: redactDiagnosticText(item.lastError) }));
+    const payload = {
+      schemaVersion: 1,
+      product: "Meta Code",
+      appVersion: process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development",
+      generatedAt: new Date().toISOString(),
+      platform: { os: process.platform, arch: process.arch, node: process.version },
+      summary: {
+        workspaces: state.workspaces.filter((item) => item.ownerUserId === ownerUserId).length,
+        sessions: state.sessions.filter((item) => item.ownerUserId === ownerUserId).length,
+        providerProfiles: state.providerConnections.filter((item) => item.ownerUserId === ownerUserId).length,
+        skills: managedSkillManager.listPublic().length,
+        mcpServers: state.mcpServers.filter((item) => item.ownerUserId === ownerUserId).length
+      },
+      runtimes,
+      providers,
+      recentFailures
+    };
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="meta-code-diagnostics-${new Date().toISOString().slice(0, 10)}.json"`);
+    res.send(JSON.stringify(payload, null, 2));
+  } catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
 function registeredRuntimeId(value: unknown) {
   const runtimeId = normalizeProviderId(value);
   if (!cliRuntimeManager.ids().includes(runtimeId)) throw new Error(`CLI 运行时未注册：${runtimeId}`);

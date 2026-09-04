@@ -72,8 +72,10 @@ export const HELP_TOPICS: HelpTopic[] = [
     summary: "统一配置官方账号、兼容 API、模型发现和连接测试。",
     group: "Agent",
     sections: [
-      { title: "连接方案", body: "每个 Provider 可以保存独立连接。API Key 会进入本机加密凭据库，不写入普通状态数据库。" },
+      { title: "连接方案", body: "每个 Provider 可以保存多套独立连接。Codex 和 Claude 可选择工作台独立账号、复用系统账号、官方 API 或兼容接口；ACP Agent 则使用自身协商提供的登录方式。API Key 会进入本机加密凭据库，不写入普通状态数据库。" },
+      { title: "原生增强", body: "Codex 和 Claude 只统一连接管理与状态展示，任务执行仍保留各自原生线程、恢复、权限和子 Agent 能力，不会强制降级为 ACP。" },
       { title: "探测模型", body: "连接信息保存后，探测模型会读取服务端或 Agent 暴露的模型列表。服务不提供列表时仍可手动填写。" },
+      { title: "任务前检查", body: "创建任务和每次发送前都会重新检查 CLI、连接状态、主任务能力和工作区权限，避免任务进入运行态后才发现配置不可用。" },
       { title: "ACP 配置", body: "ACP Agent 的模型、模式和思考强度由会话能力协商动态提供，工作台不会硬编码不存在的选项。" }
     ]
   },

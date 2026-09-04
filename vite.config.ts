@@ -11,6 +11,19 @@ const apiToken = loadOrCreateDevelopmentApiToken(developmentDataDir);
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/[\\/]node_modules[\\/](?:react|react-dom|scheduler)[\\/]/.test(id)) return "vendor-react";
+          if (id.includes("node_modules/lucide-react") || id.includes("node_modules\\lucide-react")) return "vendor-icons";
+          if (id.includes("node_modules/@tanstack/react-virtual") || id.includes("node_modules\\@tanstack\\react-virtual")) return "vendor-virtual";
+          return undefined;
+        }
+      }
+    }
+  },
   server: {
     port: webPort,
     watch: {

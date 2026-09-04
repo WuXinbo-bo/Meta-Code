@@ -81,7 +81,7 @@
 .sidebar-pane-header strong,
 .sidebar-pane-header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-pane-header strong { color: var(--mc-text); font-size: 13px; font-weight: 680; }
-.sidebar-pane-header small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 10px; font-weight: 450; }
+.sidebar-pane-header small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; font-weight: 450; }
 .sidebar-workspace-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 30px;
@@ -109,7 +109,7 @@
 .sidebar-workspace-current strong,
 .sidebar-workspace-current small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-workspace-current strong { color: var(--mc-text); font-size: 12px; font-weight: 620; }
-.sidebar-workspace-current small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 9px; }
+.sidebar-workspace-current small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; }
 .sidebar-task-actions {
   display: flex;
   align-items: center;
@@ -158,7 +158,7 @@
   border-color: var(--mc-line-strong);
   background: var(--mc-overlay);
 }
-.sidebar-search input { width: 0; min-width: 0; border: 0; outline: 0; opacity: 0; color: var(--mc-text); background: transparent; font-size: 10px; }
+.sidebar-search input { width: 0; min-width: 0; border: 0; outline: 0; opacity: 0; color: var(--mc-text); background: transparent; font-size: 11px; }
 .sidebar-search:focus-within input,
 .sidebar-search.has-query input { width: auto; opacity: 1; }
 .sidebar-search input::placeholder { color: var(--mc-text-tertiary); }
@@ -182,11 +182,11 @@
   min-height: 27px;
   padding: 5px 7px 3px 9px;
   color: var(--mc-text-tertiary);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 .sidebar-section-heading > span { flex: 1; }
-.sidebar-section-heading > small { font-size: 9px; font-weight: 550; }
+.sidebar-section-heading > small { font-size: 11px; font-weight: 550; }
 .sidebar-section-heading > button {
   display: grid;
   place-items: center;
@@ -209,11 +209,11 @@
   color: var(--mc-text-tertiary);
   text-align: center;
 }
-.sidebar-empty-state strong { color: var(--mc-text-secondary); font-size: 10px; font-weight: 600; }
-.sidebar-empty-state small { font-size: 8px; }
+.sidebar-empty-state strong { color: var(--mc-text-secondary); font-size: 11px; font-weight: 600; }
+.sidebar-empty-state small { font-size: 11px; }
 .workspace-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .workspace-panel-actions { padding: 8px; }
-.workspace-panel-actions .primary { justify-content: center; width: 100%; height: 32px; font-size: 10px; }
+.workspace-panel-actions .primary { justify-content: center; width: 100%; height: 32px; font-size: 11px; }
 .workspace-panel-list { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; padding: 0 7px 8px; }
 .workspace-panel-list > section + section { margin-top: 6px; }
 .workspace-panel-list .workspace-menu-item { min-height: 42px; }
@@ -228,7 +228,7 @@
 .brand-mark { width: 42px; height: 34px; padding: 3px 0; }
 .brand-caption { display: grid; align-content: center; gap: 1px; }
 .brand-caption strong { color: var(--mc-text); font-size: 13px; font-weight: 650; }
-.brand-caption span { color: var(--mc-text-tertiary); font-size: 9px; font-weight: 500; }
+.brand-caption span { color: var(--mc-text-tertiary); font-size: 11px; font-weight: 500; }
 
 .icon-button {
   width: 30px;
@@ -242,7 +242,7 @@
 .sidebar-label {
   margin: 10px 8px 5px;
   color: var(--mc-text-tertiary);
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 650;
   text-transform: none;
 }
@@ -259,7 +259,7 @@
 .workspace-picker.open { border-color: transparent; background: var(--mc-hover); }
 .workspace-trigger { height: 36px; padding: 0 7px; border-radius: var(--mc-r-sm); }
 .workspace-trigger-copy strong { color: var(--mc-text); font-size: 11px; font-weight: 600; }
-.workspace-trigger-copy small { color: var(--mc-text-tertiary); font-size: 8px; }
+.workspace-trigger-copy small { color: var(--mc-text-tertiary); font-size: 11px; }
 
 .new-task-row { margin: 8px 0 12px; }
 .new-task {
@@ -294,9 +294,9 @@
 .session-select > svg { margin-top: 1px; color: var(--mc-text-tertiary); }
 .session-select > .session-provider-icon { width: 15px; height: 15px; margin-top: 1px; opacity: .78; }
 .session-list strong { max-width: none; color: var(--mc-text); font-size: 12px; font-weight: 600; }
-.session-list small { max-width: none; margin-top: 2px; color: var(--mc-text-tertiary); font-size: 9px; }
+.session-list small { max-width: none; margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; }
 .workspace-panel-list .workspace-menu-item-copy strong { font-size: 13px; }
-.workspace-panel-list .workspace-menu-item-copy small { font-size: 10px; }
+.workspace-panel-list .workspace-menu-item-copy small { font-size: 11px; }
 .inspector .tree-row { height: 31px; font-size: 13px; }
 .inspector .workspace-search-results strong { font-size: 13px; }
 .task-folder-group > summary,
@@ -312,7 +312,7 @@
 }
 .title-block strong { color: var(--mc-text); font-size: 13px; font-weight: 650; }
 .title-block span { margin-top: 2px; color: var(--mc-text-tertiary); font: 9px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace; }
-.run-status { gap: 4px; color: var(--mc-success); font-size: 9px; }
+.run-status { gap: 4px; color: var(--mc-success); font-size: 11px; }
 .run-status.paused { color: var(--mc-warning); }
 
 .token-status {
@@ -353,8 +353,8 @@
 .connected-provider-overflow-menu button { display: flex; min-height: 34px; align-items: center; gap: 8px; padding: 4px 7px; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text); background: transparent; text-align: left; cursor: pointer; }
 .connected-provider-overflow-menu button:hover { background: var(--mc-hover); }
 .connected-provider-overflow-menu span { display: grid; min-width: 0; }
-.connected-provider-overflow-menu strong { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.connected-provider-overflow-menu small { color: var(--mc-text-tertiary); font-size: 8px; }
+.connected-provider-overflow-menu strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.connected-provider-overflow-menu small { color: var(--mc-text-tertiary); font-size: 11px; }
 .connected-provider-icons { display: flex; align-items: center; }
 .connected-provider-item,
 .connected-provider-overflow {

@@ -6,6 +6,7 @@ import { AgentConversation, useAgentOutputFollow } from "../components/AgentConv
 import { agentStreamVersion } from "../components/activityModel";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { HelpButton } from "../help/HelpProvider";
+import { confirmAction } from "../components/ConfirmationProvider";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import type { AgentProviderDescriptor } from "../agents/types";
 
@@ -471,7 +472,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
   };
   const approve = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/approve`, { method: "POST", body: JSON.stringify({ revision: workflow.revision }) }); acceptWorkflow(next, targetId); await onChanged(); onNotice("计划已批准，开始按依赖调度", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const refinePlan = async () => { if (!reviewNote.trim()) return onNotice("请填写需要追加调整的内容", "warning"); await plan("refine", reviewNote.trim()); };
-  const freshPlan = async () => { if (!workflow || !window.confirm("重新生成会创建完整的新计划版本，当前计划仍保留在历史中。继续吗？")) return; await plan("fresh", reviewNote.trim()); };
+  const freshPlan = async () => { if (!workflow || !await confirmAction("重新生成会创建完整的新计划版本，当前计划仍保留在历史中。继续吗？", { title: "重新生成计划" })) return; await plan("fresh", reviewNote.trim()); };
   const maintainPlan = async () => {
     if (!maintenanceInput.trim()) return onNotice("请输入规划调整内容", "warning");
     await plan("refine", maintenanceInput.trim(), "maintenance");
@@ -515,18 +516,18 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     const targetId = workflow.id;
     const node = workflow.nodes.find((item) => item.id === nodeId);
     const warning = node?.status === "completed" ? "重新执行会使依赖此节点的下游结果标记为过期，工作区文件不会自动回滚。继续吗？" : "重新执行会保留当前文件和日志，但会停止当前尝试并创建新的执行轮次。继续吗？";
-    if (!window.confirm(warning)) return;
+    if (!await confirmAction(warning, { title: "重新执行节点" })) return;
     setBusy(true);
     try { const next = await request<Workflow>(`/api/workflows/${targetId}/nodes/${encodeURIComponent(nodeId)}/restart`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("已请求重新执行节点，正在等待旧进程退出", "success"); }
     catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
     finally { setBusy(false); }
   };
   const repairNodeResult = async (nodeId: string) => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/nodes/${encodeURIComponent(nodeId)}/repair-result`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("已保留 Agent 原始输出，正在重新解析并验收", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
-  const cancelNode = async (nodeId: string) => { if (!workflow || workflow.id !== workflowIdRef.current || !window.confirm("终止后会保留已有文件、日志和检查点，下游依赖节点将被阻塞。继续吗？")) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/nodes/${encodeURIComponent(nodeId)}/cancel`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("节点已终止，已有成果仍保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
+  const cancelNode = async (nodeId: string) => { if (!workflow || workflow.id !== workflowIdRef.current || !await confirmAction("终止后会保留已有文件、日志和检查点，下游依赖节点将被阻塞。继续吗？", { title: "终止节点" })) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/nodes/${encodeURIComponent(nodeId)}/cancel`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("节点已终止，已有成果仍保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const retryFailedNodes = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/retry-failed-nodes`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("全部失败节点已重新排队，下游阻塞将随执行恢复", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const pauseWorkflow = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/pause`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("已请求暂停整个工作流，正在保存检查点", "info"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const resumeWorkflow = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/resume`, { method: "POST" }); acceptWorkflow(next, targetId); onNotice("工作流已从检查点继续", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
-  const cancel = async () => { if (!workflow || workflow.id !== workflowIdRef.current || !window.confirm("终止工作流会停止所有未完成 Agent，但不会回滚或删除已有文件和结果。继续吗？")) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/cancel`, { method: "POST", body: JSON.stringify({ revision: workflow.revision }) }); acceptWorkflow(next, targetId); await onChanged(); onNotice("工作流已终止，已有成果仍保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
+  const cancel = async () => { if (!workflow || workflow.id !== workflowIdRef.current || !await confirmAction("终止工作流会停止所有未完成 Agent，但不会回滚或删除已有文件和结果。继续吗？", { title: "终止工作流" })) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/cancel`, { method: "POST", body: JSON.stringify({ revision: workflow.revision }) }); acceptWorkflow(next, targetId); await onChanged(); onNotice("工作流已终止，已有成果仍保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const resetViewport = () => { setPan({ x: defaultViewport.x, y: defaultViewport.y }); setZoom(defaultViewport.zoom); };
   const persistNodeOffsets = useCallback(() => {
     if (!workflowId) return;

@@ -22,7 +22,7 @@
   border-radius: var(--mc-r-md);
   color: var(--mc-text-tertiary);
   background: var(--mc-overlay);
-  font-size: 9px;
+  font-size: 11px;
   backdrop-filter: blur(12px);
 }
 
@@ -64,7 +64,7 @@
 .workflow-card-result footer span { color: var(--mc-text-tertiary); background: var(--mc-surface-subtle); }
 .workflow-card-logs,
 .workflow-card-result { border-color: var(--mc-line); }
-.workflow-card-logs p { color: var(--mc-text-tertiary); font-size: 9px; }
+.workflow-card-logs p { color: var(--mc-text-tertiary); font-size: 11px; }
 .workflow-card-logs p:last-child { color: var(--mc-text-secondary); font-weight: 550; }
 .workflow-card-logs p:last-child::after { display: none; }
 .workflow-agent-card.running .workflow-card-logs p:last-child > span,
@@ -145,7 +145,7 @@
 }
 .workflow-zoom button { color: var(--mc-text-secondary); }
 .workflow-zoom button:hover { color: var(--mc-text); background: var(--mc-surface-subtle); }
-.workflow-zoom span { color: var(--mc-text-tertiary); font-size: 9px; }
+.workflow-zoom span { color: var(--mc-text-tertiary); font-size: 11px; }
 .workflow-zoom .workflow-review-toggle.active,
 .workflow-zoom .workflow-delivery-toggle.active { color: var(--mc-text); background: var(--mc-surface-muted); }
 .workflow-zoom .workflow-review-toggle.pending::after,
@@ -164,7 +164,7 @@
   box-shadow: var(--mc-shadow-menu);
   backdrop-filter: blur(16px);
 }
-.workflow-dock span { color: var(--mc-text-secondary); font-size: 9px; }
+.workflow-dock span { color: var(--mc-text-secondary); font-size: 11px; }
 .workflow-dock button { height: 36px; min-height: 36px; border-color: var(--mc-line); border-radius: var(--mc-r-md); color: var(--mc-text); background: var(--mc-surface); }
 .workflow-dock button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); background: var(--mc-brand); }
 

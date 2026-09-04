@@ -10,7 +10,7 @@
   color: var(--mc-text-secondary);
   background: color-mix(in srgb, var(--mc-surface) 88%, transparent);
   backdrop-filter: blur(2px);
-  font-size: 10px;
+  font-size: 11px;
   pointer-events: auto;
 }
 .session-switch-loading > svg { color: var(--mc-text-tertiary); }
@@ -166,7 +166,7 @@
 .agent-turn-identity small {
   overflow: hidden;
   color: var(--mc-text-tertiary);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -181,7 +181,7 @@
 .agent-turn-duration > svg { flex: none; margin-top: 1px; }
 .agent-turn-duration > span { display: grid; min-width: 0; gap: 2px; }
 .agent-turn-duration strong { color: var(--mc-text-secondary); font-size: 12px; font-weight: 500; }
-.agent-turn-duration small { color: var(--mc-text-tertiary); font-size: 9px; }
+.agent-turn-duration small { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-turn-summary.state-running .agent-turn-duration > svg { color: var(--mc-info); animation: agent-turn-pulse 1.8s ease-in-out infinite; }
 .agent-turn-summary.state-completed .agent-turn-duration > svg { color: var(--mc-success); }
 .agent-turn-summary.state-failed .agent-turn-duration > svg { color: var(--mc-danger); }
@@ -226,7 +226,7 @@
 .agent-turn-events .agent-stream-event summary small,
 .agent-turn-events .agent-stream-copy small { color: var(--mc-text-tertiary); font: 10px/1.4 Inter, ui-sans-serif, sans-serif; }
 .agent-turn-events .agent-stream-event summary time,
-.agent-turn-events .agent-stream-cluster > summary time { color: var(--mc-text-tertiary); font-size: 9px; opacity: .72; }
+.agent-turn-events .agent-stream-cluster > summary time { color: var(--mc-text-tertiary); font-size: 11px; opacity: .72; }
 .agent-turn-events .agent-stream-cluster-items {
   margin-left: 9px;
   padding-left: 14px;
@@ -246,7 +246,7 @@
 .agent-turn-events .agent-plan-icon { width: 18px; height: 18px; color: var(--mc-text-tertiary); }
 .agent-turn-events .agent-plan-heading strong { color: var(--mc-text-secondary); font-size: 12px; font-weight: 500; }
 .agent-turn-events .agent-plan-heading small,
-.agent-turn-events .agent-plan-view > summary time { color: var(--mc-text-tertiary); font-size: 9px; }
+.agent-turn-events .agent-plan-view > summary time { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-turn-events .agent-plan-progress { color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
 .agent-turn-events .agent-plan-content { padding: 2px 8px 8px 28px; }
 .agent-turn-events .agent-plan-content li p { font-size: 11px; }
@@ -310,7 +310,7 @@
   color: var(--mc-text-secondary);
   background: transparent;
 }
-.agent-event-detail > details > summary { color: var(--mc-text-tertiary); font-size: 9px; }
+.agent-event-detail > details > summary { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-reasoning-content { color: var(--mc-text-secondary); opacity: .82; }
 .agent-thinking-line {
   min-height: 28px;
@@ -342,7 +342,7 @@
 .agent-chat-avatar.codex,
 .subagent-mark.codex { border: 0; color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
 .agent-chat-message header strong { color: var(--mc-text); font-size: 11px; font-weight: 600; }
-.agent-chat-message header time { color: var(--mc-text-tertiary); font-size: 8px; }
+.agent-chat-message header time { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-provider-badge { color: var(--mc-text-tertiary) !important; background: transparent !important; }
 
 .subagent-row > button,
@@ -367,7 +367,7 @@
 .agent-chat-avatar .provider-brand-icon { display: block; object-fit: contain; }
 .subagent-row .subagent-card-title { gap: 6px; min-width: 0; }
 .subagent-card-title b { color: var(--mc-text) !important; font-size: 11px !important; }
-.subagent-card-copy > small { color: var(--mc-text-tertiary); font-size: 8px; }
+.subagent-card-copy > small { color: var(--mc-text-tertiary); font-size: 11px; }
 
 .agent-plan-view {
   margin: 5px 0;
@@ -435,7 +435,7 @@
 .composer textarea { min-height: 72px; padding: 14px 14px 5px; color: var(--mc-text); font-size: 14px; }
 .composer textarea::placeholder { color: var(--mc-text-tertiary); }
 .composer-footer { gap: 7px; min-height: 40px; padding: 4px 7px 7px 9px; }
-.composer-footer > span { color: var(--mc-text-tertiary); font-size: 8px; }
+.composer-footer > span { color: var(--mc-text-tertiary); font-size: 11px; }
 .composer-control-button {
   display: inline-flex;
   align-items: center;
@@ -448,7 +448,7 @@
   border-radius: var(--mc-r-md);
   color: var(--mc-text-secondary);
   background: transparent;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
 }
@@ -508,13 +508,13 @@
   border-radius: var(--mc-r-sm);
   color: var(--mc-text-secondary);
   background: transparent;
-  font-size: 9px;
+  font-size: 11px;
   cursor: pointer;
 }
 .composer-preference-menu > button:hover { color: var(--mc-text); background: var(--mc-surface-subtle); }
 .composer-preference-menu > button.selected { color: var(--mc-text); }
 .composer-preference-menu > button > svg { color: var(--mc-success); }
-.composer-preference-menu > p { margin: 5px 6px 3px; color: var(--mc-danger); font-size: 8px; }
+.composer-preference-menu > p { margin: 5px 6px 3px; color: var(--mc-danger); font-size: 11px; }
 .composer-capability-control,
 .composer-runtime-control { position: relative; flex: none; }
 .composer-capability-control { margin-left: auto; }
@@ -577,7 +577,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--mc-text);
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -609,7 +609,7 @@
   border-radius: var(--mc-r-sm);
   color: var(--mc-text-secondary);
   background: transparent;
-  font-size: 9px;
+  font-size: 11px;
   cursor: pointer;
 }
 .composer-runtime-mode button:hover,
@@ -619,7 +619,7 @@
 .composer-runtime-fields.acp { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .composer-runtime-fields.acp label { display: grid; min-width: 0; gap: 3px; }
 .composer-runtime-fields.acp label.wide { grid-column: 1 / -1; }
-.composer-runtime-fields.acp label > span { overflow: hidden; color: var(--mc-text-tertiary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-runtime-fields.acp label > span { overflow: hidden; color: var(--mc-text-tertiary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-runtime-fields select {
   width: 100%;
   height: 30px;
@@ -630,12 +630,12 @@
   outline: 0;
   color: var(--mc-text);
   background: var(--mc-surface);
-  font-size: 9px;
+  font-size: 11px;
 }
 .composer-runtime-fields select:focus { border-color: var(--mc-text-tertiary); box-shadow: 0 0 0 2px var(--mc-focus); }
 .composer-runtime-progress { position: absolute; top: 14px; right: 13px; color: var(--mc-text-tertiary); }
-.composer-runtime-popover > p { margin: 6px 2px 0; color: var(--mc-danger); font-size: 8px; }
-.composer-runtime-empty { padding: 8px 6px; color: var(--mc-text-tertiary); font-size: 9px; text-align: center; }
+.composer-runtime-popover > p { margin: 6px 2px 0; color: var(--mc-danger); font-size: 11px; }
+.composer-runtime-empty { padding: 8px 6px; color: var(--mc-text-tertiary); font-size: 11px; text-align: center; }
 .pending-turn-tray {
   margin-bottom: 7px;
   overflow: hidden;
@@ -658,8 +658,8 @@
 }
 .pending-turn-summary:hover { background: var(--mc-surface-subtle); }
 .pending-turn-summary > span { display: flex; min-width: 0; align-items: center; gap: 6px; }
-.pending-turn-summary strong { color: var(--mc-text); font-size: 9px; }
-.pending-turn-summary small { overflow: hidden; color: var(--mc-text-tertiary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.pending-turn-summary strong { color: var(--mc-text); font-size: 11px; }
+.pending-turn-summary small { overflow: hidden; color: var(--mc-text-tertiary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .pending-turn-list { max-height: min(240px, 34vh); overflow-y: auto; border-top: 1px solid var(--mc-line); overscroll-behavior: contain; }
 .pending-turn-item {
   display: grid;
@@ -672,12 +672,12 @@
 }
 .pending-turn-item:last-child { border-bottom: 0; }
 .pending-turn-item:hover { background: var(--mc-surface-subtle); }
-.pending-turn-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: var(--mc-text-tertiary); background: var(--mc-surface-muted); font-size: 8px; }
+.pending-turn-index { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: var(--mc-text-tertiary); background: var(--mc-surface-muted); font-size: 11px; }
 .pending-turn-item.steering .pending-turn-index { color: var(--mc-success); }
 .pending-turn-copy { display: grid; min-width: 0; gap: 2px; }
-.pending-turn-copy strong { color: var(--mc-text-secondary); font-size: 8px; font-weight: 650; }
-.pending-turn-copy p { overflow: hidden; margin: 0; color: var(--mc-text); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.pending-turn-copy small { color: var(--mc-text-tertiary); font-size: 8px; }
+.pending-turn-copy strong { color: var(--mc-text-secondary); font-size: 11px; font-weight: 650; }
+.pending-turn-copy p { overflow: hidden; margin: 0; color: var(--mc-text); font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.pending-turn-copy small { color: var(--mc-text-tertiary); font-size: 11px; }
 .pending-turn-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity var(--mc-fast) ease; }
 .pending-turn-item:hover .pending-turn-actions,
 .pending-turn-item:focus-within .pending-turn-actions { opacity: 1; }
@@ -695,7 +695,7 @@
   border-radius: var(--mc-r-sm);
   color: var(--mc-text-secondary);
   background: transparent;
-  font-size: 8px;
+  font-size: 11px;
   cursor: pointer;
 }
 .pending-turn-actions button:hover,
@@ -703,7 +703,7 @@
 .pending-turn-actions button.promote { border-color: var(--mc-line); color: var(--mc-text); background: var(--mc-surface); }
 .pending-turn-locked { color: var(--mc-success); cursor: default; }
 .pending-turn-editor { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-.pending-turn-editor textarea { min-height: 42px; max-height: 100px; resize: vertical; padding: 6px 7px; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-r-sm); outline: 0; color: var(--mc-text); background: var(--mc-surface); font-size: 10px; line-height: 1.4; }
+.pending-turn-editor textarea { min-height: 42px; max-height: 100px; resize: vertical; padding: 6px 7px; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-r-sm); outline: 0; color: var(--mc-text); background: var(--mc-surface); font-size: 11px; line-height: 1.4; }
 .pending-turn-editor textarea:focus { box-shadow: 0 0 0 2px var(--mc-focus); }
 .pending-turn-editor > div { display: flex; align-items: center; gap: 2px; }
 @container (max-width: 590px) {
@@ -729,7 +729,7 @@
 .send-button.pause { color: var(--mc-warning); background: var(--mc-surface-subtle); }
 .send-button.resume { color: var(--mc-success); background: var(--mc-surface-subtle); }
 .send-button.stop { color: var(--mc-danger); background: var(--mc-surface-subtle); }
-.composer-disclaimers { color: var(--mc-text-tertiary); font-size: 8px; }
+.composer-disclaimers { color: var(--mc-text-tertiary); font-size: 11px; }
 .jump-bottom { border-color: var(--mc-line); border-radius: 16px; background: var(--mc-overlay); box-shadow: var(--mc-shadow-menu); }
 
 .agent-drawer-backdrop { background: color-mix(in srgb, var(--mc-backdrop) 72%, transparent); backdrop-filter: blur(1px); }
@@ -747,7 +747,7 @@
 }
 .agent-drawer-title .subagent-mark { width: 28px; height: 28px; flex-basis: 28px; }
 .agent-drawer-title strong { color: var(--mc-text); font-size: 11px; }
-.agent-drawer-title small { color: var(--mc-text-tertiary); font-size: 8px; }
+.agent-drawer-title small { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-drawer-body { padding: 12px 18px 28px; }
 .agent-summary-line { color: var(--mc-text-tertiary); background: transparent; border-color: var(--mc-line); }
 .agent-task { border: 0; border-left: 1px solid var(--mc-line-strong); border-radius: 0; background: transparent; }

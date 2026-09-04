@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, CircleAlert, DatabaseBackup, FolderOpen, HardDrive, LoaderCircle, RefreshCw, ShieldCheck, Terminal } from "lucide-react";
+import { Check, CircleAlert, DatabaseBackup, Download, FolderOpen, HardDrive, LoaderCircle, RefreshCw, ShieldCheck, Terminal } from "lucide-react";
 import { HelpButton } from "../help/HelpProvider";
 
 type BackupFile = { name: string; size: number; createdAt: string; fileCount: number; appVersion: string; dataSchemaVersion: number };
@@ -111,7 +111,7 @@ export function DataSettings({ dataHome, claudeHome, codexHome, request, onNotic
       <p className="settings-data-note">恢复会替换当前个人数据，必须完全退出 Meta Code 后执行；运行中仅允许创建和验证备份。</p>
     </section>
     <section className="settings-data-tool">
-      <header><span><Terminal size={18} /><strong>CLI 运行诊断</strong><small>{checkedAt ? `上次检查 ${new Date(checkedAt).toLocaleString()}` : "检查来源、版本、路径和托管状态"}</small></span><button type="button" disabled={checking} onClick={() => void runDiagnostics()}>{checking ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}{checking ? "检查中" : diagnostics.length ? "重新检查" : "开始检查"}</button></header>
+      <header><span><Terminal size={18} /><strong>运行诊断</strong><small>{checkedAt ? `上次检查 ${new Date(checkedAt).toLocaleString()}` : "检查 Agent、CLI 和最近任务状态"}</small></span><div><a className="settings-diagnostic-export" href="/api/data/diagnostics/export" download><Download size={14} />导出诊断</a><button type="button" disabled={checking} onClick={() => void runDiagnostics()}>{checking ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}{checking ? "检查中" : diagnostics.length ? "重新检查" : "开始检查"}</button></div></header>
       {diagnostics.length > 0 && <div className="settings-diagnostic-list">{diagnostics.map((item) => <div key={item.id} className={item.status.available ? "ready" : "attention"}>{item.status.available ? <Check size={15} /> : <CircleAlert size={15} />}<span><strong>{item.label}</strong><small>{item.status.available ? `${sourceLabel(item.status.source)} · ${item.status.version || "版本未知"}` : item.status.message || "未检测到可用 CLI"}</small><code title={item.status.path || item.runtimeRoot}>{item.status.path || item.runtimeRoot}</code></span></div>)}</div>}
     </section>
     <p className="settings-data-note">CLI 程序位置与个人数据位置彼此独立；切换系统 CLI、指定路径或工作台托管版本不会自动迁移历史数据。</p>

@@ -152,7 +152,7 @@
   min-width: 48px;
   padding: 0 8px;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -391,7 +391,7 @@
 }
 
 .workspace-browser-tabs__popover-head strong { font-weight: 600; }
-.workspace-browser-tabs__popover-head span { color: var(--mc-text-tertiary, #8b8e8a); font-size: 10px; }
+.workspace-browser-tabs__popover-head span { color: var(--mc-text-tertiary, #8b8e8a); font-size: 11px; }
 
 .workspace-browser-tabs__search {
   display: flex;
@@ -465,7 +465,7 @@
 }
 
 .workspace-browser-tabs__list strong { font-size: 12px; font-weight: 500; }
-.workspace-browser-tabs__list small { color: var(--mc-text-tertiary, #8b8e8a); font-size: 10px; }
+.workspace-browser-tabs__list small { color: var(--mc-text-tertiary, #8b8e8a); font-size: 11px; }
 .workspace-browser-tabs__list > p { margin: 14px 8px; color: var(--mc-text-tertiary, #8b8e8a); font-size: 11px; text-align: center; }
 
 .workspace-browser-tabs__restore {

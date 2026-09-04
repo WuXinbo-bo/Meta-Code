@@ -29,6 +29,7 @@ import {
   Workflow,
   X
 } from "lucide-react";
+import { confirmAction } from "../components/ConfirmationProvider";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { retainAvailableSelection, updateRangeSelection } from "./selection";
 import type {
@@ -388,7 +389,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
   };
 
   const purgeSession = async (item: SessionTrashItem) => {
-    if (!window.confirm(`永久删除“${item.title}”的工作台记录与附件？项目源码和原生线程不受影响。`)) return;
+    if (!await confirmAction(`永久删除“${item.title}”的工作台记录与附件？项目源码和原生线程不受影响。`, { destructive: true })) return;
     setActing(true);
     try {
       await request(`/api/session-management/trash/${encodeURIComponent(item.id)}`, { method: "DELETE" });
@@ -409,7 +410,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
   };
 
   const purgeWorkspace = async (item: WorkspaceTrashItem) => {
-    if (!window.confirm(`永久清理“${item.workspaceName}”的工作台会话与任务编排？项目目录和原生线程会保留。`)) return;
+    if (!await confirmAction(`永久清理“${item.workspaceName}”的工作台会话与任务编排？项目目录和原生线程会保留。`, { destructive: true })) return;
     setActing(true);
     try {
       await request(`/api/session-management/workspace-trash/${encodeURIComponent(item.id)}`, { method: "DELETE" });
@@ -457,7 +458,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
   const bulkWorkspaceTrash = async (action: "restore" | "purge") => {
     const ids = [...workspaceTrashSelection];
     if (!ids.length) return;
-    if (action === "purge" && !window.confirm(`永久清理所选 ${ids.length} 个工作区的工作台记录？项目目录和原生线程仍会保留。`)) return;
+    if (action === "purge" && !await confirmAction(`永久清理所选 ${ids.length} 个工作区的工作台记录？项目目录和原生线程仍会保留。`, { destructive: true })) return;
     setActing(true);
     try {
       const result = await request<{ results: Array<{ id: string; ok: boolean; error?: string }> }>("/api/session-management/workspace-trash/bulk", { method: "POST", body: JSON.stringify({ action, ids }) });
@@ -561,7 +562,7 @@ export default function SessionManagementView({ request, onOpenSession, onOpenWo
   };
 
   const deleteNativeCodexThread = async (item: SessionInventoryItem) => {
-    if (!window.confirm(`永久删除官方 Codex 线程“${item.title}”及其派生线程？此操作不进入工作台回收站，无法撤销。`)) return;
+    if (!await confirmAction(`永久删除官方 Codex 线程“${item.title}”及其派生线程？此操作不进入工作台回收站，无法撤销。`, { destructive: true })) return;
     setActing(true);
     try {
       await request(`/api/codex-link/threads/${encodeURIComponent(item.resourceId)}`, { method: "DELETE", body: JSON.stringify({ confirmDescendants: true }) });

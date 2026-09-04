@@ -114,6 +114,8 @@ import { formatRuntimeProgressDuration, runtimeProgressElapsedMs } from "./runti
 import { CapabilityProfileControl } from "./chat/CapabilityProfileControl";
 import { ComposerRuntimeControl } from "./chat/ComposerRuntimeControl";
 import { PendingTurnTray } from "./chat/PendingTurnTray";
+import { OperationCenter } from "./components/OperationCenter";
+import { confirmAction } from "./components/ConfirmationProvider";
 import { WorkspaceDropZone } from "./workspaces/WorkspaceDropZone";
 import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
@@ -3548,7 +3550,7 @@ export function App() {
   const deleteSession = async (id: string) => {
     if (sessionNavigationRef.current.phase === "loading") return;
     const target = data?.sessions.find((session) => session.id === id);
-    if (!window.confirm(target?.scopeKind === "standalone" ? "删除这个临时任务及其隔离目录中的文件？此操作无法撤销。" : "删除这个任务记录？此操作不会删除工作区文件。")) return;
+    if (!await confirmAction(target?.scopeKind === "standalone" ? "删除这个临时任务及其隔离目录中的文件？此操作无法撤销。" : "删除这个任务记录？此操作不会删除工作区文件。", { destructive: true })) return;
     await api(`/api/sessions/${id}`, { method: "DELETE" });
     forgetSession(id);
     const tabId = workspaceBrowserResourceKey({
@@ -3582,7 +3584,7 @@ export function App() {
 
   const deleteWorkflow = async (id: string) => {
     if (sessionNavigationRef.current.phase === "loading") return;
-    if (!window.confirm("删除这个编排任务记录？任务文件夹不会被删除。")) return;
+    if (!await confirmAction("删除这个编排任务记录？任务文件夹不会被删除。", { destructive: true })) return;
     await api(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
     const target = data?.workflows.find((workflow) => workflow.id === id);
     const tabId = workspaceBrowserResourceKey({ kind: "workflow", workflowId: id, ...(target?.workspaceId ? { workspaceId: target.workspaceId } : {}) });
@@ -3620,7 +3622,7 @@ export function App() {
   };
 
   const deleteTaskFolder = async (folder: TaskFolder) => {
-    if (!window.confirm(`删除任务文件夹「${folder.name}」？\n其中的任务会移回最近任务，不会被删除。`)) return;
+    if (!await confirmAction(`删除任务文件夹「${folder.name}」？\n其中的任务会移回最近任务，不会被删除。`, { destructive: true })) return;
     try {
       const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
@@ -3635,7 +3637,7 @@ export function App() {
 
   const deleteSkill = async (agent: AgentProfile) => {
     if (agent.builtIn) return;
-    if (!window.confirm(`删除 Skill「${agent.title}」？\n\n只会删除工作台托管副本，不会删除最初导入的源文件夹。`)) return;
+    if (!await confirmAction(`删除 Skill「${agent.title}」？\n\n只会删除工作台托管副本，不会删除最初导入的源文件夹。`, { destructive: true })) return;
     try {
       await api(`/api/skills/${encodeURIComponent(agent.name)}`, { method: "DELETE" });
       setSkillPolicies((current) => Object.fromEntries(Object.entries(current).filter(([name]) => name !== agent.name)) as SkillPolicies);
@@ -3834,7 +3836,7 @@ export function App() {
     if (!activeSession || branching || running) return;
     const text = editingMessageText.trim();
     if (!text) return;
-    if (!window.confirm("覆盖重做会删除这条消息之后的聊天记录和委派日志，但不会回滚工作区文件。继续吗？")) return;
+    if (!await confirmAction("覆盖重做会删除这条消息之后的聊天记录和委派日志，但不会回滚工作区文件。继续吗？", { title: "覆盖并重新执行", confirmLabel: "覆盖重做", destructive: true })) return;
     setBranching(true);
     try {
       const updated = await api<Session>(`/api/sessions/${activeSession.id}/overwrite?messageLimit=${MESSAGE_INITIAL_RENDER}`, { method: "POST", body: JSON.stringify({ messageId, text }) });
@@ -4176,7 +4178,7 @@ export function App() {
     if (!activeFileScopeId || !paths.length) return false;
     const scopeId = activeFileScopeId;
     const runningWarning = activeSession?.status === "running" ? "\n\n当前 AI 任务仍在运行，删除正在使用的文件可能导致任务失败。" : "";
-    if (!window.confirm(`永久删除选中的 ${paths.length} 个项目？此操作无法撤销。${runningWarning}`)) return false;
+    if (!await confirmAction(`永久删除选中的 ${paths.length} 个项目？此操作无法撤销。${runningWarning}`, { destructive: true })) return false;
     try {
       const result = await api<{ deleted: string[]; skipped: number }>(`/api/workspaces/${encodeURIComponent(scopeId)}/files/delete`, {
         method: "POST",
@@ -4836,6 +4838,12 @@ export function App() {
                   </div>
                 )}
                 {attachmentDragActive && <div className="attachment-drop-hint"><Paperclip size={17} />松开以添加附件</div>}
+                {activeSession?.status === "failed" && activeSession.lastError && <div className="task-recovery-panel" role="alert">
+                  <CircleAlert size={16} />
+                  <span><strong>任务未完成</strong><small>{activeSession.lastError}</small></span>
+                  <button type="button" onClick={() => openModelSettings(activeSession.engine)}>检查 Agent</button>
+                  <button type="button" onClick={() => setPrompt([...activeSession.messages].reverse().find((message) => message.role === "user")?.text || "请从上次失败的位置继续。")}>准备重试</button>
+                </div>}
                 <textarea
                   ref={composerRef}
                   value={prompt}
@@ -4970,8 +4978,8 @@ export function App() {
             settings,
             providerControls: current.providerControls.map((control) => ({ ...control, isDefault: control.providerId === settings.defaultEngine }))
           } : current)}
-          onResetTabs={() => {
-            if (!window.confirm("关闭全部工作区页面？任务、文件和对话不会被删除。")) return;
+          onResetTabs={async () => {
+            if (!await confirmAction("关闭全部工作区页面？任务、文件和对话不会被删除。")) return;
             dispatchWorkspaceBrowser({ type: "replace", state: createWorkspaceBrowserTabsState() });
           }}
           onResetLayout={() => setLayoutWidths({ ...DEFAULT_LAYOUT_WIDTHS })}
@@ -5060,6 +5068,7 @@ export function App() {
         }}
       />}
       <AppUpdateAnnouncement hidden={view === "settings"} />
+      <OperationCenter />
       {notice && <div className={`toast ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"}><span>{notice.message}</span><button aria-label="关闭提示" onClick={() => setNotice("")}><X size={15} /></button></div>}
     </div>
   );
@@ -5414,7 +5423,7 @@ function AgentsView({ agents, folders, organizations, profiles, activeProfileId,
     } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); }
   };
   const deleteFolder = async (folder: SkillFolder) => {
-    if (!window.confirm(`删除文件夹「${folder.name}」？其中的 Skill 会回到“未分类”，不会被删除。`)) return;
+    if (!await confirmAction(`删除文件夹「${folder.name}」？其中的 Skill 会回到“未分类”，不会被删除。`, { destructive: true })) return;
     try {
       await api(`/api/skill-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
       if (category === `folder:${folder.id}`) setCategory("uncategorized");
@@ -5453,7 +5462,7 @@ function AgentsView({ agents, folders, organizations, profiles, activeProfileId,
         <button type="button" className="skill-profile-save-current" disabled={savingCurrentProfile || Boolean(activeProfile && profileOverrideCount === 0)} title={activeProfile ? profileOverrideCount ? `将 ${profileOverrideCount} 项调整保存到「${activeProfile.name}」` : "当前方案没有待保存调整" : "将当前 Skill 配置保存为新方案"} onClick={() => void saveCurrentProfile()}>{savingCurrentProfile ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}<span>{activeProfile ? "保存方案" : "保存当前方案"}</span></button>
         {activeProfile && <button type="button" title="编辑当前能力方案" onClick={() => setProfileEditor(activeProfile)}><Pencil size={14} /></button>}
         {activeProfile && profileOverrideCount > 0 && <button type="button" title={`清除 ${profileOverrideCount} 项工作区覆盖`} onClick={async () => { try { await onApplyProfile(activeProfile.id); onNotice("已清除工作区覆盖，恢复能力方案", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); } }}><RefreshCw size={14} /></button>}
-        {activeProfile && <button type="button" title="删除当前能力方案" onClick={async () => { if (!window.confirm(`删除能力方案「${activeProfile.name}」？当前工作区会保留现有有效策略。`)) return; try { await api(`/api/capability-profiles/${encodeURIComponent(activeProfile.id)}`, { method: "DELETE" }); await onLibraryChanged(); onNotice("能力方案已删除，当前配置已保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); } }}><Trash2 size={14} /></button>}
+        {activeProfile && <button type="button" title="删除当前能力方案" onClick={async () => { if (!await confirmAction(`删除能力方案「${activeProfile.name}」？当前工作区会保留现有有效策略。`, { destructive: true })) return; try { await api(`/api/capability-profiles/${encodeURIComponent(activeProfile.id)}`, { method: "DELETE" }); await onLibraryChanged(); onNotice("能力方案已删除，当前配置已保留", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); } }}><Trash2 size={14} /></button>}
         {activeProfile && <button type="button" className="primary" onClick={() => setProfileEditor("new")}><Plus size={14} />另存为</button>}
       </div>
     </div>
@@ -5586,7 +5595,7 @@ function McpView({ servers, workspaces, activeWorkspaceId, onChanged, onNotice }
         return <article className={`mcp-item ${enabled ? "enabled" : ""}`} key={server.id}>
           <div className="mcp-item-icon"><Plug size={18} /></div>
           <div className="mcp-item-copy"><div className="mcp-item-title"><strong>{server.name}</strong><span>{server.transport.toUpperCase()}</span></div><code>{server.transport === "stdio" ? [server.command, ...server.args].join(" ") : server.url}</code>{(server.envKeys.length > 0 || server.headerKeys.length > 0) && <small>{server.envKeys.length ? `环境变量：${server.envKeys.join(", ")}` : ""}{server.envKeys.length && server.headerKeys.length ? " · " : ""}{server.headerKeys.length ? `请求头：${server.headerKeys.join(", ")}` : ""}</small>}{result && <pre className={result.ok ? "success" : "error"}>{result.text}</pre>}</div>
-          <div className="mcp-item-actions"><label className="mcp-workspace-toggle"><span>{enabled ? "当前工作区已启用" : "当前工作区已关闭"}</span><button type="button" className="agent-switch" role="switch" aria-checked={enabled} disabled={!activeWorkspaceId || busyId === server.id} onClick={() => void updateWorkspace(server, !enabled)}><span /></button></label><div><button type="button" disabled={!activeWorkspaceId || busyId === server.id} onClick={() => void test(server)}>{busyId === server.id ? <LoaderCircle className="spin" size={14} /> : <Activity size={14} />}测试</button><IconButton label={`编辑 MCP：${server.name}`} onClick={() => setEditing(server)}><Pencil size={14} /></IconButton><IconButton label={`删除 MCP：${server.name}`} onClick={async () => { if (!window.confirm(`删除 MCP「${server.name}」？`)) return; try { await api(`/api/mcp/${encodeURIComponent(server.id)}`, { method: "DELETE" }); await onChanged(); onNotice(`已删除 MCP：${server.name}`, "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); } }}><Trash2 size={14} /></IconButton></div></div>
+          <div className="mcp-item-actions"><label className="mcp-workspace-toggle"><span>{enabled ? "当前工作区已启用" : "当前工作区已关闭"}</span><button type="button" className="agent-switch" role="switch" aria-checked={enabled} disabled={!activeWorkspaceId || busyId === server.id} onClick={() => void updateWorkspace(server, !enabled)}><span /></button></label><div><button type="button" disabled={!activeWorkspaceId || busyId === server.id} onClick={() => void test(server)}>{busyId === server.id ? <LoaderCircle className="spin" size={14} /> : <Activity size={14} />}测试</button><IconButton label={`编辑 MCP：${server.name}`} onClick={() => setEditing(server)}><Pencil size={14} /></IconButton><IconButton label={`删除 MCP：${server.name}`} onClick={async () => { if (!await confirmAction(`删除 MCP「${server.name}」？`, { destructive: true })) return; try { await api(`/api/mcp/${encodeURIComponent(server.id)}`, { method: "DELETE" }); await onChanged(); onNotice(`已删除 MCP：${server.name}`, "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error)); } }}><Trash2 size={14} /></IconButton></div></div>
         </article>;
       })}
       {!servers.length && <div className="blank-state"><Plug size={25} /><h3>尚未配置 MCP</h3><p>添加 stdio、HTTP 或 SSE MCP，并为需要的工作区单独启用。</p></div>}
