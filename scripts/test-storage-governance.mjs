@@ -67,7 +67,7 @@ try {
   assert.ok(removals.has(oldWorkflow));
   assert.ok(!removals.has(token), "ephemeral API token is never part of destructive maintenance");
   assert.equal(report.inventory["personal-backup"].items, 4);
-  assert.equal(report.actions.filter((action) => action.category === "personal-backup").length, 1, "latest three personal snapshots must survive regardless of age");
+  assert.equal(report.actions.filter((action) => action.category === "personal-backup").length, 2, "only the latest two personal recovery points must survive regardless of age");
   assert.equal(report.inventory["database-backup"].items, 6, "database retention is counted in complete state/auth groups");
   assert.equal(report.actions.filter((action) => action.category === "database-backup").length, 10, "old complete database groups are removed together while one group is always retained");
 

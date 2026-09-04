@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { PERSONAL_BACKUP_RETENTION } from "./persistence/backupPolicy.js";
 
 export type StorageCategory =
   | "personal-backup"
@@ -200,7 +201,7 @@ export async function planStorageMaintenance(input: StorageMaintenanceInput): Pr
   };
 
   const backups = path.join(dataDir, "backups");
-  add("personal-backup", await directEntries(backups, (name, directory) => directory && name.startsWith("personal-")), { now, maxAgeMs: 90 * DAY, keepCount: 3, minimumKeep: 3, maxBytes: 8 * GIB });
+  add("personal-backup", await directEntries(backups, (name, directory) => directory && name.startsWith("personal-")), { now, maxAgeMs: 90 * DAY, keepCount: PERSONAL_BACKUP_RETENTION, minimumKeep: PERSONAL_BACKUP_RETENTION, maxBytes: 8 * GIB });
   addDatabaseBackupGroups(await directEntries(backups, (name, directory) => !directory && /^(workbench-state|auth)-[\w.-]+\.db$/.test(name)));
   add("migration-backup", await directEntries(path.join(backups, "migrations"), (_name, directory) => !directory), { now, maxAgeMs: 365 * DAY, keepCount: 5, minimumKeep: 1, maxBytes: 4 * GIB });
   add("pre-restore", await directEntries(backups, (name, directory) => directory && name.startsWith("pre-restore-")), { now, maxAgeMs: 30 * DAY, keepCount: 3, minimumKeep: 1, maxBytes: 8 * GIB });

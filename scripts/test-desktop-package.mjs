@@ -34,8 +34,14 @@ assert.match(desktopMain, /\.metacode/);
 assert.match(desktopMain, /app\.setPath\("userData"/);
 assert.match(desktopMain, /preload\.cjs/);
 assert.match(desktopPreload, /webUtils\.getPathForFile/);
+assert.match(desktopPreload, /metacode:restore-backup/);
 assert.match(desktopMain, /recoverBackend/);
 assert.match(desktopMain, /metacode-recovery:\/\/retry/);
+assert.match(desktopMain, /requestRestorePreflight/);
+assert.match(desktopMain, /restorePersonalDataBackup/);
+assert.match(desktopMain, /rollbackPersonalDataRestore/);
+assert.match(desktopMain, /finalizePersonalDataRestore/);
+assert.match(desktopMain, /METACODE_DESKTOP_TEST_RESTORE/);
 assert.match(backendRecovery, /maxAutomaticRestarts = 2/);
 assert.doesNotMatch(buildScript, /\.runtime|\.workbench-data/);
 

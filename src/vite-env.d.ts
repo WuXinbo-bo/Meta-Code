@@ -3,5 +3,6 @@
 interface Window {
   metaCodeDesktop?: {
     getPathForFile(file: File): string;
+    restoreBackup(name: string): Promise<{ ok: boolean }>;
   };
 }

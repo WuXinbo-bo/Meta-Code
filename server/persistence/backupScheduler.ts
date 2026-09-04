@@ -1,7 +1,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-export type BackupHealthStatus = "pending" | "running" | "healthy" | "busy" | "failed";
+export type BackupTrigger = "manual" | "automatic";
+export type BackupHealthStatus = "disabled" | "pending" | "running" | "healthy" | "busy" | "failed";
 
 export type BackupHealth = {
   schemaVersion: 1;
@@ -11,6 +12,9 @@ export type BackupHealth = {
   nextAttemptAt: string | null;
   lastError: string | null;
   stale: boolean;
+  automaticEnabled: boolean;
+  currentTrigger: BackupTrigger | null;
+  lastTrigger: BackupTrigger | null;
 };
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -26,7 +30,7 @@ export class BackupBusyError extends Error {
 
 type BackupSchedulerOptions<Result> = {
   healthFile: string;
-  runBackup: () => Promise<Result>;
+  runBackup: (trigger: BackupTrigger) => Promise<Result>;
   getLatestBackupAt: () => Promise<string | null>;
   onSuccess?: (result: Result) => Promise<void> | void;
   onFailure?: (error: unknown, status: "busy" | "failed") => Promise<void> | void;
@@ -37,6 +41,7 @@ type BackupSchedulerOptions<Result> = {
   staleAfterMs?: number;
   startupDelayMs?: number;
   retryDelaysMs?: number[];
+  automaticEnabled?: boolean;
 };
 
 const DAY = 24 * 60 * 60 * 1_000;
@@ -64,6 +69,7 @@ export class BackupScheduler<Result> {
   private inFlight: Promise<Result> | null = null;
   private retryIndex = 0;
   private initialization: Promise<BackupHealth> | null = null;
+  private automaticEnabled: boolean;
   private health: BackupHealth = {
     schemaVersion: 1,
     status: "pending",
@@ -71,7 +77,10 @@ export class BackupScheduler<Result> {
     lastSuccessAt: null,
     nextAttemptAt: null,
     lastError: null,
-    stale: true
+    stale: true,
+    automaticEnabled: true,
+    currentTrigger: null,
+    lastTrigger: null
   };
 
   constructor(private readonly options: BackupSchedulerOptions<Result>) {
@@ -82,6 +91,7 @@ export class BackupScheduler<Result> {
     this.now = options.now ?? Date.now;
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.automaticEnabled = options.automaticEnabled !== false;
   }
 
   start() {
@@ -98,15 +108,18 @@ export class BackupScheduler<Result> {
     const nextTime = stale ? now + this.startupDelayMs : Math.max(now + 1_000, lastSuccessTime + this.intervalMs);
     this.health = {
       schemaVersion: 1,
-      status: stale ? "pending" : "healthy",
+      status: this.automaticEnabled ? stale ? "pending" : "healthy" : "disabled",
       lastAttemptAt: persisted?.lastAttemptAt || null,
       lastSuccessAt,
-      nextAttemptAt: new Date(nextTime).toISOString(),
+      nextAttemptAt: this.automaticEnabled ? new Date(nextTime).toISOString() : null,
       lastError: stale ? persisted?.lastError || null : null,
-      stale
+      stale,
+      automaticEnabled: this.automaticEnabled,
+      currentTrigger: null,
+      lastTrigger: persisted?.lastTrigger || null
     };
     await this.persist();
-    this.scheduleAt(nextTime);
+    if (this.automaticEnabled) this.scheduleAt(nextTime);
     return this.snapshot();
   }
 
@@ -119,12 +132,42 @@ export class BackupScheduler<Result> {
     return { ...this.health };
   }
 
-  async runNow() {
+  async setAutomaticEnabled(enabled: boolean) {
+    if (!this.initialization) await this.start();
+    else await this.initialization;
+    this.automaticEnabled = enabled;
+    this.stop();
+    if (!enabled) {
+      this.health = { ...this.health, status: "disabled", nextAttemptAt: null, automaticEnabled: false };
+      await this.persist();
+      return this.snapshot();
+    }
+    const latestBackupAt = await this.options.getLatestBackupAt();
+    const lastSuccessAt = laterTimestamp(this.health.lastSuccessAt, latestBackupAt);
+    const lastSuccessTime = parseTimestamp(lastSuccessAt);
+    const now = this.now();
+    const stale = lastSuccessTime === null || now - lastSuccessTime >= this.staleAfterMs;
+    const nextTime = stale ? now + this.startupDelayMs : Math.max(now + 1_000, lastSuccessTime + this.intervalMs);
+    this.health = {
+      ...this.health,
+      status: stale ? "pending" : "healthy",
+      lastSuccessAt,
+      nextAttemptAt: new Date(nextTime).toISOString(),
+      lastError: stale ? this.health.lastError : null,
+      stale,
+      automaticEnabled: true
+    };
+    await this.persist();
+    this.scheduleAt(nextTime);
+    return this.snapshot();
+  }
+
+  async runNow(trigger: BackupTrigger = "manual") {
     if (!this.initialization) await this.start();
     else await this.initialization;
     if (this.inFlight) return this.inFlight;
     this.stop();
-    const promise = this.execute();
+    const promise = this.execute(trigger);
     this.inFlight = promise;
     try {
       return await promise;
@@ -133,7 +176,7 @@ export class BackupScheduler<Result> {
     }
   }
 
-  private async execute() {
+  private async execute(trigger: BackupTrigger) {
     const attemptAt = this.now();
     this.health = {
       ...this.health,
@@ -141,24 +184,29 @@ export class BackupScheduler<Result> {
       lastAttemptAt: new Date(attemptAt).toISOString(),
       nextAttemptAt: null,
       lastError: null,
-      stale: this.isStale(attemptAt)
+      stale: this.isStale(attemptAt),
+      automaticEnabled: this.automaticEnabled,
+      currentTrigger: trigger
     };
     await this.persist();
     try {
-      const result = await this.options.runBackup();
+      const result = await this.options.runBackup(trigger);
       const successAt = this.now();
       this.retryIndex = 0;
       this.health = {
         schemaVersion: 1,
-        status: "healthy",
+        status: this.automaticEnabled ? "healthy" : "disabled",
         lastAttemptAt: new Date(attemptAt).toISOString(),
         lastSuccessAt: new Date(successAt).toISOString(),
-        nextAttemptAt: new Date(successAt + this.intervalMs).toISOString(),
+        nextAttemptAt: this.automaticEnabled ? new Date(successAt + this.intervalMs).toISOString() : null,
         lastError: null,
-        stale: false
+        stale: false,
+        automaticEnabled: this.automaticEnabled,
+        currentTrigger: null,
+        lastTrigger: trigger
       };
       await this.persist();
-      this.scheduleAt(successAt + this.intervalMs);
+      if (this.automaticEnabled) this.scheduleAt(successAt + this.intervalMs);
       await this.options.onSuccess?.(result);
       return result;
     } catch (error) {
@@ -169,12 +217,15 @@ export class BackupScheduler<Result> {
       this.health = {
         ...this.health,
         status,
-        nextAttemptAt: new Date(retryAt).toISOString(),
+        nextAttemptAt: this.automaticEnabled ? new Date(retryAt).toISOString() : null,
         lastError: error instanceof Error ? error.message : String(error),
-        stale: this.isStale(this.now())
+        stale: this.isStale(this.now()),
+        automaticEnabled: this.automaticEnabled,
+        currentTrigger: null,
+        lastTrigger: trigger
       };
       await this.persist();
-      this.scheduleAt(retryAt);
+      if (this.automaticEnabled) this.scheduleAt(retryAt);
       await this.options.onFailure?.(error, status);
       throw error;
     }
@@ -187,8 +238,9 @@ export class BackupScheduler<Result> {
 
   private scheduleAt(timestamp: number) {
     this.stop();
+    if (!this.automaticEnabled) return;
     const timer = this.setTimer(() => {
-      void this.runNow().catch(() => undefined);
+      void this.runNow("automatic").catch(() => undefined);
     }, Math.max(0, timestamp - this.now()));
     timer.unref?.();
     this.timer = timer;
@@ -205,7 +257,10 @@ export class BackupScheduler<Result> {
         lastSuccessAt: value.lastSuccessAt || null,
         nextAttemptAt: value.nextAttemptAt || null,
         lastError: value.lastError || null,
-        stale: value.stale !== false
+        stale: value.stale !== false,
+        automaticEnabled: value.automaticEnabled !== false,
+        currentTrigger: null,
+        lastTrigger: value.lastTrigger === "manual" || value.lastTrigger === "automatic" ? value.lastTrigger : null
       };
     } catch {
       return null;

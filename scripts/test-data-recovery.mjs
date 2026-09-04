@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { completeBackupGroups, createPersonalDataBackup, listPersonalDataBackups, restorePersonalDataBackup, restoreWorkbenchBackup, verifyPersonalDataBackup } from "../server/dataRecovery.ts";
+import { completeBackupGroups, createPersonalDataBackup, finalizePersonalDataRestore, listPersonalDataBackups, restorePersonalDataBackup, rollbackPersonalDataRestore, restoreWorkbenchBackup, verifyPersonalDataBackup } from "../server/dataRecovery.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "metacode-recovery-"));
 const backups = path.join(root, "backups");
@@ -65,6 +65,7 @@ const personal = await createPersonalDataBackup({
 for (const item of handles) item.db.close();
 assert.equal(listPersonalDataBackups(path.join(personalRoot, "backups")).length, 1);
 assert.equal(verifyPersonalDataBackup(path.join(personalRoot, "backups", personal.name)).appVersion, "0.1.2-dev");
+assert.equal(listPersonalDataBackups(path.join(personalRoot, "backups"))[0].verification?.level, "restore-rehearsal", "published backups must already have a restore rehearsal receipt");
 assert.equal(fs.existsSync(path.join(personalRoot, "backups", personal.name, "data", "runtimes")), false, "managed runtimes are recoverable downloads, not personal data");
 fs.writeFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "changed");
 database(path.join(personalRoot, "temporary.db"), "unrelated");
@@ -73,6 +74,31 @@ assert.equal(fs.readFileSync(path.join(personalRoot, "credentials", "secrets.dat
 assert.equal(marker(path.join(personalRoot, "codex-link.db")), "live-codex-link.db");
 assert.ok(personalRestore.restored.some((file) => file.endsWith("session-management.db")));
 assert.equal(fs.existsSync(path.join(personalRoot, "temporary.db")), true, "restore must not replace unrelated local files");
+rollbackPersonalDataRestore(personalRestore);
+assert.equal(fs.readFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "utf8"), "changed", "a failed post-restore restart must be able to roll back the complete restore transaction");
+assert.equal(fs.existsSync(personalRestore.recoveryDir), false, "completed rollback safety data must be removed");
+
+const finalizedRestore = restorePersonalDataBackup({ dataDir: personalRoot, name: personal.name });
+finalizePersonalDataRestore(finalizedRestore);
+assert.equal(fs.readFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "utf8"), "encrypted-secret");
+assert.equal(fs.existsSync(finalizedRestore.recoveryDir), false, "a successful restore must not leak hidden pre-restore copies");
+
+const retentionHandles = personalDbs.map((name) => ({ name, db: new DatabaseSync(path.join(personalRoot, name)) }));
+await new Promise((resolve) => setTimeout(resolve, 5));
+await createPersonalDataBackup({ dataDir: personalRoot, appVersion: "0.1.2-dev", dataSchemaVersion: 2, componentSchemas: { state: 2 }, databases: retentionHandles, retain: 2 });
+await new Promise((resolve) => setTimeout(resolve, 5));
+const newest = await createPersonalDataBackup({ dataDir: personalRoot, appVersion: "0.1.2-dev", dataSchemaVersion: 2, componentSchemas: { state: 2 }, databases: retentionHandles, retain: 2, trigger: "automatic" });
+for (const item of retentionHandles) item.db.close();
+const retained = listPersonalDataBackups(path.join(personalRoot, "backups"));
+assert.equal(retained.length, 2, "manual and automatic backups share one two-item recovery stack");
+assert.equal(retained[0].name, newest.name);
+assert.equal(retained[0].manifest.trigger, "automatic");
+assert.equal(retained.some((item) => item.name === personal.name), false, "the oldest recovery point is removed only after a new certified point is published");
+
+const unexpected = path.join(retained[0].directory, "data", "unexpected.txt");
+fs.writeFileSync(unexpected, "tampered");
+assert.throws(() => verifyPersonalDataBackup(retained[0].directory), /未登记文件/, "files added after certification must invalidate the recovery point");
+fs.rmSync(unexpected);
 fs.rmSync(personalRoot, { recursive: true, force: true });
 
 fs.rmSync(root, { recursive: true, force: true });

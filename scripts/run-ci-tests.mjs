@@ -7,7 +7,8 @@ const environmentDependent = new Set([
   "test:workflow-codex-real",
   "test:workflow-claude-permissions",
   "test:claude-real",
-  "test:desktop-launcher-recovery"
+  "test:desktop-launcher-recovery",
+  "test:desktop-backup-restore"
 ]);
 const tests = Object.entries(packageJson.scripts)
   .filter(([name]) => name.startsWith("test:") && !environmentDependent.has(name))

@@ -2293,6 +2293,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const url = new URL(window.location.href);
+    const restoreStatus = url.searchParams.get("dataRestore");
+    if (!restoreStatus) return;
+    if (restoreStatus === "success") setNotice("已安全回到所选备份点", "success");
+    else setNotice(`个人数据恢复失败，原数据已保留：${url.searchParams.get("message") || "请查看工作台日志"}`, "error");
+    url.searchParams.delete("dataRestore");
+    url.searchParams.delete("backup");
+    url.searchParams.delete("message");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [setNotice]);
+
+  useEffect(() => {
     if (!activeSession || activeSession.engine !== "codex") {
       setActiveCodexBinding(null);
       return;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
@@ -6,6 +6,7 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { spawn } = require("node:child_process");
 const { BackendRecoveryPolicy } = require("./backend-recovery.cjs");
 
@@ -229,6 +230,13 @@ async function showRecovering(attempt) {
   if (!TEST_HEADLESS) mainWindow.show();
 }
 
+async function showRestoreProgress(message) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
+  await mainWindow.webContents.executeJavaScript(`document.getElementById("status").textContent=${JSON.stringify(message)}`).catch(() => undefined);
+  if (!TEST_HEADLESS) mainWindow.show();
+}
+
 async function discardFailedBackend() {
   const failed = backend;
   backend = null;
@@ -281,14 +289,23 @@ async function requestBackendShutdown() {
 }
 
 async function shutdownBackend() {
+  const processHandle = backend;
   await requestBackendShutdown();
-  if (backend && backend.exitCode === null) {
+  if (processHandle && processHandle.exitCode === null) {
     await Promise.race([
-      new Promise((resolve) => backend.once("exit", resolve)),
+      new Promise((resolve) => processHandle.once("exit", resolve)),
       new Promise((resolve) => setTimeout(resolve, 8_000))
     ]);
   }
-  if (backend && backend.exitCode === null) backend.kill();
+  if (processHandle && processHandle.exitCode === null) {
+    processHandle.kill();
+    await Promise.race([
+      new Promise((resolve) => processHandle.once("exit", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 5_000))
+    ]);
+  }
+  if (processHandle && processHandle.exitCode === null) throw new Error("工作台后端未能安全停止，已取消数据恢复");
+  if (backend === processHandle) backend = null;
   backendLog?.end();
   backendLog = null;
   try {
@@ -297,12 +314,125 @@ async function shutdownBackend() {
   } catch { /* A stale diagnostic file is harmless. */ }
 }
 
+async function requestRestorePreflight(name) {
+  return await new Promise((resolve, reject) => {
+    const body = JSON.stringify({ name });
+    const request = http.request({
+      hostname: "127.0.0.1",
+      port: backendPort,
+      path: "/api/internal/launcher/restore-preflight",
+      method: "POST",
+      timeout: 5 * 60_000,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        "x-metacode-launcher-token": launcherToken
+      }
+    }, (response) => {
+      let payload = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { payload += chunk; });
+      response.on("end", () => {
+        let result;
+        try { result = JSON.parse(payload); } catch { return reject(new Error("恢复预检响应无效")); }
+        if (response.statusCode === 200 && result.ready) resolve(result);
+        else reject(new Error(result.error || result.checks?.filter((item) => !item.ok).map((item) => item.message).join("；") || "恢复预检未通过"));
+      });
+    });
+    request.once("timeout", () => request.destroy(new Error("恢复预检超时")));
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+async function restoreBackup(name) {
+  if (recoveryInFlight || quitStarted) throw new Error("工作台正在执行其他恢复或退出操作");
+  if (path.basename(name) !== name || !/^personal-[A-Za-z0-9.-]+$/.test(name)) throw new Error("备份名称无效");
+  await requestRestorePreflight(name);
+  recoveryInFlight = true;
+  await showRestoreProgress("正在安全关闭工作台服务");
+  let recovery;
+  let transaction;
+  try {
+    await shutdownBackend();
+    await showRestoreProgress("正在验证并恢复个人数据");
+    const modulePath = path.join(runtimeRoot(), "dist-server", "dataRecovery.js");
+    recovery = await import(`${pathToFileURL(modulePath).href}?restore=${Date.now()}`);
+    transaction = recovery.restorePersonalDataBackup({ dataDir: dataHome, backupDir: path.join(dataHome, "backups"), name });
+    await showRestoreProgress("恢复完成，正在重新启动 Meta Code");
+    recoveryPolicy.reset();
+    await startBackend();
+    await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/?dataRestore=success&backup=${encodeURIComponent(name)}`);
+    try {
+      recovery.finalizePersonalDataRestore(transaction);
+      transaction = null;
+    } catch (cleanupError) {
+      await fsp.appendFile(path.join(logDir, "desktop-launcher.log"), `${new Date().toISOString()} restore cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n`, "utf8").catch(() => undefined);
+    }
+    return { ok: true };
+  } catch (error) {
+    let message = error instanceof Error ? error.message : String(error);
+    if (transaction && recovery) {
+      try {
+        await shutdownBackend();
+        recovery.rollbackPersonalDataRestore(transaction);
+        transaction = null;
+        message = `${message}；已恢复到操作前的数据`;
+      } catch (rollbackError) {
+        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        await showFailure(new Error(`个人数据恢复失败，且自动回滚未完成：${rollbackMessage}`));
+        throw new Error(`${message}；自动回滚未完成：${rollbackMessage}`);
+      }
+    }
+    await fsp.appendFile(path.join(logDir, "desktop-launcher.log"), `${new Date().toISOString()} restore failed: ${message}\n`, "utf8").catch(() => undefined);
+    try {
+      if (backend && backend.exitCode === null) await shutdownBackend();
+      recoveryPolicy.reset();
+      await startBackend();
+      await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/?dataRestore=failed&message=${encodeURIComponent(message)}`);
+    } catch (startupError) {
+      await showFailure(new Error(`个人数据恢复失败，原数据回滚后仍无法启动：${startupError instanceof Error ? startupError.message : String(startupError)}`));
+    }
+    throw error;
+  } finally {
+    recoveryInFlight = false;
+  }
+}
+
+ipcMain.handle("metacode:restore-backup", async (event, name) => {
+  const source = String(event.senderFrame?.url || "");
+  if (!source.startsWith(`http://127.0.0.1:${backendPort}/`)) throw new Error("不允许从当前页面发起数据恢复");
+  return restoreBackup(String(name || ""));
+});
+
+async function runHeadlessRestoreTest() {
+  const response = await fetch(`http://127.0.0.1:${backendPort}/api/data/backups`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-metacode-api-token": apiToken },
+    body: "{}"
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.backup?.name) throw new Error(`桌面恢复测试无法创建备份：${payload?.error || response.status}`);
+  const sentinel = path.join(dataHome, "providers", "desktop-restore-sentinel.txt");
+  await fsp.writeFile(sentinel, "changed-after-backup", "utf8");
+  await restoreBackup(payload.backup.name);
+  if (await fsp.readFile(sentinel, "utf8") !== "value-in-backup") throw new Error("桌面恢复测试未恢复备份数据");
+  const leftovers = (await fsp.readdir(path.join(dataHome, "backups"))).filter((entry) => entry.startsWith("pre-restore-"));
+  if (leftovers.length) throw new Error("桌面恢复测试遗留了临时回滚数据");
+  console.log("desktop backup restore and coordinated backend restart passed");
+}
+
 async function boot() {
   createWindow();
   try {
     await startBackend();
     await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`);
     if (!TEST_HEADLESS) mainWindow.show();
+    if (TEST_HEADLESS && process.env.METACODE_DESKTOP_TEST_RESTORE === "1") {
+      await runHeadlessRestoreTest();
+      setTimeout(() => app.quit(), 250).unref();
+      return;
+    }
     const testCrashMs = Number(process.env.METACODE_DESKTOP_TEST_CRASH_BACKEND_MS || 0);
     if (TEST_HEADLESS && testCrashMs > 0) setTimeout(() => backend?.kill("SIGKILL"), testCrashMs).unref();
     const testExitMs = Number(process.env.METACODE_DESKTOP_TEST_EXIT_MS || 0);

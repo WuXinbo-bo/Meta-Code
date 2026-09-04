@@ -33,7 +33,7 @@ import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCod
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
 import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, mergeAgentRuntimeStatus, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
-import { WorkbenchStateStore } from "./stateStore.js";
+import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
 import { WorkbenchEventHub } from "./eventHub.js";
 import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
@@ -98,8 +98,9 @@ import { runTransitionConflict, type RunAbortIntent } from "./sessionRuns/transi
 import { SessionManagementRepository } from "./sessionManagement/repository.js";
 import { sessionManagementFacets } from "./sessionManagement/facets.js";
 import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
-import { createPersonalDataBackup, listPersonalDataBackups, verifyPersonalDataBackup } from "./dataRecovery.js";
-import { BackupBusyError, BackupScheduler } from "./persistence/backupScheduler.js";
+import { certifyPersonalDataBackup, createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
+import { BackupBusyError, BackupScheduler, type BackupTrigger } from "./persistence/backupScheduler.js";
+import { loadBackupPolicy, PERSONAL_BACKUP_RETENTION, saveBackupPolicy } from "./persistence/backupPolicy.js";
 import { workbenchInventoryItem } from "./sessionManagement/health.js";
 import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
 import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
@@ -392,6 +393,7 @@ const ACTIVITY_ARTIFACTS_DIR = APP_PATHS.activityArtifactsDir;
 const SESSION_RECOVERY_DIR = path.join(APP_PATHS.dataDir, "sessions", "recovery");
 const SKILLS_DIR = path.join(CODEX_HOME, "skills");
 const STATE_FILE = path.join(RUNTIME_DIR, "state.json");
+const BACKUP_POLICY_FILE = path.join(RUNTIME_DIR, "backup-policy.json");
 const METACODE_LAUNCHER_TOKEN = process.env.METACODE_LAUNCHER_TOKEN || "";
 const METACODE_API_TOKEN = process.env.METACODE_API_TOKEN?.trim() || loadOrCreateDevelopmentApiToken(APP_PATHS.dataDir);
 const LOCAL_API_PORTS = new Set([PORT, Number(process.env.WORKBENCH_WEB_PORT || 4339)].filter((value) => Number.isInteger(value) && value > 0));
@@ -467,6 +469,7 @@ const codexAgentSummaryFileCache = new Map<string, { mtimeMs: number; size: numb
 const codexAgentThreadFileCache = new Map<string, { mtimeMs: number; size: number; agent: AgentThread }>();
 let queuePaused = false;
 const BACKUP_DIR = APP_PATHS.backupsDir;
+let backupPolicy = loadBackupPolicy(BACKUP_POLICY_FILE);
 let state: State = structuredClone(emptyState);
 const stateStore = new WorkbenchStateStore(RUNTIME_DIR);
 const workflowRepository = new WorkflowRepository(stateStore.db);
@@ -1464,7 +1467,7 @@ async function claimLegacyOwnership(ownerUserId: string | null) {
   if (changed) await saveState();
 }
 
-async function performRuntimeBackup() {
+async function performRuntimeBackup(trigger: BackupTrigger) {
   await saveState();
   await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
   if (activeRuns.size || activeDelegationTasks.size || activeWorkflowNodes.size || activeWorkflowPlanners.size || activeWorkflowIntegrations.size) {
@@ -1481,14 +1484,16 @@ async function performRuntimeBackup() {
       { name: "auth.db", db: auth.db },
       { name: "codex-link.db", db: codexLinkRepository.db },
       { name: "session-management.db", db: sessionManagementRepository.db }
-    ]
+    ],
+    retain: PERSONAL_BACKUP_RETENTION,
+    trigger
   });
 }
 
 let backupScheduler: BackupScheduler<Awaited<ReturnType<typeof performRuntimeBackup>>> | null = null;
 
 async function createRuntimeBackup() {
-  return backupScheduler ? backupScheduler.runNow() : performRuntimeBackup();
+  return backupScheduler ? backupScheduler.runNow("manual") : performRuntimeBackup("manual");
 }
 
 async function listRuntimeBackups() {
@@ -1499,8 +1504,70 @@ async function listRuntimeBackups() {
     createdAt: item.manifest.createdAt,
     fileCount: item.manifest.files.length,
     appVersion: item.manifest.appVersion,
-    dataSchemaVersion: item.manifest.dataSchemaVersion
+    dataSchemaVersion: item.manifest.dataSchemaVersion,
+    trigger: item.manifest.trigger || "manual",
+    verifiedAt: item.verification?.verifiedAt || null,
+    verificationLevel: item.verification?.level || null,
+    compatibility: item.manifest.dataSchemaVersion > CURRENT_STATE_SCHEMA_VERSION
+      ? "newer"
+      : item.manifest.dataSchemaVersion < MIN_STATE_SCHEMA_VERSION
+        ? "unsupported"
+        : item.verification ? "ready" : "unverified"
   }));
+}
+
+function backupActivitySummary() {
+  return {
+    sessions: activeRuns.size,
+    delegatedTasks: activeDelegationTasks.size,
+    workflowNodes: activeWorkflowNodes.size,
+    workflowPlanners: activeWorkflowPlanners.size,
+    workflowIntegrations: activeWorkflowIntegrations.size
+  };
+}
+
+async function runtimeBackupRestorePreflight(name: string, requireDesktop: boolean) {
+  const snapshot = listPersonalDataBackups(BACKUP_DIR).find((item) => item.name === name);
+  if (!snapshot) throw new Error("个人数据备份不存在");
+  const { manifest, verification } = certifyPersonalDataBackup(snapshot.directory);
+  const activity = backupActivitySummary();
+  const activeCount = Object.values(activity).reduce((total, value) => total + value, 0);
+  const desktopAvailable = process.env.METACODE_DESKTOP === "1";
+  const checks = [
+    { id: "integrity", label: "备份完整性", ok: true, message: `${manifest.files.length} 个文件已通过哈希与数据库校验` },
+    { id: "rehearsal", label: "隔离恢复演练", ok: true, message: `已于 ${verification.verifiedAt} 完成装载演练` },
+    {
+      id: "schema",
+      label: "数据结构兼容",
+      ok: manifest.dataSchemaVersion >= MIN_STATE_SCHEMA_VERSION && manifest.dataSchemaVersion <= CURRENT_STATE_SCHEMA_VERSION,
+      message: manifest.dataSchemaVersion > CURRENT_STATE_SCHEMA_VERSION
+        ? `备份数据结构 v${manifest.dataSchemaVersion} 高于当前程序支持的 v${CURRENT_STATE_SCHEMA_VERSION}`
+        : manifest.dataSchemaVersion < MIN_STATE_SCHEMA_VERSION
+          ? `备份数据结构 v${manifest.dataSchemaVersion} 已不受支持`
+          : manifest.dataSchemaVersion < CURRENT_STATE_SCHEMA_VERSION
+            ? `恢复后将从 v${manifest.dataSchemaVersion} 自动升级到 v${CURRENT_STATE_SCHEMA_VERSION}`
+            : `数据结构 v${manifest.dataSchemaVersion} 可直接使用`
+    },
+    { id: "idle", label: "任务状态", ok: activeCount === 0, message: activeCount ? `仍有 ${activeCount} 项任务或 Agent 正在运行` : "当前没有运行中的任务" },
+    { id: "desktop", label: "恢复环境", ok: !requireDesktop || desktopAvailable, message: desktopAvailable ? "桌面 Launcher 可以安全重启并恢复" : "网页版只能验证备份，请在桌面应用中执行恢复" }
+  ];
+  return {
+    schemaVersion: 1,
+    name,
+    ready: checks.every((item) => item.ok),
+    checks,
+    activity,
+    desktopAvailable,
+    backup: {
+      createdAt: manifest.createdAt,
+      appVersion: manifest.appVersion,
+      dataSchemaVersion: manifest.dataSchemaVersion,
+      files: manifest.files.length,
+      totalBytes: manifest.totalBytes,
+      trigger: manifest.trigger || "manual",
+      verifiedAt: verification.verifiedAt
+    }
+  };
 }
 
 async function latestValidRuntimeBackupAt() {
@@ -6766,6 +6833,16 @@ app.post("/api/internal/launcher/shutdown", (req, res) => {
   setImmediate(() => { void shutdown("desktop-launcher"); });
 });
 
+app.post("/api/internal/launcher/restore-preflight", async (req, res) => {
+  if (!METACODE_LAUNCHER_TOKEN || String(req.headers["x-metacode-launcher-token"] || "") !== METACODE_LAUNCHER_TOKEN) return res.status(404).json({ error: "Not found" });
+  try {
+    const result = await runtimeBackupRestorePreflight(String(req.body?.name || ""), true);
+    res.status(result.ready ? 200 : 409).json(result);
+  } catch (error) {
+    res.status(422).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 app.post("/api/internal/delegation/tasks", async (req, res) => {
   if (String(req.headers["x-workbench-agent-token"] || "") !== AGENT_BRIDGE_TOKEN) {
     return res.status(401).json({ error: "Agent 委派桥接令牌无效" });
@@ -7544,7 +7621,7 @@ app.get("/api/admin/backups", staffRead, async (_req, res) => {
 
 app.get("/api/data/backups", auth.requireRoles("owner", "admin"), async (_req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
-  res.json({ schemaVersion: 1, scope: "device", backups: await listRuntimeBackups(), health: backupScheduler?.snapshot() || null });
+  res.json({ schemaVersion: 1, scope: "device", backups: await listRuntimeBackups(), policy: backupPolicy, health: backupScheduler?.snapshot() || null, restore: { desktopAvailable: process.env.METACODE_DESKTOP === "1" } });
 });
 
 app.get("/api/data/capabilities", auth.requireRoles("owner", "admin"), (_req, res) => {
@@ -7555,7 +7632,8 @@ app.get("/api/data/capabilities", auth.requireRoles("owner", "admin"), (_req, re
     scope: "device",
     product: { id: appUpdateService.config.productId, name: appUpdateService.config.productName, version: appUpdateService.config.currentVersion },
     capabilities: {
-      backup: { available: true, audited: true, retentionGroups: 3 },
+      backup: { available: true, audited: true, automatic: true, restoreRehearsal: true, retentionGroups: PERSONAL_BACKUP_RETENTION },
+      restore: { available: process.env.METACODE_DESKTOP === "1", coordinatedRestart: process.env.METACODE_DESKTOP === "1" },
       runtimeDiagnostics: { available: true, readOnly: true },
       storageMaintenance: { available: true, dryRun: true, requiresIdle: true },
       openLocalFolder: { available: true, localOnly: true, targets: ["data", "backups"] }
@@ -7585,10 +7663,24 @@ app.post("/api/data/backups", auth.requireRoles("owner", "admin"), async (req, r
   try {
     const backup = await createRuntimeBackup();
     auth.auditRequest(req, { action: "data.backup", targetType: "workbench", summary: backup });
-    res.status(201).json({ schemaVersion: 1, scope: "device", backup, backups: await listRuntimeBackups(), health: backupScheduler?.snapshot() || null });
+    res.status(201).json({ schemaVersion: 1, scope: "device", backup, backups: await listRuntimeBackups(), policy: backupPolicy, health: backupScheduler?.snapshot() || null });
   } catch (error) {
     auth.auditRequest(req, { action: "data.backup", targetType: "workbench", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
     res.status(error instanceof BackupBusyError ? 409 : 500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.patch("/api/data/backup-policy", auth.requireRoles("owner", "admin"), async (req, res) => {
+  try {
+    if (typeof req.body?.automaticEnabled !== "boolean") return res.status(400).json({ error: "automaticEnabled 必须是布尔值" });
+    backupPolicy = { ...backupPolicy, automaticEnabled: req.body.automaticEnabled };
+    await saveBackupPolicy(BACKUP_POLICY_FILE, backupPolicy);
+    const health = backupScheduler ? await backupScheduler.setAutomaticEnabled(backupPolicy.automaticEnabled) : null;
+    auth.auditRequest(req, { action: "data.backup_policy", targetType: "workbench", summary: backupPolicy });
+    res.json({ schemaVersion: 1, scope: "device", policy: backupPolicy, health });
+  } catch (error) {
+    auth.auditRequest(req, { action: "data.backup_policy", targetType: "workbench", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -7597,11 +7689,22 @@ app.post("/api/data/backups/:name/verify", auth.requireRoles("owner", "admin"), 
     const name = String(req.params.name || "");
     const snapshot = listPersonalDataBackups(BACKUP_DIR).find((item) => item.name === name);
     if (!snapshot) return res.status(404).json({ error: "个人数据备份不存在" });
-    const manifest = verifyPersonalDataBackup(snapshot.directory);
+    const { manifest, verification } = certifyPersonalDataBackup(snapshot.directory);
     auth.auditRequest(req, { action: "data.backup_verify", targetType: "backup", targetId: name, summary: { files: manifest.files.length, totalBytes: manifest.totalBytes } });
-    res.json({ schemaVersion: 1, ok: true, name, files: manifest.files.length, totalBytes: manifest.totalBytes, appVersion: manifest.appVersion, dataSchemaVersion: manifest.dataSchemaVersion });
+    res.json({ schemaVersion: 1, ok: true, name, files: manifest.files.length, totalBytes: manifest.totalBytes, appVersion: manifest.appVersion, dataSchemaVersion: manifest.dataSchemaVersion, verifiedAt: verification.verifiedAt, verificationLevel: verification.level });
   } catch (error) {
     auth.auditRequest(req, { action: "data.backup_verify", targetType: "backup", targetId: String(req.params.name || ""), success: false, errorMessage: error instanceof Error ? error.message : String(error) });
+    res.status(422).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/data/backups/:name/restore-preflight", auth.requireRoles("owner", "admin"), async (req, res) => {
+  try {
+    const result = await runtimeBackupRestorePreflight(String(req.params.name || ""), true);
+    auth.auditRequest(req, { action: "data.restore_preflight", targetType: "backup", targetId: result.name, success: result.ready, summary: { checks: result.checks } });
+    res.json(result);
+  } catch (error) {
+    auth.auditRequest(req, { action: "data.restore_preflight", targetType: "backup", targetId: String(req.params.name || ""), success: false, errorMessage: error instanceof Error ? error.message : String(error) });
     res.status(422).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
@@ -11471,6 +11574,8 @@ if (fs.existsSync(DIST_DIR)) {
 
 backupScheduler = new BackupScheduler({
   healthFile: path.join(RUNTIME_DIR, "backup-health.json"),
+  automaticEnabled: backupPolicy.automaticEnabled,
+  intervalMs: backupPolicy.intervalMs,
   runBackup: performRuntimeBackup,
   getLatestBackupAt: latestValidRuntimeBackupAt,
   onSuccess: async (result) => {

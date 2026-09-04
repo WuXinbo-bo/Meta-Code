@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackupBusyError, BackupScheduler } from "../server/persistence/backupScheduler.ts";
+import { DEFAULT_BACKUP_POLICY, loadBackupPolicy, saveBackupPolicy } from "../server/persistence/backupPolicy.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "meta-code-backup-scheduler-"));
 const healthFile = path.join(root, "backup-health.json");
@@ -72,7 +73,23 @@ await restarted.start();
 assert.equal(restarted.snapshot().lastSuccessAt, new Date(now + 10).toISOString(), "the newest valid snapshot wins over stale persisted health");
 assert.equal(restarted.snapshot().status, "healthy");
 
+await restarted.setAutomaticEnabled(false);
+assert.equal(restarted.snapshot().status, "disabled");
+assert.equal(restarted.snapshot().nextAttemptAt, null, "disabled automatic backups must not retain a scheduled attempt");
+await restarted.runNow("manual");
+assert.equal(restarted.snapshot().status, "disabled", "manual backups remain available while automatic backups are disabled");
+assert.equal(restarted.snapshot().lastTrigger, "manual");
+
+await restarted.setAutomaticEnabled(true);
+assert.equal(restarted.snapshot().automaticEnabled, true);
+assert.ok(restarted.snapshot().nextAttemptAt, "re-enabling automatic backups must restore the schedule");
+
+const policyFile = path.join(root, "backup-policy.json");
+assert.deepEqual(loadBackupPolicy(policyFile), DEFAULT_BACKUP_POLICY);
+await saveBackupPolicy(policyFile, { ...DEFAULT_BACKUP_POLICY, automaticEnabled: false });
+assert.equal(loadBackupPolicy(policyFile).automaticEnabled, false, "the automatic backup preference must survive restart");
+
 scheduler.stop();
 restarted.stop();
 fs.rmSync(root, { recursive: true, force: true });
-console.log("backup startup calibration, bounded retry, persistence and success scheduling passed");
+console.log("backup startup calibration, enablement, bounded retry, persistence and manual execution passed");

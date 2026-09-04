@@ -2,7 +2,9 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { PERSONAL_BACKUP_RETENTION } from "./persistence/backupPolicy.js";
 
 export type BackupGroup = {
   stamp: string;
@@ -27,6 +29,25 @@ export type PersonalDataBackupManifest = {
   componentSchemas: Record<string, number>;
   files: Array<{ path: string; size: number; sha256: string }>;
   totalBytes: number;
+  trigger?: "manual" | "automatic";
+};
+
+export type PersonalDataBackupVerification = {
+  schemaVersion: 1;
+  level: "restore-rehearsal";
+  verifiedAt: string;
+  manifestSha256: string;
+  files: number;
+  totalBytes: number;
+};
+
+export type PersonalDataRestoreResult = {
+  name: string;
+  dataDir: string;
+  backupDir: string;
+  recoveryDir: string;
+  restored: string[];
+  manifest: PersonalDataBackupManifest;
 };
 
 const BACKUP_FILE = /^(workbench-state|auth)-([\w.-]+)\.db$/;
@@ -100,6 +121,25 @@ function backupManifest(directory: string) {
   } catch { return null; }
 }
 
+function manifestDigest(directory: string) {
+  return crypto.createHash("sha256").update(fs.readFileSync(path.join(directory, "manifest.json"))).digest("hex");
+}
+
+function backupVerification(directory: string, manifest: PersonalDataBackupManifest) {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(directory, "verification.json"), "utf8")) as PersonalDataBackupVerification;
+    return value.schemaVersion === 1
+      && value.level === "restore-rehearsal"
+      && value.manifestSha256 === manifestDigest(directory)
+      && value.files === manifest.files.length
+      && value.totalBytes === manifest.totalBytes
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function listPersonalDataBackups(backupDir: string) {
   if (!fs.existsSync(backupDir)) return [];
   return fs.readdirSync(backupDir, { withFileTypes: true })
@@ -107,7 +147,7 @@ export function listPersonalDataBackups(backupDir: string) {
     .flatMap((entry) => {
       const directory = path.join(backupDir, entry.name);
       const manifest = backupManifest(directory);
-      return manifest ? [{ name: entry.name, directory, manifest }] : [];
+      return manifest ? [{ name: entry.name, directory, manifest, verification: backupVerification(directory, manifest) }] : [];
     })
     .sort((left, right) => right.manifest.createdAt.localeCompare(left.manifest.createdAt));
 }
@@ -121,6 +161,7 @@ export async function createPersonalDataBackup(input: {
   databases: Array<{ name: typeof PERSONAL_DATA_DATABASES[number]; db: DatabaseSync }>;
   retain?: number;
   maxTotalBytes?: number;
+  trigger?: "manual" | "automatic";
 }) {
   const dataDir = path.resolve(input.dataDir);
   const backupDir = path.resolve(input.backupDir || path.join(dataDir, "backups"));
@@ -156,12 +197,14 @@ export async function createPersonalDataBackup(input: {
       dataSchemaVersion: input.dataSchemaVersion,
       componentSchemas: { ...input.componentSchemas },
       files,
-      totalBytes: files.reduce((total, file) => total + file.size, 0)
+      totalBytes: files.reduce((total, file) => total + file.size, 0),
+      trigger: input.trigger || "manual"
     };
     await fsp.writeFile(path.join(temporary, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    certifyPersonalDataBackup(temporary);
     await fsp.rename(temporary, destination);
 
-    const retain = Math.max(1, input.retain ?? 3);
+    const retain = Math.max(1, input.retain ?? PERSONAL_BACKUP_RETENTION);
     const maxTotalBytes = Math.max(256 * 1024 * 1024, input.maxTotalBytes ?? 8 * 1024 * 1024 * 1024);
     const snapshots = listPersonalDataBackups(backupDir);
     let retainedBytes = 0;
@@ -180,19 +223,25 @@ export function verifyPersonalDataBackup(directory: string) {
   const root = path.resolve(directory);
   const manifest = backupManifest(root);
   if (!manifest) throw new Error("个人数据备份清单缺失或版本不受支持");
-  const pending = [path.join(root, "data")];
+  const payloadRoot = path.resolve(root, "data");
+  const pending = [payloadRoot];
+  const actualFiles = new Set<string>();
   while (pending.length) {
     const current = pending.pop()!;
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const target = path.join(current, entry.name);
       if (entry.isSymbolicLink()) throw new Error(`备份中不允许符号链接：${path.relative(root, target)}`);
       if (entry.isDirectory()) pending.push(target);
+      else if (entry.isFile()) actualFiles.add(path.relative(payloadRoot, target).replace(/\\/g, "/"));
     }
   }
+  const declaredFiles = new Set(manifest.files.map((item) => safeRelativePath(item.path)));
+  if (declaredFiles.size !== manifest.files.length) throw new Error("备份清单包含重复文件");
+  for (const file of actualFiles) if (!declaredFiles.has(file)) throw new Error(`备份包含未登记文件：${file}`);
+  for (const file of declaredFiles) if (!actualFiles.has(file)) throw new Error(`备份缺少文件：${file}`);
   for (const item of manifest.files) {
     const relative = safeRelativePath(item.path);
     const file = path.resolve(root, "data", relative);
-    const payloadRoot = path.resolve(root, "data");
     if (path.relative(payloadRoot, file).startsWith("..")) throw new Error(`备份文件越界：${relative}`);
     const content = fs.readFileSync(file);
     const digest = crypto.createHash("sha256").update(content).digest("hex");
@@ -205,6 +254,62 @@ export function verifyPersonalDataBackup(directory: string) {
   return manifest;
 }
 
+export function rehearsePersonalDataBackupRestore(directory: string) {
+  const manifest = verifyPersonalDataBackup(directory);
+  const rehearsalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "metacode-restore-rehearsal-"));
+  try {
+    const stagedData = path.join(rehearsalRoot, "data");
+    fs.cpSync(path.join(directory, "data"), stagedData, { recursive: true, force: false, errorOnExist: true });
+    for (const name of PERSONAL_DATA_DATABASES) {
+      const file = path.join(stagedData, name);
+      if (fs.existsSync(file)) verifySqliteDatabase(file);
+    }
+    const stagedFiles = backupFilesSync(stagedData);
+    if (stagedFiles.length !== manifest.files.length) throw new Error("隔离恢复后的文件数量与备份清单不一致");
+    for (const item of stagedFiles) {
+      const expected = manifest.files.find((candidate) => candidate.path === item.path);
+      if (!expected || expected.size !== item.size || expected.sha256 !== item.sha256) throw new Error(`隔离恢复校验失败：${item.path}`);
+    }
+    return manifest;
+  } finally {
+    fs.rmSync(rehearsalRoot, { recursive: true, force: true });
+  }
+}
+
+function backupFilesSync(root: string) {
+  const files: PersonalDataBackupManifest["files"] = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop()!;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(absolute);
+      else if (entry.isFile()) {
+        const content = fs.readFileSync(absolute);
+        files.push({ path: path.relative(root, absolute).replace(/\\/g, "/"), size: content.byteLength, sha256: crypto.createHash("sha256").update(content).digest("hex") });
+      }
+    }
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function certifyPersonalDataBackup(directory: string) {
+  const manifest = rehearsePersonalDataBackupRestore(directory);
+  const verification: PersonalDataBackupVerification = {
+    schemaVersion: 1,
+    level: "restore-rehearsal",
+    verifiedAt: new Date().toISOString(),
+    manifestSha256: manifestDigest(directory),
+    files: manifest.files.length,
+    totalBytes: manifest.totalBytes
+  };
+  const file = path.join(directory, "verification.json");
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(verification, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temporary, file);
+  return { manifest, verification };
+}
+
 export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: string; name?: string }) {
   const dataDir = path.resolve(input.dataDir);
   const backupDir = path.resolve(input.backupDir || path.join(dataDir, "backups"));
@@ -212,7 +317,7 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
     ? listPersonalDataBackups(backupDir).find((item) => item.name === input.name)
     : listPersonalDataBackups(backupDir)[0];
   if (!snapshot) throw new Error(input.name ? `个人数据备份不存在：${input.name}` : "没有完整的个人数据备份");
-  const manifest = verifyPersonalDataBackup(snapshot.directory);
+  const manifest = rehearsePersonalDataBackupRestore(snapshot.directory);
   const restoreId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
   const recoveryDir = path.join(backupDir, `pre-restore-${restoreId}`);
   const stagingDir = path.join(path.dirname(dataDir), `.metacode-restore-${restoreId}`);
@@ -243,7 +348,7 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
       if (fs.existsSync(file)) verifySqliteDatabase(file);
     }
     fs.rmSync(stagingDir, { recursive: true, force: true });
-    return { name: snapshot.name, restored: installed, recoveryDir, manifest };
+    return { name: snapshot.name, dataDir, backupDir, restored: installed, recoveryDir, manifest } satisfies PersonalDataRestoreResult;
   } catch (error) {
     for (const target of installed.reverse()) fs.rmSync(target, { recursive: true, force: true });
     for (const item of moved.reverse()) {
@@ -251,8 +356,44 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
       fs.renameSync(item.from, item.to);
     }
     fs.rmSync(stagingDir, { recursive: true, force: true });
+    fs.rmSync(recoveryDir, { recursive: true, force: true });
     throw new Error(`个人数据恢复失败，原数据已回滚：${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function validateRestoreRecoveryDirectory(result: PersonalDataRestoreResult) {
+  const dataDir = path.resolve(result.dataDir);
+  const backupDir = path.resolve(result.backupDir);
+  const recoveryDir = path.resolve(result.recoveryDir);
+  const relative = path.relative(backupDir, recoveryDir);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || relative.includes(path.sep) || !path.basename(recoveryDir).startsWith("pre-restore-")) {
+    throw new Error("恢复回滚目录无效");
+  }
+  return { dataDir, recoveryDir };
+}
+
+export function rollbackPersonalDataRestore(result: PersonalDataRestoreResult) {
+  const { dataDir, recoveryDir } = validateRestoreRecoveryDirectory(result);
+  if (!fs.existsSync(recoveryDir)) throw new Error("恢复回滚数据不存在");
+  const names = [...PERSONAL_DATA_DATABASES, ...PERSONAL_DATA_ENTRIES];
+  for (const name of names) {
+    const live = path.join(dataDir, name);
+    fs.rmSync(live, { recursive: true, force: true });
+    const recovery = path.join(recoveryDir, name);
+    if (!fs.existsSync(recovery)) continue;
+    fs.mkdirSync(path.dirname(live), { recursive: true });
+    fs.renameSync(recovery, live);
+  }
+  for (const name of PERSONAL_DATA_DATABASES) {
+    const file = path.join(dataDir, name);
+    if (fs.existsSync(file)) verifySqliteDatabase(file);
+  }
+  fs.rmSync(recoveryDir, { recursive: true, force: true });
+}
+
+export function finalizePersonalDataRestore(result: PersonalDataRestoreResult) {
+  const { recoveryDir } = validateRestoreRecoveryDirectory(result);
+  fs.rmSync(recoveryDir, { recursive: true, force: true });
 }
 
 function moveIfPresent(source: string, destination: string) {
