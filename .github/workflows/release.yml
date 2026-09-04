@@ -15,6 +15,7 @@ jobs:
     env:
       METACODE_PACKAGE_ROOT: ${{ github.workspace }}\release-artifacts
       METACODE_SOURCE_COMMIT: ${{ github.sha }}
+      METACODE_BUILD_ID: ${{ github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4

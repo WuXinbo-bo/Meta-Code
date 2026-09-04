@@ -11,6 +11,7 @@ const renderer = await fs.readFile(path.join(root, "scripts", "render-installer-
 const desktopMain = await fs.readFile(path.join(root, "desktop", "main.cjs"), "utf8");
 const desktopPreload = await fs.readFile(path.join(root, "desktop", "preload.cjs"), "utf8");
 const backendRecovery = await fs.readFile(path.join(root, "desktop", "backend-recovery.cjs"), "utf8");
+const releaseWorkflow = await fs.readFile(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 
 assert.equal(packageJson.version, "0.1.3");
 assert.match(buildScript, /Meta-Code-Packages/);
@@ -24,6 +25,7 @@ assert.match(buildScript, /fsp\.rm\(path\.join\(artifacts, "builder-debug\.yml"\
 assert.match(buildScript, /outputDirectory: "artifacts"/);
 assert.match(buildScript, /build-info\.json/);
 assert.match(buildScript, /METACODE_BUILD_ID/);
+assert.match(releaseWorkflow, /METACODE_SOURCE_COMMIT: \$\{\{ github\.sha \}\}[\s\S]+METACODE_BUILD_ID: \$\{\{ github\.sha \}\}/, "package and manifest build identities must use the same immutable commit");
 assert.match(buildScript, /fsp\.rm\(staging, \{ recursive: true, force: true \}\)/);
 assert.match(installer, /真实的文件写入进度/);
 assert.match(installer, /不会主动删除该目录/);

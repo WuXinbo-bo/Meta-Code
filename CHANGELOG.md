@@ -26,6 +26,7 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 - App update checks no longer probe an undeclared manifest URL or remain in the checking state during prolonged retries.
 - The complete update check has a bounded deadline and records real attempt durations before returning success or failure.
 - Native Provider profile changes now propagate consistently to task, model discovery, authentication, and workflow execution paths.
+- Packaged application and signed update manifests now share the same immutable build identity, preventing false same-version update prompts.
 
 ## [0.1.2] - 2026-09-03
 
