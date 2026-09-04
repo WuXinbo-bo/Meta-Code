@@ -27,11 +27,19 @@ import {
   X
 } from "lucide-react";
 import { ProductLogo } from "../branding/ProductLogo";
-import type { WorkspaceBrowserResourceKind, WorkspaceBrowserTab } from "./browserTabState";
+import { ProviderIcon } from "../branding/ProviderIcon";
+import type { WorkspaceBrowserTab } from "./browserTabState";
 import "./WorkspaceBrowserTabs.css";
+
+export type WorkspaceBrowserConversationProvider = {
+  providerId: string;
+  icon?: string;
+  accent?: string;
+};
 
 export type WorkspaceBrowserTabsProps = {
   tabs: readonly WorkspaceBrowserTab[];
+  conversationProviders?: Readonly<Record<string, WorkspaceBrowserConversationProvider>>;
   activeTabId: string | null;
   maxTabs: number;
   motion?: "system" | "full" | "reduced";
@@ -62,10 +70,15 @@ type PointerDragState = {
 
 const POINTER_DRAG_THRESHOLD = 5;
 
-function ResourceIcon({ kind }: { kind: WorkspaceBrowserResourceKind }) {
-  if (kind === "conversation") return <ProductLogo variant="mark" className="workspace-browser-tab__product-logo" />;
-  if (kind === "file") return <FileText size={15} />;
-  if (kind === "workflow") return <Route size={15} />;
+function ResourceIcon({ tab, conversationProviders }: { tab: WorkspaceBrowserTab; conversationProviders?: WorkspaceBrowserTabsProps["conversationProviders"] }) {
+  if (tab.resource.kind === "conversation") {
+    const provider = conversationProviders?.[tab.resource.conversationId];
+    return provider
+      ? <ProviderIcon provider={provider.providerId} icon={provider.icon} accent={provider.accent} size={15} className="workspace-browser-tab__provider-icon" />
+      : <ProductLogo variant="mark" className="workspace-browser-tab__product-logo" />;
+  }
+  if (tab.resource.kind === "file") return <FileText size={15} />;
+  if (tab.resource.kind === "workflow") return <Route size={15} />;
   return <Wrench size={15} />;
 }
 
@@ -82,6 +95,7 @@ function focusTab(buttons: Map<string, HTMLButtonElement>, tabId: string | undef
 
 export function WorkspaceBrowserTabs({
   tabs,
+  conversationProviders,
   activeTabId,
   maxTabs,
   motion = "system",
@@ -450,7 +464,7 @@ export function WorkspaceBrowserTabs({
                   resetPointerDrag(event.currentTarget, event.pointerId);
                 }}
               >
-                <span className="workspace-browser-tab__icon" aria-hidden="true"><ResourceIcon kind={tab.resource.kind} /></span>
+                <span className="workspace-browser-tab__icon" aria-hidden="true"><ResourceIcon tab={tab} conversationProviders={conversationProviders} /></span>
                 <span className="workspace-browser-tab__labels">
                   <span className="workspace-browser-tab__title">{tab.title}</span>
                   {tab.detail && <span className="workspace-browser-tab__detail">{tab.detail}</span>}
@@ -532,7 +546,7 @@ export function WorkspaceBrowserTabs({
                   key={tab.id}
                   onClick={() => { activateAndFocus(tab.id); setAllTabsOpen(false); }}
                 >
-                  <ResourceIcon kind={tab.resource.kind} />
+                  <ResourceIcon tab={tab} conversationProviders={conversationProviders} />
                   <span><strong>{tab.title}</strong>{tab.detail && <small>{tab.detail}</small>}</span>
                   {tab.id === activeTabId && <Check size={14} aria-label="当前标签" />}
                 </button>

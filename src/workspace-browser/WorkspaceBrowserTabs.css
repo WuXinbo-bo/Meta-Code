@@ -286,6 +286,12 @@
   object-fit: contain;
 }
 
+.workspace-browser-tab__icon .workspace-browser-tab__provider-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+}
+
 .workspace-browser-tab__labels {
   display: flex;
   align-items: baseline;

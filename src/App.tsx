@@ -2973,6 +2973,17 @@ export function App() {
     () => (data?.workflows || []).filter((item) => item.workspaceId === activeWorkspaceId && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
     [data?.workflows, activeWorkspaceId]
   );
+  const browserConversationProviders = useMemo(() => {
+    const controlsById = new Map((data?.providerControls || []).map((control) => [control.providerId, control]));
+    return Object.fromEntries((data?.sessions || []).map((session) => {
+      const control = controlsById.get(session.engine);
+      return [session.id, {
+        providerId: session.engine,
+        icon: control?.identity.icon,
+        accent: control?.identity.accent
+      }];
+    }));
+  }, [data?.providerControls, data?.sessions]);
   const activeWorkspaceBrowserTab = useMemo(
     () => workspaceBrowser.tabs.find((tab) => tab.id === workspaceBrowser.activeTabId) || null,
     [workspaceBrowser.activeTabId, workspaceBrowser.tabs]
@@ -4678,6 +4689,7 @@ export function App() {
 
         {workspaceBrowserVisible && <WorkspaceBrowserTabs
           tabs={workspaceBrowser.tabs}
+          conversationProviders={browserConversationProviders}
           activeTabId={workspaceBrowser.activeTabId}
           maxTabs={pagePreferencesRef.current.maxTabs}
           motion={pagePreferencesRef.current.tabMotion}
