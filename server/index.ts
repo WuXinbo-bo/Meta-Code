@@ -7804,12 +7804,15 @@ app.get("/api/bootstrap", async (req, res) => {
   const canInspectLocalPaths = req.authUser!.role === "owner" || req.authUser!.role === "admin";
   const skillLibrary = skillLibraryForUser(ownerUserId);
   const agentProviders = agentAdapterRegistry.list();
-  const providerRuntimeEntries = await Promise.all(agentProviders.map(async (provider) => {
-    const status = provider.runtimeId === "codex" ? codexRuntime : provider.runtimeId === "claude" ? claudeRuntime : await cliRuntimeManager.detect(provider.runtimeId);
+  // Keep the first screen independent from third-party CLI scans. The full
+  // provider snapshot is loaded in the background from /api/provider-controls.
+  const nativeProviders = agentProviders.filter((provider) => provider.runtimeId === "codex" || provider.runtimeId === "claude");
+  const providerRuntimeEntries = nativeProviders.map((provider) => {
+    const status = provider.runtimeId === "codex" ? codexRuntime : claudeRuntime;
     return [provider.id, canInspectLocalPaths ? status : publicRuntimeStatus(status)] as const;
-  }));
+  });
   const providerRuntimeMap = Object.fromEntries(providerRuntimeEntries);
-  const providerControls = await Promise.all(agentProviders.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, providerRuntimeMap[provider.id])));
+  const providerControls = await Promise.all(nativeProviders.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, providerRuntimeMap[provider.id])));
   res.json({
     user: { id: req.authUser!.id },
     settings: publicSettings(),
@@ -8022,6 +8025,60 @@ async function providerControlSnapshotFor(providerId: string, ownerUserId: strin
     updating: Boolean(marketInstallStates.get(provider.id)?.active),
     operations: providerControlOperations(provider.id)
   });
+}
+
+type ProviderControlBundle = {
+  providerControls: ReturnType<typeof createProviderControlSnapshot>[];
+  providers: Record<string, EngineRuntimeStatus>;
+  codex: EngineRuntimeStatus;
+  claude: EngineRuntimeStatus;
+  generatedAt: string;
+};
+
+const PROVIDER_CONTROL_CACHE_MS = 30_000;
+const providerControlBundleCache = new Map<string, { expiresAt: number; value: ProviderControlBundle }>();
+const providerControlBundleLoads = new Map<string, { force: boolean; promise: Promise<ProviderControlBundle> }>();
+
+async function providerControlBundle(ownerUserId: string, role: string, force = false) {
+  const cacheKey = `${ownerUserId}:${role}`;
+  const cached = providerControlBundleCache.get(cacheKey);
+  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
+  const pending = providerControlBundleLoads.get(cacheKey);
+  if (pending) {
+    if (!force || pending.force) return pending.promise;
+    await pending.promise;
+    providerControlBundleCache.delete(cacheKey);
+    return providerControlBundle(ownerUserId, role, true);
+  }
+  const load = (async () => {
+    const canInspectLocalPaths = role === "owner" || role === "admin";
+    const [codexRuntime, claudeRuntime] = await Promise.all([
+      detectCodexRuntime(force, !force),
+      getClaudeRuntime(force, !force)
+    ]);
+    const providers = agentAdapterRegistry.list();
+    const runtimeEntries = await Promise.all(providers.map(async (provider) => {
+      const status = provider.runtimeId === "codex"
+        ? codexRuntime
+        : provider.runtimeId === "claude"
+          ? claudeRuntime
+          : await cliRuntimeManager.detect(provider.runtimeId);
+      return [provider.id, canInspectLocalPaths ? status : publicRuntimeStatus(status)] as const;
+    }));
+    const runtimeMap = Object.fromEntries(runtimeEntries);
+    const providerControls = await Promise.all(providers.map((provider) => providerControlSnapshotFor(provider.id, ownerUserId, runtimeMap[provider.id])));
+    const value: ProviderControlBundle = {
+      providerControls,
+      providers: runtimeMap,
+      codex: canInspectLocalPaths ? codexRuntime : publicRuntimeStatus(codexRuntime),
+      claude: canInspectLocalPaths ? claudeRuntime : publicRuntimeStatus(claudeRuntime),
+      generatedAt: new Date().toISOString()
+    };
+    providerControlBundleCache.set(cacheKey, { value, expiresAt: Date.now() + PROVIDER_CONTROL_CACHE_MS });
+    return value;
+  })().finally(() => providerControlBundleLoads.delete(cacheKey));
+  providerControlBundleLoads.set(cacheKey, { force, promise: load });
+  return load;
 }
 
 async function providerReadiness(providerId: string, ownerUserId: string, workspace?: Workspace) {
@@ -8418,11 +8475,10 @@ app.get("/api/agent-providers/:providerId/readiness", async (req, res) => {
 
 app.get("/api/provider-controls", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
-    const providers = agentAdapterRegistry.list();
-    const items = await Promise.all(providers.map((provider) => providerControlSnapshotFor(provider.id, req.authUser!.id)));
-    res.json({ schemaVersion: 1, items });
+    const force = req.query.fresh === "1";
+    res.json(await providerControlBundle(req.authUser!.id, req.authUser!.role, force));
   } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 

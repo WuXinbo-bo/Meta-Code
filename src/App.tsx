@@ -425,6 +425,10 @@ type Bootstrap = {
   runtime: { dataHome: string; codexHome: string; claudeHome: string; sdk: string; codex: CodexRuntimeStatus; claude: CodexRuntimeStatus; providers: Record<string, CodexRuntimeStatus> };
 };
 type NavigationSnapshot = Pick<Bootstrap, "workspaces" | "sessions" | "workflows">;
+type ProviderControlBundle = Pick<Bootstrap["runtime"], "codex" | "claude" | "providers"> & {
+  providerControls: ProviderControlSnapshot[];
+  generatedAt: string;
+};
 type SessionNavigationSource = "task" | "workspace" | "scope";
 type SessionNavigationState =
   | { phase: "idle" }
@@ -2358,10 +2362,25 @@ export function App() {
     return next;
   };
 
+  const refreshProviderControls = async (force = false) => {
+    const next = await requestCoordinatorRef.current.run(
+      "provider-controls",
+      () => api<ProviderControlBundle>(`/api/provider-controls${force ? "?fresh=1" : ""}`, { timeoutMs: 20_000 }),
+      { mode: force ? "replace" : "coalesce" }
+    );
+    setData((current) => current ? {
+      ...current,
+      providerControls: next.providerControls,
+      runtime: { ...current.runtime, codex: next.codex, claude: next.claude, providers: next.providers }
+    } : current);
+    return next;
+  };
+
   useEffect(() => {
     if (!data) return;
     let bootstrapRefreshTimer: number | undefined;
     let navigationRefreshTimer: number | undefined;
+    let providerRefreshTimer: number | undefined;
     const refreshBootstrap = () => {
       if (bootstrapRefreshTimer) window.clearTimeout(bootstrapRefreshTimer);
       bootstrapRefreshTimer = window.setTimeout(() => {
@@ -2376,17 +2395,33 @@ export function App() {
         void refreshNavigation().catch(() => undefined);
       }, 80);
     };
+    const refreshProviderSnapshot = (force = false) => {
+      if (providerRefreshTimer) window.clearTimeout(providerRefreshTimer);
+      providerRefreshTimer = window.setTimeout(() => {
+        providerRefreshTimer = undefined;
+        void refreshProviderControls(force).catch(() => undefined);
+      }, 120);
+    };
     const unsubscribers = [
-      ...["settings.changed", "mcp.changed", "skills.changed", "runtime.changed", "agent-market.changed", "provider-control.changed"]
+      ...["settings.changed", "mcp.changed", "skills.changed", "agent-market.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, refreshBootstrap)),
+      ...["runtime.changed", "agent-market.changed", "provider-control.changed"]
+        .map((type) => realtimeCoordinator.subscribe(type, () => refreshProviderSnapshot(true))),
       ...["session.deleted", "workspaces.changed", "workflow.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, refreshNavigationSnapshot)),
-      realtimeCoordinator.subscribeReconcile(refreshBootstrap)
+      realtimeCoordinator.subscribeReconcile((reason) => {
+        if (reason === "connected" || reason === "error" || reason === "watchdog") return;
+        refreshNavigationSnapshot();
+        refreshBootstrap();
+        refreshProviderSnapshot(false);
+      })
     ];
+    refreshProviderSnapshot(false);
     realtimeCoordinator.start();
     return () => {
       if (bootstrapRefreshTimer) window.clearTimeout(bootstrapRefreshTimer);
       if (navigationRefreshTimer) window.clearTimeout(navigationRefreshTimer);
+      if (providerRefreshTimer) window.clearTimeout(providerRefreshTimer);
       for (const unsubscribe of unsubscribers) unsubscribe();
       realtimeCoordinator.stop();
     };
@@ -2856,7 +2891,7 @@ export function App() {
       if (!document.hidden) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     }, 15_000);
     const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => {
-      if (!document.hidden) void loadWorkspaceTree(activeFileScopeId, { force: true, silent: true });
+      if (!document.hidden) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     });
     return () => {
       window.clearInterval(pollTimer);
