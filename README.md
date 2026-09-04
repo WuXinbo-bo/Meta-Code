@@ -10,7 +10,7 @@
     <a href="https://github.com/WuXinbo-bo/Meta-Code/releases/latest"><strong>下载最新版本</strong></a>
     · <a href="#快速开始">快速开始</a>
     · <a href="./docs/user-guide/">用户指南</a>
-    · <a href="#开发与贡献">参与开发</a>
+    · <a href="#欢迎贡献">欢迎贡献</a>
   </p>
   <p>
     <img alt="Version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-24292f?style=flat-square" />
@@ -145,9 +145,9 @@ Meta Code 当前版本为 `0.1.2`，主要面向 Windows 本地单用户环境�
 - 应用内更新当前提供检查与发布公告，下载后由用户启动安装程序。
 - 项目仍处于早期版本，接口和交互会继续迭代。
 
-## 开发与贡献
+## 欢迎贡献
 
-提交改动前至少运行：
+Meta Code 还在持续成长。无论是修复一个小问题、改善交互与文案、补充测试，还是接入新的 Agent Provider，都欢迎提交 Issue 或 Pull Request。为了让改动更容易验证和合并，提交前请至少运行：
 
 ```powershell
 npm run typecheck
@@ -165,3 +165,20 @@ npm run build
 ## License
 
 Meta Code 使用 [Apache License 2.0](./LICENSE)。第三方集成保留各自许可证。
+
+## 赞助支持
+
+<table>
+  <tr>
+    <td align="center" width="28%">
+      <a href="https://88.scxai.top/">
+        <img src="./docs/images/readme/sponsor-chuangshi-xinyuan.jpg" alt="创世の鑫元" width="150">
+      </a><br>
+      <strong>创世の鑫元</strong><br>
+      <a href="https://88.scxai.top/">访问官方网站</a>
+    </td>
+    <td>
+      感谢 <strong>创世の鑫元</strong> 对本项目的赞助与支持。其网站提供 AI 相关服务与工具信息；具体服务内容、价格、可用性及使用条款请以官方网站的最新说明为准。
+    </td>
+  </tr>
+</table>
