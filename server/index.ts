@@ -28,7 +28,7 @@ import { resolveClaudeCommand } from "./engines/claude/runtime.js";
 import { runClaude } from "./engines/claude/process.js";
 import { CLAUDE_PLANNER_DISALLOWED_TOOLS, ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
 import { classifyClaudeFailure } from "./engines/claude/transport.js";
-import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
+import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexContextCompactionNotice, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
 import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, mergeAgentRuntimeStatus, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
@@ -970,6 +970,27 @@ function isGarbledInternalInput(message: Message) {
   return message.role === "user" && /^\s*[?？,，.。\s]+\s*$/u.test(message.text) && message.text.replace(/[^?？]/g, "").length >= 8;
 }
 
+function normalizeStoredCodexCompactionNotice(message: Message) {
+  if (message.eventType !== "error") return false;
+  const payload = recordOf(message.payload);
+  const sourceMessage = String(payload?.message || message.text || "");
+  if (!isCodexContextCompactionNotice(sourceMessage)) return false;
+  message.role = "event";
+  message.eventType = "context_compaction";
+  message.eventPhase = "completed";
+  message.text = "当前会话已多次自动整理上下文，继续运行可能降低准确性";
+  message.activityCategory = "status";
+  message.activityPhase = "completed";
+  if (message.activity) {
+    message.activity.rawType = "context_compaction";
+    message.activity.semanticType = "status";
+    message.activity.phase = "completed";
+    message.activity.title = "上下文已整理";
+    message.activity.summary = message.text;
+  }
+  return true;
+}
+
 function compactStoredMessage(message: Message) {
   let changed = false;
   if (typeof message.text !== "string") {
@@ -1063,6 +1084,7 @@ async function ensureRuntime() {
             if (!normalized.id) { normalized.id = `legacy-message-${index}`; }
             if (!normalized.createdAt) { normalized.createdAt = session.updatedAt || new Date().toISOString(); }
             if (!normalized.role) { normalized.role = "event"; }
+            if (normalizeStoredCodexCompactionNotice(normalized)) sessionMigrated = true;
             if (compactStoredMessage(normalized)) sessionMigrated = true;
             return normalized;
           }).filter((message) => !isGarbledInternalInput(message));
@@ -2591,8 +2613,8 @@ async function upsertItemMessage(
   const presentation = codexActivityFromEvent(event);
   const text = presentation.summary;
   const role =
-    event.item.type === "agent_message" ? "assistant" :
-    event.item.type === "error" ? "error" :
+    presentation.category === "message" ? "assistant" :
+    presentation.category === "error" ? "error" :
     "event";
   const eventPhase = event.type.slice(5) as Message["eventPhase"];
   const paths = fileChangePathsFromEvent(event);
@@ -2618,7 +2640,7 @@ async function upsertItemMessage(
     const activity = codexActivityRecord(presentation, { actor: { kind: "main", id: session.id }, scope: { sessionId: session.id, threadId: session.codexThreadId || undefined, turnId }, occurredAt: existing.createdAt, detail, artifactRefs });
     existing.role = role;
     existing.text = text;
-    existing.eventType = event.item.type;
+    existing.eventType = presentation.rawType;
     existing.eventPhase = eventPhase;
     existing.payload = event.item;
     existing.activityCategory = presentation.category;
@@ -2634,7 +2656,7 @@ async function upsertItemMessage(
   return appendMessage(session, {
     role,
     text,
-    eventType: event.item.type,
+    eventType: presentation.rawType,
     eventPhase,
     sourceId,
     payload: event.item,
@@ -5501,6 +5523,7 @@ function normalizedCodexWorkflowEvent(event: any, text: string): NormalizedEngin
   if (event?.type === "turn.completed") return { type: "turn.completed", sourceId: "turn", text: text || "Codex 任务已完成", payload: event, ...metadata };
   if (event?.type === "error" && isCodexReconnectMessage(text)) return { type: "status", sourceId: `reconnect:${itemId}`, text: text || "Codex 正在重连", payload: event, ...metadata };
   if (event?.type === "turn.failed" || event?.type === "error") return { type: "error", sourceId: `error:${itemId}`, text: text || "Codex 执行失败", payload: event, ...metadata };
+  if (presentation.rawType === "context_compaction") return { type: "status", rawType: presentation.rawType, sourceId: itemId, text, payload: event, ...metadata };
   if (!String(event?.type || "").startsWith("item.")) return text ? { type: "status", sourceId: itemId, text, payload: event, ...metadata } : null;
   if (item.type === "agent_message") return { type: "assistant", sourceId: itemId, text, payload: event, ...metadata };
   if (item.type === "reasoning") return { type: "reasoning", sourceId: itemId, text: text || "Codex 正在分析任务", payload: event, ...metadata };
