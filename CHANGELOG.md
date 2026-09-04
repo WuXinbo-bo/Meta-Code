@@ -4,6 +4,29 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-04
+
+### Added
+
+- Curated Agent market states with a DeepSeek entry and clearer runtime, connection, and repair actions.
+- Unified Codex and Claude connection profiles for system accounts, workbench accounts, official APIs, and compatible endpoints.
+- Provider readiness checks across conversations, delegation, planning, approval, resume, and workflow execution.
+- A background operation center, accessible confirmation dialogs, backup verification, and redacted diagnostics export.
+- Product-focused README visuals, contribution guidance, and sponsor information.
+
+### Changed
+
+- Agent workflows now validate runtime availability, connection health, workspace access, and required capabilities before starting.
+- ACP collaboration is offered only when the Agent reports the terminal capability required by the delegation bridge.
+- Session inventory, workspace folder drop guidance, responsive layouts, and failure recovery actions provide clearer feedback.
+- Update results use concise user-facing dialogs while retaining cached release information separately from fresh checks.
+
+### Fixed
+
+- App update checks no longer probe an undeclared manifest URL or remain in the checking state during prolonged retries.
+- The complete update check has a bounded deadline and records real attempt durations before returning success or failure.
+- Native Provider profile changes now propagate consistently to task, model discovery, authentication, and workflow execution paths.
+
 ## [0.1.2] - 2026-09-03
 
 ### Added

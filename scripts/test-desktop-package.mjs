@@ -12,7 +12,7 @@ const desktopMain = await fs.readFile(path.join(root, "desktop", "main.cjs"), "u
 const desktopPreload = await fs.readFile(path.join(root, "desktop", "preload.cjs"), "utf8");
 const backendRecovery = await fs.readFile(path.join(root, "desktop", "backend-recovery.cjs"), "utf8");
 
-assert.equal(packageJson.version, "0.1.2");
+assert.equal(packageJson.version, "0.1.3");
 assert.match(buildScript, /Meta-Code-Packages/);
 assert.match(buildScript, /assertPackagingPath/);
 assert.match(buildScript, /installerSidebar\.bmp/);

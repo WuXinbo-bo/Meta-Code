@@ -13,7 +13,7 @@
     · <a href="#欢迎贡献">欢迎贡献</a>
   </p>
   <p>
-    <img alt="Version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-24292f?style=flat-square" />
+    <img alt="Version 0.1.3" src="https://img.shields.io/badge/version-0.1.3-24292f?style=flat-square" />
     <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?style=flat-square&amp;logo=windows11&amp;logoColor=white" />
     <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-6f42c1?style=flat-square" />
   </p>
@@ -138,7 +138,7 @@ npm start
 
 ## 当前状态
 
-Meta Code 当前版本为 `0.1.2`，主要面向 Windows 本地单用户环境。
+Meta Code 当前版本为 `0.1.3`，主要面向 Windows 本地单用户环境。
 
 - Codex 与 Claude 使用原生增强路径。
 - 第三方 Provider 的具体能力取决于其 ACP 实现和运行时能力协商。

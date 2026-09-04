@@ -1727,7 +1727,7 @@ async function testMcpConnection(server: McpServer, workspace: Workspace) {
       : new StreamableHTTPClientTransport(new URL(server.url!), { fetch: fetchWithHeaders, requestInit: { headers: server.headers || {} } });
   let stderr = "";
   if (transport instanceof StdioClientTransport && transport.stderr) transport.stderr.on("data", (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-8_000); });
-  const client = new McpClient({ name: "meta-code", version: "0.1.2" });
+  const client = new McpClient({ name: "meta-code", version: "0.1.3" });
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([

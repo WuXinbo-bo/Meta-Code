@@ -94,7 +94,7 @@ export class AcpStdioBackend {
     try {
       initialization = await abortableRequest(connection.agent.request(methods.agent.initialize, {
         protocolVersion: PROTOCOL_VERSION,
-        clientInfo: { name: "Meta Code", version: "0.1.2" },
+        clientInfo: { name: "Meta Code", version: "0.1.3" },
         clientCapabilities: {
           fs: { readTextFile: this.services.capabilities.readTextFile, writeTextFile: this.services.capabilities.writeTextFile },
           terminal: this.services.capabilities.terminal,

@@ -1,6 +1,6 @@
 # Meta Code 发布与更新架构
 
-Meta Code 当前产品版本为 `0.1.2`。`package.json` 是唯一版本源；代码、发布清单和设置页不得各自维护版本常量。
+Meta Code 当前产品版本为 `0.1.3`。`package.json` 是唯一版本源；代码、发布清单和设置页不得各自维护版本常量。
 
 ## 运行边界
 
@@ -38,7 +38,7 @@ npm run release:prepare -- --asset <package.zip> --asset-url <https-url> --relea
 
 检查请求使用系统代理环境并对超时、限流和服务端错误进行有限退避重试。当前检查失败时，设置页会把错误与“上次成功结果”分开显示，避免把缓存公告误报成刚刚检查成功。同一 SemVer 的紧急资源替换由 build ID 识别，正式发布仍应优先递增补丁版本。
 
-当前 `0.1.2` 只开放 `check` 能力；`download`、`apply` 和 `launcher` 能力均为关闭状态。后续 Launcher 接入时通过能力协商开放，而不是在 UI 中伪造进度。
+当前 `0.1.3` 只开放 `check` 能力；`download`、`apply` 和 `launcher` 能力均为关闭状态。后续 Launcher 接入时通过能力协商开放，而不是在 UI 中伪造进度。
 
 ## 发布不变量
 

@@ -67,7 +67,7 @@ async function assertWorkflowControlTools(
   if (server.name !== expectedServer) throw new Error(`任务编排控制面名称错误：应为 ${expectedServer}，实际为 ${server.name}`);
   const env = Object.fromEntries(Object.entries({ ...process.env, ...(server.env || {}) }).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
   const transport = new StdioClientTransport({ command: server.command, args: server.args || [], env, cwd, stderr: "pipe" });
-  const client = new McpClient({ name: "meta-code-workflow-preflight", version: "0.1.2" });
+  const client = new McpClient({ name: "meta-code-workflow-preflight", version: "0.1.3" });
   let timer: NodeJS.Timeout | null = null;
   try {
     const timeout = new Promise<never>((_, reject) => {
