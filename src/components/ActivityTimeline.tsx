@@ -182,7 +182,7 @@ function minimalActivities(logs: readonly unknown[], provider: string, status: s
   for (const log of normalized) {
     if (isRoutineActivityStatus(log)) continue;
     const displayLog = log.category === "reasoning"
-      ? { ...log, title: "思考", text: "", detail: undefined, transient: status === "running" && latest?.id === log.id }
+      ? { ...log, title: "思考", text: "", detail: undefined, transient: isLiveTimeline(status) && log.phase === "running" && latest?.id === log.id }
       : { ...log, title: activityActionLabel(log, provider) };
     if (displayLog.category === "reasoning" && visible.at(-1)?.category === "reasoning") visible[visible.length - 1] = displayLog;
     else visible.push(displayLog);

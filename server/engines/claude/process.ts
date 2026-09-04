@@ -119,6 +119,7 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
   let outputTimedOut = false;
   let transportFailed = false;
   const partialText = new Map<string, string>();
+  const partialThinking = new Map<string, string>();
   const toolNames = new Map<string, string>();
   const toolInputs = new Map<string, unknown>();
   let currentMessageId = "";
@@ -175,9 +176,14 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
         const sourceId = String(message.id || item.uuid || crypto.randomUUID());
         const content = Array.isArray(message.content) ? message.content : [];
         const text = textFromContent(content);
-        if (text) { activity.assistantText = text; await options.onEvent({ type: "assistant", rawType: "assistant.text", sourceId, text, payload: item }); }
+        if (text) activity.assistantText = text;
+        let partialAssistantText = "";
         for (const block of content) {
-          if (block?.type === "thinking" && block.thinking) await options.onEvent({ type: "reasoning", sourceId: `${sourceId}:thinking`, text: String(block.thinking), payload: block });
+          if (block?.type === "thinking" && block.thinking && !partialThinking.has(sourceId)) await options.onEvent({ type: "reasoning", rawType: "assistant.thinking", sourceId: `${sourceId}:thinking`, text: String(block.thinking), payload: block });
+          if (block?.type === "text" && block.text) {
+            partialAssistantText += String(block.text);
+            await options.onEvent({ type: "assistant", rawType: "assistant.text", sourceId, text: partialAssistantText, payload: item });
+          }
           if (block?.type === "tool_use") {
             const toolId = String(block.id || `${sourceId}:tool`);
             const toolName = String(block.name || "工具");
@@ -192,11 +198,16 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
         const event = item.event || {};
         if (event.type === "message_start" && event.message?.id) currentMessageId = String(event.message.id);
         const sourceId = String(currentMessageId || item.parent_tool_use_id || item.uuid || sessionId);
+        if (event.type === "content_block_delta" && event.delta?.type === "thinking_delta") {
+          const next = `${partialThinking.get(sourceId) || ""}${event.delta.thinking || ""}`;
+          partialThinking.set(sourceId, next);
+          await options.onEvent({ type: "reasoning", rawType: "stream.thinking_delta", sourceId: `${sourceId}:thinking`, text: next, payload: item });
+        }
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
           const next = `${partialText.get(sourceId) || ""}${event.delta.text || ""}`;
           partialText.set(sourceId, next);
           activity.assistantText = next;
-          await options.onEvent({ type: "assistant", sourceId, text: next, payload: item });
+          await options.onEvent({ type: "assistant", rawType: "stream.text_delta", sourceId, text: next, payload: item });
         }
       } else if (item.type === "user") {
         const content = Array.isArray(item.message?.content) ? item.message.content : [];

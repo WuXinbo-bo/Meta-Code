@@ -948,7 +948,16 @@ function claudeStatusSubtype(message: Message) {
     : "";
 }
 
-function visibleConversationMessages(messages: Message[]) {
+function completedReasoningMessage(message: Message): Message {
+  return {
+    ...message,
+    eventPhase: "completed",
+    activityPhase: "completed",
+    activity: message.activity ? { ...message.activity, phase: "completed" } : message.activity
+  };
+}
+
+function visibleConversationMessages(messages: Message[], sessionStatus?: Session["status"]) {
   let latestRetryKept = false;
   const result: Message[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -961,7 +970,21 @@ function visibleConversationMessages(messages: Message[]) {
     }
     result.push(message);
   }
-  return result.reverse();
+  const visible = result.reverse();
+  let pendingReasoning = -1;
+  for (let index = 0; index < visible.length; index += 1) {
+    const message = visible[index];
+    const reasoning = message.activityCategory === "reasoning" || message.eventType === "reasoning" || message.activity?.semanticType === "reasoning";
+    if (reasoning && message.activityPhase !== "completed" && message.activity?.phase !== "completed") {
+      if (pendingReasoning >= 0) visible[pendingReasoning] = completedReasoningMessage(visible[pendingReasoning]);
+      pendingReasoning = index;
+    } else if (pendingReasoning >= 0) {
+      visible[pendingReasoning] = completedReasoningMessage(visible[pendingReasoning]);
+      pendingReasoning = -1;
+    }
+  }
+  if (pendingReasoning >= 0 && sessionStatus !== "running") visible[pendingReasoning] = completedReasoningMessage(visible[pendingReasoning]);
+  return visible;
 }
 
 function sessionSummariesSnapshot(sessions: SessionSummary[]) {
@@ -4372,8 +4395,8 @@ export function App() {
   // at render time as well as at ingestion time so opening history is stable
   // immediately after the fix, without rewriting persisted conversation data.
   const activeMessages = useMemo(
-    () => visibleConversationMessages(activeSession?.messages || []),
-    [activeSession?.messages]
+    () => visibleConversationMessages(activeSession?.messages || [], activeSession?.status),
+    [activeSession?.messages, activeSession?.status]
   );
   const messageRenderLimit = activeSession ? messageRenderLimits[activeSession.id] || MESSAGE_INITIAL_RENDER : MESSAGE_INITIAL_RENDER;
   const unloadedMessageCount = activeSession?.messageWindow?.start || 0;

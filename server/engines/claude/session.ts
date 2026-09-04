@@ -194,7 +194,7 @@ export class ClaudeSessionHandle {
   }
 
   private async readOutput() {
-    const partial = new Map<string, string>(); const toolNames = new Map<string, string>(); const toolInputs = new Map<string, unknown>(); const completedTools = new Set<string>(); let messageId = "";
+    const partial = new Map<string, string>(); const partialThinking = new Map<string, string>(); const toolNames = new Map<string, string>(); const toolInputs = new Map<string, unknown>(); const completedTools = new Set<string>(); let messageId = "";
     let activity: ClaudeTurnActivity = { assistantText: "", toolStarted: 0, toolCompleted: 0 };
     const lines = readline.createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     for await (const line of lines) {
@@ -223,15 +223,18 @@ export class ClaudeSessionHandle {
         }
       } else if (item.type === "assistant") {
         const message = item.message || {}; const sourceId = String(message.id || item.uuid || crypto.randomUUID()); const content = Array.isArray(message.content) ? message.content : [];
-        const text = contentText(content); if (text) { activity.assistantText = text; await this.options.onEvent({ type: "assistant", rawType: "assistant.text", sourceId, text, payload: item }); }
+        const text = contentText(content); if (text) activity.assistantText = text;
+        let partialText = "";
         for (const block of content) {
-          if (block?.type === "thinking" && block.thinking) await this.options.onEvent({ type: "reasoning", rawType: "assistant.thinking", sourceId: `${sourceId}:thinking`, text: String(block.thinking), payload: block });
+          if (block?.type === "thinking" && block.thinking && !partialThinking.has(sourceId)) await this.options.onEvent({ type: "reasoning", rawType: "assistant.thinking", sourceId: `${sourceId}:thinking`, text: String(block.thinking), payload: block });
+          if (block?.type === "text" && block.text) { partialText += String(block.text); await this.options.onEvent({ type: "assistant", rawType: "assistant.text", sourceId, text: partialText, payload: item }); }
           if (block?.type === "tool_use") { const id = String(block.id || `${sourceId}:tool`); const name = String(block.name || "工具"); if (!toolNames.has(id)) activity.toolStarted += 1; toolNames.set(id, name); toolInputs.set(id, block.input || {}); await this.options.onEvent({ type: "tool.started", rawType: "assistant.tool_use", sourceId: id, toolName: name, text: JSON.stringify(block.input || {}), payload: block, detail: { input: block.input || {} } }); }
           if (block?.type && !["text", "thinking", "tool_use"].includes(String(block.type))) await this.options.onEvent({ type: "status", rawType: `assistant.${String(block.type)}`, sourceId: `${sourceId}:${String(block.type)}`, text: `Claude 返回未识别内容块：${String(block.type)}`, category: "unknown", phase: "started", detail: block });
         }
       } else if (item.type === "stream_event") {
         const event = item.event || {}; if (event.type === "message_start" && event.message?.id) messageId = String(event.message.id);
         const sourceId = String(messageId || item.parent_tool_use_id || item.uuid || this.sessionId);
+        if (event.type === "content_block_delta" && event.delta?.type === "thinking_delta") { const next = `${partialThinking.get(sourceId) || ""}${event.delta.thinking || ""}`; partialThinking.set(sourceId, next); await this.options.onEvent({ type: "reasoning", rawType: "stream.thinking_delta", sourceId: `${sourceId}:thinking`, text: next, payload: item }); }
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta") { const next = `${partial.get(sourceId) || ""}${event.delta.text || ""}`; partial.set(sourceId, next); activity.assistantText = next; await this.options.onEvent({ type: "assistant", rawType: "stream.text_delta", sourceId, text: next, payload: item }); }
       } else if (item.type === "user") {
         for (const block of Array.isArray(item.message?.content) ? item.message.content : []) if (block?.type === "tool_result") {

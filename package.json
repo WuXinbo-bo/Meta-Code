@@ -37,6 +37,7 @@
     "test:realtime-client": "node --import tsx scripts/test-realtime-coordinator.mjs",
     "test:agent-stream": "node --import tsx scripts/test-agent-stream-rendering.mjs",
     "test:activity": "node --import tsx scripts/test-activity-contract.mjs",
+    "test:activity-lifecycle": "node --import tsx scripts/test-activity-lifecycle.mjs",
     "test:agent-adapters": "node --import tsx scripts/test-agent-adapter-registry.mjs",
     "test:delegation-bridge": "node scripts/test-delegate-agent-cli.mjs",
     "test:agent-sdk": "node --import tsx scripts/test-agent-sdk-v1.mjs",

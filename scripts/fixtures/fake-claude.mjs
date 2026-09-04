@@ -4,7 +4,10 @@ const lines = [
   { type: "system", subtype: "status", status: "requesting", uuid: "noise-status", session_id: sessionId },
   { type: "system", subtype: "thinking_tokens", estimated_tokens: 50, uuid: "noise-thinking", session_id: sessionId },
   { type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, error_status: 503, uuid: "useful-retry", session_id: sessionId },
-  { type: "assistant", session_id: sessionId, message: { id: "msg_test", content: [{ type: "text", text: "测试回复" }, { type: "tool_use", id: "tool_test", name: "Bash", input: { command: "echo ok" } }] } },
+  { type: "stream_event", session_id: sessionId, event: { type: "message_start", message: { id: "msg_test" } } },
+  { type: "stream_event", session_id: sessionId, event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "先分析" } } },
+  { type: "stream_event", session_id: sessionId, event: { type: "content_block_delta", delta: { type: "text_delta", text: "测试回复" } } },
+  { type: "assistant", session_id: sessionId, message: { id: "msg_test", content: [{ type: "thinking", thinking: "先分析" }, { type: "text", text: "测试回复" }, { type: "tool_use", id: "tool_test", name: "Bash", input: { command: "echo ok" } }] } },
   { type: "user", session_id: sessionId, message: { content: [{ type: "tool_result", tool_use_id: "tool_test", content: "ok" }] } },
   { type: "result", subtype: "success", session_id: sessionId, result: "done", usage: { input_tokens: 12, cache_read_input_tokens: 3, output_tokens: 5 } }
 ];

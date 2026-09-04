@@ -28,6 +28,7 @@ import { resolveClaudeCommand } from "./engines/claude/runtime.js";
 import { runClaude } from "./engines/claude/process.js";
 import { CLAUDE_PLANNER_DISALLOWED_TOOLS, ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
 import { classifyClaudeFailure } from "./engines/claude/transport.js";
+import { settleSupersededReasoning } from "./activity/lifecycle.js";
 import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexContextCompactionNotice, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
@@ -1089,6 +1090,11 @@ async function ensureRuntime() {
             if (compactStoredMessage(normalized)) sessionMigrated = true;
             return normalized;
           }).filter((message) => !isGarbledInternalInput(message));
+          if (settleSupersededReasoning(messages)) sessionMigrated = true;
+          for (const message of messages) {
+            const logs = recordOf(message.payload)?.logs;
+            if (Array.isArray(logs) && settleSupersededReasoning(logs)) sessionMigrated = true;
+          }
           if (messages.length !== storedMessages.length) sessionMigrated = true;
           let status: SessionStatus = session.status || (messages.length ? "completed" : "idle");
           const scope = normalizeSessionScope(session.scopeKind, session.workspaceId);
@@ -2468,6 +2474,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
       if (event.type === "turn.completed") agent.usage = addUsage(agent.usage, event.usage);
       const log = codexAgentLogFromEvent(event, agent.logs.length, { actorId: agent.id, parentId: parentSession.id, threadId });
       if (log) {
+        settleSupersededReasoning(agent.logs, log.id);
         const existingIndex = agent.logs.findIndex((item) => item.id === log.id);
         if (existingIndex >= 0) agent.logs[existingIndex] = log; else agent.logs.push(log);
         trimAgentLogs(agent.logs);
@@ -2611,6 +2618,7 @@ async function upsertItemMessage(
   fileBaseline: ActivityTurnFileBaseline
 ) {
   const sourceId = codexItemSourceId(turnId, event.item.id);
+  settleSupersededReasoning(session.messages, sourceId);
   const presentation = codexActivityFromEvent(event);
   const text = presentation.summary;
   const role =
@@ -2678,6 +2686,7 @@ function codexAgentLogFromEvent(event: ThreadEvent, index: number, context?: { a
 
 function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgentState) {
   const now = new Date().toISOString();
+  if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "codex", nickname: agent.nickname,
     cwd: agent.cwd, task: agent.task, status: agent.status, updatedAt: agent.updatedAt,
@@ -2768,6 +2777,7 @@ function claudeActivityMetadata(event: NormalizedEngineEvent): { category: strin
 
 async function upsertNormalizedMessage(session: Session, event: NormalizedEngineEvent, workspace: Workspace) {
   const sourceId = `claude:${session.runStartedAt || "legacy"}:${event.sourceId || event.type}`;
+  settleSupersededReasoning(session.messages, sourceId);
   const role = event.type === "assistant" ? "assistant" : event.type === "error" ? "error" : "event";
   const eventType = event.type === "tool.started" || event.type === "tool.completed"
     ? claudeToolEventType(event.toolName)
@@ -2793,7 +2803,7 @@ async function upsertNormalizedMessage(session: Session, event: NormalizedEngine
       }
     }
   }
-  const baseActivityRecord = canonicalActivityFromEngineEvent({ ...event, detail: activityDetail, rawType: eventType, category: activity.category, phase: activity.phase }, {
+  const baseActivityRecord = canonicalActivityFromEngineEvent({ ...event, detail: activityDetail, rawType: event.rawType || eventType, category: activity.category, phase: activity.phase }, {
     provider: "claude",
     actor: { kind: "main", id: session.id },
     scope: { sessionId: session.id, threadId: session.engineSessionId || undefined },
@@ -2866,6 +2876,7 @@ async function upsertNormalizedMessage(session: Session, event: NormalizedEngine
 async function upsertProviderNormalizedMessage(session: Session, event: NormalizedEngineEvent, workspace: Workspace, providerId: AgentProviderId) {
   if (providerId === "claude") return upsertNormalizedMessage(session, event, workspace);
   const sourceId = `${providerId}:${session.runStartedAt || "legacy"}:${event.sourceId || event.type}`;
+  settleSupersededReasoning(session.messages, sourceId);
   const role = event.type === "assistant" ? "assistant" : event.type === "error" ? "error" : "event";
   const eventType = event.rawType || event.type;
   const category = event.category || (event.type === "assistant" ? "message" : event.type === "reasoning" ? "reasoning" : event.type === "error" ? "error" : "status");
@@ -2941,6 +2952,7 @@ function claudeAgentLogFromEvent(event: NormalizedEngineEvent, index: number, co
 
 function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAgentState) {
   const now = new Date().toISOString();
+  if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "claude", mode: agent.mode,
     nickname: agent.nickname, cwd: agent.cwd, task: agent.task, status: agent.status,
@@ -3059,6 +3071,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
       signal: controller.signal,
       onEvent: async (event) => {
         const log = claudeAgentLogFromEvent(event, eventIndex++, { actorId: agent.id, parentId: parentSession.id, threadId: agent.parentThreadId });
+        settleSupersededReasoning(agent.logs, log.id);
         const existingIndex = event.sourceId ? agent.logs.findIndex((item) => item.id === event.sourceId) : -1;
         if (existingIndex >= 0) agent.logs[existingIndex] = { ...log, detail: log.detail ?? agent.logs[existingIndex].detail };
         else agent.logs.push(log);
@@ -3669,6 +3682,7 @@ function acpDelegatedAgentLog(providerId: AgentProviderId, event: NormalizedEngi
 
 function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentState) {
   const now = new Date().toISOString();
+  if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   const descriptor = agentAdapterRegistry.descriptor(agent.provider);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: agent.provider, adapterId: descriptor?.adapterId, mode: agent.mode,
@@ -3777,6 +3791,7 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
         if (event.usage) agent.usage = addUsage(agent.usage, event.usage);
         if (event.type === "assistant") finalText = event.text || finalText;
         const log = acpDelegatedAgentLog(manifest.id, event, eventIndex++, { actorId: agent.id, parentId: parentSession.id, threadId: agent.parentThreadId });
+        settleSupersededReasoning(agent.logs, log.id);
         const existingIndex = event.sourceId ? agent.logs.findIndex((item) => item.id === event.sourceId) : -1;
         if (existingIndex >= 0) agent.logs[existingIndex] = { ...log, detail: log.detail ?? agent.logs[existingIndex].detail };
         else agent.logs.push(log);
@@ -3959,6 +3974,7 @@ async function runCodexTurn(session: Session, workspace: Workspace, prompt: stri
         await flushStateSave();
       },
       onEvent: async (event) => {
+      if (!(event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed")) settleSupersededReasoning(session.messages);
       const presentation = codexActivityFromEvent(event);
       const text = presentation.summary;
       const activity = codexActivityRecord(presentation, { actor: { kind: "main", id: session.id }, scope: { sessionId: session.id, threadId: session.codexThreadId || undefined, turnId }, occurredAt: new Date().toISOString() });
@@ -4838,6 +4854,7 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
     const failed = records.some((record) => /error|failed/i.test(String(record.type || "")) && record.isSidechain === true);
     const completed = terminalMessage?.stop_reason === "end_turn";
     const status: AgentThread["status"] = failed ? "failed" : completed ? "completed" : parentIsRunning ? "running" : "interrupted";
+    if (status !== "running") settleSupersededReasoning(logs);
     const taskRecord = records.find((record) => record.type === "user");
     const taskMessage = recordOf(taskRecord?.message);
     const task = typeof taskMessage?.content === "string" ? taskMessage.content : textContent(taskMessage?.content);

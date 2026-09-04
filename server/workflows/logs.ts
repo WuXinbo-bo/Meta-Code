@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { canonicalActivityFromEngineEvent } from "../activity/fromEngineEvent.js";
+import { settleSupersededReasoning } from "../activity/lifecycle.js";
 import { canonicalActivity } from "../activity/normalize.js";
 import type { NormalizedEngineEvent } from "../engines/types.js";
 import type { WorkflowNodeLog } from "./types.js";
@@ -111,6 +112,7 @@ export function workflowLogFromEngineEvent(
 }
 
 export function upsertWorkflowLog(logs: WorkflowNodeLog[], log: WorkflowNodeLog, limit = 300) {
+  settleSupersededReasoning(logs, log.id);
   const existing = logs.findIndex((item) => item.id === log.id);
   if (existing >= 0) logs[existing] = { ...log, detail: log.detail ?? logs[existing].detail };
   else logs.push(log);
