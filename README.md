@@ -10,7 +10,7 @@
     <a href="https://github.com/WuXinbo-bo/Meta-Code/releases/latest"><strong>下载最新版本</strong></a>
     · <a href="#快速开始">快速开始</a>
     · <a href="./docs/user-guide/">用户指南</a>
-    · <a href="#欢迎贡献">欢迎贡献</a>
+    · <a href="#欢迎加入交流与贡献">交流与贡献</a>
   </p>
   <p>
     <img alt="Version 0.1.3" src="https://img.shields.io/badge/version-0.1.3-24292f?style=flat-square" />
@@ -145,9 +145,33 @@ Meta Code 当前版本为 `0.1.3`，主要面向 Windows 本地单用户环境�
 - 应用内更新当前提供检查与发布公告，下载后由用户启动安装程序。
 - 项目仍处于早期版本，接口和交互会继续迭代。
 
-## 欢迎贡献
+## 欢迎加入交流与贡献
 
-Meta Code 还在持续成长。无论是修复一个小问题、改善交互与文案、补充测试，还是接入新的 Agent Provider，都欢迎提交 Issue 或 Pull Request。为了让改动更容易验证和合并，提交前请至少运行：
+<table>
+  <tr>
+    <td width="58%" valign="middle">
+      <h3>加入交流群</h3>
+      <p>欢迎对 Meta Code、多 Agent 协作和本地 AI 工作台感兴趣的开发者加入交流。</p>
+      <ul>
+        <li>安装、配置与使用问题</li>
+        <li>功能建议和体验反馈</li>
+        <li>Agent、Skill、MCP 与 ACP 接入讨论</li>
+        <li>Bug 反馈与开源贡献协作</li>
+      </ul>
+      <p>也可以通过 <a href="https://github.com/WuXinbo-bo/Meta-Code/issues">GitHub Issues</a> 提交问题和建议。</p>
+      <p><strong>欢迎一起交流，也欢迎一起把 Meta Code 做得更好。</strong></p>
+    </td>
+    <td width="42%" align="center" valign="middle">
+      <strong>Meta Code 工作交流群</strong><br><br>
+      <img src="./docs/images/readme/community-qq-group.jpg" width="280" alt="Meta Code QQ 交流群二维码"><br><br>
+      <sub>QQ群：1121428448 · 扫码加入交流</sub>
+    </td>
+  </tr>
+</table>
+
+### 参与开发
+
+Meta Code 仍在持续成长。无论是修复一个小问题、改善交互与文案、补充测试，还是接入新的 Agent Provider，都欢迎提交 Issue 或 Pull Request。为了让改动更容易验证和合并，提交前请至少运行：
 
 ```powershell
 npm run typecheck
