@@ -162,9 +162,9 @@ Meta Code 当前版本为 `0.1.3`，主要面向 Windows 本地单用户环境�
       <p><strong>欢迎一起交流，也欢迎一起把 Meta Code 做得更好。</strong></p>
     </td>
     <td width="42%" align="center" valign="middle">
-      <strong>Meta Code 工作交流群</strong><br><br>
-      <img src="./docs/images/readme/community-qq-group.jpg" width="280" alt="Meta Code QQ 交流群二维码"><br><br>
-      <sub>QQ群：1121428448 · 扫码加入交流</sub>
+      <strong>Meta Code 工作台交流群</strong><br><br>
+      <img src="./docs/images/readme/meta-code-workbench-qq-group.jpg" width="280" alt="Meta Code 工作台 QQ 交流群二维码"><br><br>
+      <sub>Meta Code 工作台 QQ 群：1121428448 · 扫码加入交流</sub>
     </td>
   </tr>
 </table>
