@@ -5,7 +5,7 @@ import semver from "semver";
 import { EnvHttpProxyAgent } from "undici";
 import { loadAppUpdateConfig } from "./config.js";
 import { parseAppUpdateManifest, refreshReleaseCompatibility, releaseFromManifest } from "./manifest.js";
-import type { AppUpdateChannel, AppUpdateCheckState, AppUpdateConfig, AppUpdatePersistedState, AppUpdateRelease, AppUpdateSourceState, AppUpdateStatus } from "./types.js";
+import type { AppUpdateChannel, AppUpdateCheckPhase, AppUpdateCheckState, AppUpdateConfig, AppUpdatePersistedState, AppUpdateRelease, AppUpdateSourceAttempt, AppUpdateSourceState, AppUpdateStatus } from "./types.js";
 
 type ServiceOptions = {
   projectRoot: string;
@@ -18,7 +18,7 @@ type ServiceOptions = {
   retryDelaysMs?: number[];
 };
 
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_UPDATE_RESPONSE_BYTES = 1_000_000;
 const DEFAULT_RETRY_DELAYS_MS = [0, 250, 1_000];
 
@@ -82,6 +82,9 @@ export class AppUpdateService {
   private readonly proxyAgent: EnvHttpProxyAgent | null;
   private state: AppUpdatePersistedState;
   private checkState: AppUpdateCheckState = "idle";
+  private checkPhase: AppUpdateCheckPhase = "idle";
+  private checkStartedAt: string | null = null;
+  private sourceAttempts: AppUpdateSourceAttempt[] = [];
   private sourceState: AppUpdateSourceState = "unconfigured";
   private sourceLabel = "更新源未配置";
   private checkPromise: Promise<AppUpdateStatus> | null = null;
@@ -127,6 +130,9 @@ export class AppUpdateService {
         lastSuccessfulLabel: this.state.lastSuccessfulSourceLabel
       },
       checkState: this.checkState,
+      checkPhase: this.checkPhase,
+      checkStartedAt: this.checkStartedAt,
+      sourceAttempts: structuredClone(this.sourceAttempts),
       preferences: { ...this.state.preferences },
       lastCheckedAt: this.state.lastCheckedAt,
       lastSuccessfulCheckAt: this.state.lastSuccessfulCheckAt,
@@ -197,41 +203,77 @@ export class AppUpdateService {
 
   private async performCheck() {
     this.checkState = "checking";
+    this.checkPhase = "resolving";
+    this.checkStartedAt = this.now().toISOString();
+    this.sourceAttempts = [];
     this.emitChanged();
     this.state.lastCheckedAt = this.now().toISOString();
     try {
       const channel = this.state.preferences.channel;
-      const manifestUrl = this.manifestUrl(channel);
-      let release: AppUpdateRelease;
-      if (manifestUrl) {
-        const payload = await this.fetchJson(manifestUrl, {});
-        const manifest = parseAppUpdateManifest(payload, this.config);
-        if (manifest.channel !== channel) throw new Error(`更新清单频道不匹配：${manifest.channel}`);
-        release = releaseFromManifest(manifest, this.config, this.getDataSchemaVersion());
-        this.sourceState = "manifest";
-        this.sourceLabel = "发布清单";
-      } else if (this.config.githubRepository) {
-        release = await this.checkGithub(channel);
-        this.sourceState = "github";
-        this.sourceLabel = "GitHub Releases 公告";
-      } else {
-        this.sourceState = "unconfigured";
-        this.sourceLabel = "更新源未配置";
-        throw new Error("尚未配置 Meta Code 官方更新源");
+      let release: AppUpdateRelease | null = null;
+      let manifestError = "";
+      const manifestCandidates = this.manifestCandidates(channel);
+      for (const candidate of manifestCandidates) {
+        try {
+          this.checkPhase = "connecting";
+          this.emitChanged();
+          const started = Date.now();
+          const payload = await this.fetchJson(candidate.url, {});
+          this.checkPhase = "verifying";
+          this.emitChanged();
+          const manifest = parseAppUpdateManifest(payload, this.config);
+          if (manifest.channel !== channel) throw new Error(`更新清单频道不匹配：${manifest.channel}`);
+          release = releaseFromManifest(manifest, this.config, this.getDataSchemaVersion());
+          this.sourceAttempts.push({ source: "manifest", label: candidate.label, url: candidate.url, state: "succeeded", durationMs: Date.now() - started, error: "" });
+          this.sourceState = "manifest";
+          this.sourceLabel = candidate.label;
+          break;
+        } catch (error) {
+          manifestError = error instanceof Error ? error.message : String(error);
+          this.sourceAttempts.push({ source: "manifest", label: candidate.label, url: candidate.url, state: "failed", durationMs: 0, error: manifestError });
+        }
+      }
+      if (!release && this.config.githubRepository) {
+        const url = this.githubApiUrl();
+        const started = Date.now();
+        try {
+          this.checkPhase = "connecting";
+          this.emitChanged();
+          release = await this.checkGithub(channel);
+          this.sourceAttempts.push({ source: "github", label: "GitHub Releases", url, state: "succeeded", durationMs: Date.now() - started, error: "" });
+          this.sourceState = "github";
+          this.sourceLabel = manifestError ? "GitHub Releases（清单线路不可用）" : "GitHub Releases 公告";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.sourceAttempts.push({ source: "github", label: "GitHub Releases", url, state: "failed", durationMs: Date.now() - started, error: message });
+          throw new Error([manifestError, message].filter(Boolean).join("；"));
+        }
+      }
+      if (!release) {
+        if (manifestCandidates.length) {
+          this.sourceState = "manifest";
+          this.sourceLabel = "发布清单";
+        } else {
+          this.sourceState = "unconfigured";
+          this.sourceLabel = "更新源未配置";
+        }
+        throw new Error(manifestError || "尚未配置 Meta Code 官方更新源");
       }
       cleanVersion(release.version);
       this.state.release = release;
       this.state.lastSuccessfulCheckAt = this.now().toISOString();
       this.state.checkedByVersion = this.config.currentVersion;
       this.state.checkedByBuildId = this.config.currentBuildId;
-      this.state.lastSuccessfulSourceState = this.sourceState;
+      this.state.lastSuccessfulSourceState = this.sourceState === "manifest" ? "manifest" : this.sourceState === "github" ? "github" : "unconfigured";
       this.state.lastSuccessfulSourceLabel = this.sourceLabel;
       this.state.lastError = "";
       this.checkState = "completed";
+      this.checkPhase = "completed";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.state.lastError = message;
       this.checkState = this.sourceState === "unconfigured" ? "completed" : "error";
+      this.checkPhase = this.sourceState === "unconfigured" ? "completed" : "failed";
       if (this.sourceState !== "unconfigured") {
         this.sourceState = "error";
         this.sourceLabel = "更新检查失败";
@@ -244,7 +286,7 @@ export class AppUpdateService {
 
   private async checkGithub(channel: AppUpdateChannel): Promise<AppUpdateRelease> {
     if (!/^[\w.-]+\/[\w.-]+$/.test(this.config.githubRepository)) throw new Error("GitHub 更新仓库格式无效");
-    const releases = await this.fetchJson(`https://api.github.com/repos/${this.config.githubRepository}/releases?per_page=20`, {
+    const releases = await this.fetchJson(this.githubApiUrl(), {
       accept: "application/vnd.github+json",
       "user-agent": "Meta-Code-Workbench"
     });
@@ -317,6 +359,19 @@ export class AppUpdateService {
   }
 
   private manifestUrl(channel: AppUpdateChannel) { return this.config.manifestUrls[channel]?.trim() || ""; }
+
+  private githubApiUrl() { return `https://api.github.com/repos/${this.config.githubRepository}/releases?per_page=20`; }
+
+  private manifestCandidates(channel: AppUpdateChannel) {
+    const configured = this.manifestUrl(channel);
+    if (!configured) return [];
+    const candidates: Array<{ label: string; url: string }> = [];
+    if (/\/latest\.json(?:$|\?)/i.test(configured)) {
+      candidates.push({ label: "发布清单 v2", url: configured.replace(/\/latest\.json(?=$|\?)/i, "/latest-v2.json") });
+    }
+    candidates.push({ label: "发布清单（兼容地址）", url: configured });
+    return candidates.filter((item, index) => candidates.findIndex((candidate) => candidate.url === item.url) === index);
+  }
 
   private refreshSourceState() {
     if (this.manifestUrl(this.state.preferences.channel)) {

@@ -81,6 +81,8 @@ try {
   assert.equal(status.updateAvailable, true);
   assert.equal(status.announcementVisible, true);
   assert.deepEqual(status.capabilities, { check: true, download: false, apply: false, launcher: false });
+  assert.equal(status.checkPhase, "completed");
+  assert.equal(status.sourceAttempts.at(-1)?.state, "succeeded");
 
   status = await configured.skip("0.2.0", status.revision);
   assert.equal(status.announcementVisible, false);
@@ -177,6 +179,7 @@ try {
   status = await cachedFailure.check(true);
   assert.equal(status.source.state, "error");
   assert.equal(status.source.usingCachedRelease, true);
+  assert.equal(status.checkPhase, "failed");
   assert.equal(status.release?.version, "0.3.2", "检查失败时必须保留上次成功结果");
   assert.equal(status.source.lastSuccessfulState, "manifest");
   cachedFailure.close();
@@ -214,6 +217,19 @@ try {
   assert.equal(status.release?.version, "0.4.0");
   assert.equal(status.release?.channel, "stable");
 
+  const fallbackRoot = await project({ githubRepository: "example/meta-code", manifestUrls: { stable: "https://example.com/latest.json", beta: "" } });
+  const fallback = new AppUpdateService({
+    projectRoot: fallbackRoot,
+    stateFile: path.join(fallbackRoot, "data", "fallback.json"),
+    retryDelaysMs: [0],
+    fetch: async (input) => String(input).includes("api.github.com") ? githubFetch() : new Response("missing", { status: 404 })
+  });
+  status = await fallback.check(true);
+  assert.equal(status.source.state, "github", "signed manifest failure must fall back to the release API for version visibility");
+  assert.equal(status.release?.installable, false);
+  assert.ok(status.sourceAttempts.some((attempt) => attempt.source === "manifest" && attempt.state === "failed"));
+  assert.equal(status.sourceAttempts.at(-1)?.source, "github");
+
   const betaGithub = new AppUpdateService({
     projectRoot: githubRoot,
     stateFile: path.join(githubRoot, "data", "github-beta.json"),
@@ -235,7 +251,7 @@ try {
   assert.equal(status.source.state, "error");
   assert.match(status.lastError, /没有找到测试版发布记录/);
   stableGithub.close(); betaGithub.close(); noBeta.close();
-  configured.close(); current.close(); incompatible.close(); actualSchema.close(); refreshed.close(); timeout.close(); unconfigured.close();
+  configured.close(); current.close(); incompatible.close(); actualSchema.close(); refreshed.close(); timeout.close(); fallback.close(); unconfigured.close();
   console.log("app update service: ok");
 } finally {
   await new Promise((resolve) => server.close(resolve));

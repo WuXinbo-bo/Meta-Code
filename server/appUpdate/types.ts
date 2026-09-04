@@ -1,6 +1,16 @@
 export type AppUpdateChannel = "stable" | "beta";
 export type AppUpdateCheckState = "idle" | "checking" | "completed" | "error";
 export type AppUpdateSourceState = "unconfigured" | "manifest" | "github" | "error";
+export type AppUpdateCheckPhase = "idle" | "resolving" | "connecting" | "verifying" | "completed" | "failed";
+
+export type AppUpdateSourceAttempt = {
+  source: "manifest" | "github";
+  label: string;
+  url: string;
+  state: "succeeded" | "failed";
+  durationMs: number;
+  error: string;
+};
 
 export type AppUpdateAsset = {
   platform: string;
@@ -94,6 +104,9 @@ export type AppUpdateStatus = {
     lastSuccessfulLabel: string;
   };
   checkState: AppUpdateCheckState;
+  checkPhase: AppUpdateCheckPhase;
+  checkStartedAt: string | null;
+  sourceAttempts: AppUpdateSourceAttempt[];
   preferences: AppUpdatePreferences;
   lastCheckedAt: string | null;
   lastSuccessfulCheckAt: string | null;

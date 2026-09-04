@@ -7,6 +7,9 @@ export type AppUpdateStatus = {
   capabilities: { check: boolean; download: boolean; apply: boolean; launcher: boolean };
   source: { state: "unconfigured" | "manifest" | "github" | "error"; label: string; githubRepository: string; manifestConfigured: boolean; usingCachedRelease: boolean; lastSuccessfulState: "unconfigured" | "manifest" | "github"; lastSuccessfulLabel: string };
   checkState: "idle" | "checking" | "completed" | "error";
+  checkPhase: "idle" | "resolving" | "connecting" | "verifying" | "completed" | "failed";
+  checkStartedAt: string | null;
+  sourceAttempts: Array<{ source: "manifest" | "github"; label: string; url: string; state: "succeeded" | "failed"; durationMs: number; error: string }>;
   preferences: { autoCheck: boolean; channel: AppUpdateChannel; skippedVersion: string; remindAfter: string | null };
   lastCheckedAt: string | null;
   lastSuccessfulCheckAt: string | null;

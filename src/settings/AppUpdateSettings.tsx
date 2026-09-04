@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Clock3, ExternalLink, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertCircle, Check, Clock3, ExternalLink, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import { ProductLogo } from "../branding/ProductLogo";
 import { HelpButton } from "../help/HelpProvider";
@@ -37,12 +37,14 @@ export function AppUpdateSettings() {
 
   const release = status.release;
   const sourceAttention = status.source.state === "unconfigured" || status.source.state === "error";
+  const checkUnknown = status.source.state === "error";
+  const phaseLabel = ({ resolving: "正在解析更新源", connecting: "正在连接更新源", verifying: "正在验证发布签名" } as Record<string, string>)[status.checkPhase] || "正在检查";
   return <div className="settings-section app-update-settings">
     <div className="settings-page-heading"><div><span className="help-inline-heading"><h2>软件更新</h2><HelpButton topic="updates" /></span><p>Meta Code 的版本、发布频道与更新公告。</p></div></div>
     <section className="app-update-current">
       <div className="app-update-mark"><ProductLogo variant="mark" /></div>
       <div><strong>{status.product.name}</strong><span>当前版本 {status.product.currentVersion}</span></div>
-      <i className={status.updateAvailable ? "available" : "current"}>{status.checkState === "checking" ? "正在检查" : status.updateAvailable ? `发现 ${release?.version}` : "当前版本"}</i>
+      <i className={status.updateAvailable ? "available" : checkUnknown ? "unknown" : "current"}>{status.checkState === "checking" ? phaseLabel : checkUnknown ? "更新状态未知" : status.updateAvailable ? `发现 ${release?.version}` : "当前版本"}</i>
     </section>
     <div className="app-update-rows">
       <div className="app-update-row"><span><strong>自动检查</strong><small>启动后与运行期间定期检查</small></span><button type="button" className="settings-switch" role="switch" aria-checked={status.preferences.autoCheck} disabled={busy !== ""} onClick={() => void updatePreferences({ autoCheck: !status.preferences.autoCheck })}><span /></button></div>
@@ -50,9 +52,10 @@ export function AppUpdateSettings() {
       <div className="app-update-row"><span><strong>更新源</strong><small className={sourceAttention ? "attention" : ""}>{status.source.label}</small></span><button type="button" disabled={busy !== "" || status.checkState === "checking"} onClick={() => void mutate("check", "/api/app-update/check", "POST")}><RefreshCw className={busy === "check" || status.checkState === "checking" ? "spin" : ""} size={14} />{status.lastCheckedAt ? "重新检查" : "检查更新"}</button></div>
     </div>
     <div className="app-update-check-meta"><Clock3 size={13} /><span>最近检查：{appUpdateTime(status.lastCheckedAt)}</span>{status.lastSuccessfulCheckAt && <span>最近成功：{appUpdateTime(status.lastSuccessfulCheckAt)}</span>}</div>
-    {status.lastError && status.source.state !== "unconfigured" && <p className="app-update-error">{status.lastError}{status.source.usingCachedRelease ? "；下方仍显示最近一次成功检查的结果" : ""}</p>}
+    {status.lastError && status.source.state !== "unconfigured" && <div className="app-update-error"><AlertCircle size={14} /><span><strong>本次检查失败</strong>{status.lastError}{status.source.usingCachedRelease ? "；下方内容来自最近一次成功检查，不代表当前在线状态" : ""}</span></div>}
+    {status.sourceAttempts.length > 0 && <details className="app-update-diagnostics"><summary>检查线路诊断</summary>{status.sourceAttempts.map((attempt, index) => <div key={`${attempt.url}-${index}`}><Check size={12} className={attempt.state} /><span><strong>{attempt.label}</strong><small>{attempt.state === "succeeded" ? `成功 · ${attempt.durationMs} ms` : attempt.error}</small></span></div>)}</details>}
     {release && <section className={`app-update-release ${status.updateAvailable ? "available" : ""}`}>
-      <header><div>{status.updateAvailable ? <RefreshCw size={16} /> : <Check size={16} />}<span><strong>{status.updateAvailable ? `Meta Code ${release.version}` : `已检查 ${release.version}`}</strong><small>{appUpdateTime(release.publishedAt)} · {release.source === "manifest" ? "发布清单" : "GitHub Releases"}</small></span></div>{release.releaseUrl && <a href={release.releaseUrl} target="_blank" rel="noreferrer">查看发布页<ExternalLink size={13} /></a>}</header>
+      <header><div>{status.updateAvailable ? <RefreshCw size={16} /> : checkUnknown ? <Clock3 size={16} /> : <Check size={16} />}<span><strong>{status.updateAvailable ? `Meta Code ${release.version}` : checkUnknown ? `上次成功检查：${release.version}` : `已检查 ${release.version}`}</strong><small>{appUpdateTime(release.publishedAt)} · {release.source === "manifest" ? "发布清单" : "GitHub Releases"}</small></span></div>{release.releaseUrl && <a href={release.releaseUrl} target="_blank" rel="noreferrer">查看发布页<ExternalLink size={13} /></a>}</header>
       {release.releaseNotes && <p>{release.releaseNotes}</p>}
       {!release.compatible && <div className="app-update-compatibility"><ShieldCheck size={14} /><span>{release.incompatibilityReason}</span></div>}
       {status.updateAvailable && <footer><button type="button" disabled={busy !== ""} onClick={() => void mutate("remind", "/api/app-update/remind", "POST", { afterHours: 24 })}>明天提醒</button><button type="button" disabled={busy !== ""} onClick={() => void mutate("skip", "/api/app-update/skip", "POST", { version: release.version })}>跳过此版本</button></footer>}

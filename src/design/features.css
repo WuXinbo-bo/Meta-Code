@@ -763,6 +763,7 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .app-update-current span { color: var(--mc-text-tertiary); font-size: 9px; }
 .app-update-current > i { padding: 4px 7px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-sm); color: var(--mc-text-tertiary); font-size: 8px; font-style: normal; }
 .app-update-current > i.available { border-color: var(--mc-line-strong); color: var(--mc-text); }
+.app-update-current > i.unknown { border-color: color-mix(in srgb, var(--mc-danger) 35%, var(--mc-line)); color: var(--mc-danger); }
 .app-update-rows { display: grid; }
 .app-update-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 180px); align-items: center; gap: 20px; min-height: 62px; border-bottom: 1px solid var(--mc-line); }
 .app-update-row > span { display: grid; gap: 3px; }
@@ -774,7 +775,16 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .app-update-row > button:not(.settings-switch):hover { color: var(--mc-text); background: var(--mc-hover); }
 .app-update-row > button:disabled, .app-update-row > select:disabled { cursor: wait; opacity: .55; }
 .app-update-check-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 11px 0; color: var(--mc-text-tertiary); font-size: 8px; }
-.app-update-error { margin: 0 0 12px; padding: 9px 0; border-block: 1px solid color-mix(in srgb, var(--mc-danger) 25%, var(--mc-line)); color: var(--mc-danger); font-size: 9px; line-height: 1.5; }
+.app-update-error { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; padding: 10px 0; border-block: 1px solid color-mix(in srgb, var(--mc-danger) 25%, var(--mc-line)); color: var(--mc-danger); font-size: 11px; line-height: 1.5; }
+.app-update-error svg { flex: 0 0 auto; margin-top: 2px; }
+.app-update-error span { display: grid; gap: 2px; }
+.app-update-diagnostics { margin: 0 0 12px; border-bottom: 1px solid var(--mc-line); color: var(--mc-text-secondary); font-size: 11px; }
+.app-update-diagnostics summary { padding: 8px 0; cursor: pointer; }
+.app-update-diagnostics > div { display: flex; gap: 7px; padding: 6px 0 6px 10px; }
+.app-update-diagnostics > div svg { flex: 0 0 auto; color: var(--mc-danger); }
+.app-update-diagnostics > div svg.succeeded { color: var(--mc-success); }
+.app-update-diagnostics > div span { display: grid; gap: 2px; }
+.app-update-diagnostics small { color: var(--mc-text-tertiary); font-size: 11px; overflow-wrap: anywhere; }
 .app-update-release { display: grid; gap: 11px; margin-top: 5px; padding: 15px 0; border-block: 1px solid var(--mc-line); }
 .app-update-release > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .app-update-release > header > div { display: flex; min-width: 0; align-items: center; gap: 8px; }
