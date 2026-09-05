@@ -84,6 +84,7 @@
     "test:first-run": "node --import tsx scripts/test-first-run-guide.mjs",
     "test:repository": "node scripts/test-repository-readiness.mjs",
     "test:session-management": "node --import tsx scripts/test-session-management.mjs",
+    "test:task-deletion": "npm run build && node --import tsx scripts/test-task-deletion.mjs",
     "test:session-facets": "node --import tsx scripts/test-session-management-facets.mjs",
     "test:session-selection": "node --import tsx scripts/test-session-selection.mjs",
     "test:workspace-browser-tabs": "node --import tsx scripts/test-workspace-browser-tabs.mjs",

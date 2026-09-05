@@ -221,6 +221,11 @@ type Usage = {
   output_tokens: number;
   reasoning_output_tokens: number;
 };
+type TaskDeletionPolicy = {
+  action: "delete" | "terminate-and-delete";
+  requiresTermination: boolean;
+  reason: string | null;
+};
 type SessionSummary = {
   id: string;
   title: string;
@@ -250,6 +255,7 @@ type SessionSummary = {
   standaloneSkillPolicies?: SkillPolicies;
   standaloneCapabilityProfileId?: string | null;
   standaloneExecutionMode?: ExecutionMode;
+  deletionPolicy?: TaskDeletionPolicy;
 };
 type WorkflowSummary = {
   id: string;
@@ -265,6 +271,7 @@ type WorkflowSummary = {
   folderId: string | null;
   updatedAt: string;
   createdAt: string;
+  deletionPolicy?: TaskDeletionPolicy;
 };
 type AgentProfile = { name: string; title: string; description: string; builtIn: boolean };
 type SkillFolder = { id: string; name: string; position: number; pinned: boolean; createdAt: string; updatedAt: string };
@@ -955,6 +962,22 @@ function completedReasoningMessage(message: Message): Message {
     activityPhase: "completed",
     activity: message.activity ? { ...message.activity, phase: "completed" } : message.activity
   };
+}
+
+function deletionPolicyFor(kind: "session" | "workflow", task: SessionSummary | WorkflowSummary): TaskDeletionPolicy {
+  if (task.deletionPolicy) return task.deletionPolicy;
+  const requiresTermination = kind === "session"
+    ? task.status === "running" || task.status === "paused"
+    : ["planning", "queued", "running", "integrating", "paused"].includes(task.status);
+  return {
+    action: requiresTermination ? "terminate-and-delete" : "delete",
+    requiresTermination,
+    reason: requiresTermination ? kind === "session" ? "任务仍在运行或暂停中" : "任务编排仍在执行或暂停中" : null
+  };
+}
+
+function deletionTaskKey(kind: "session" | "workflow", id: string) {
+  return `${kind}:${id}`;
 }
 
 function visibleConversationMessages(messages: Message[], sessionStatus?: Session["status"]) {
@@ -2049,6 +2072,7 @@ export function App() {
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [submittingInput, setSubmittingInput] = useState(false);
   const [runControlAction, setRunControlAction] = useState<"pause" | "stop" | "">("");
+  const [deletingTaskIds, setDeletingTaskIds] = useState<Set<string>>(() => new Set());
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [notice, setNoticeState] = useState<Notice | null>(null);
   const [agents, setAgents] = useState("");
@@ -3677,22 +3701,39 @@ export function App() {
   };
 
   const deleteSession = async (id: string) => {
-    if (sessionNavigationRef.current.phase === "loading") return;
     const target = data?.sessions.find((session) => session.id === id);
-    if (!await confirmAction(target?.scopeKind === "standalone" ? "删除这个临时任务及其隔离目录中的文件？此操作无法撤销。" : "删除这个任务记录？此操作不会删除工作区文件。", { destructive: true })) return;
-    await api(`/api/sessions/${id}`, { method: "DELETE" });
-    forgetSession(id);
-    const tabId = workspaceBrowserResourceKey({
-      kind: "conversation",
-      conversationId: id,
-      ...(target?.scopeKind === "standalone" ? {} : target?.workspaceId ? { workspaceId: target.workspaceId } : {})
-    });
-    const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
-    closeWorkspaceBrowserResource(tabId);
-    if (activeSession?.id === id && !hadTab) {
-      setActiveSession(null);
+    const key = deletionTaskKey("session", id);
+    if (deletingTaskIds.has(key)) return;
+    const policy = deletionPolicyFor("session", target || activeSession || ({ id, status: "idle" } as SessionSummary));
+    const subject = target?.scopeKind === "standalone" ? "临时任务" : "任务";
+    const message = policy.requiresTermination
+      ? `${policy.reason || "任务仍在运行或暂停中"}。继续后会先停止主任务和子 Agent，再将${subject}移入回收站。工作区文件不会被删除。`
+      : `将这个${subject}移入回收站？工作区文件不会被删除。`;
+    if (!await confirmAction(message, {
+      title: policy.requiresTermination ? "停止并删除任务" : "删除任务",
+      confirmLabel: policy.requiresTermination ? "停止并删除" : "移入回收站",
+      destructive: true
+    })) return;
+    setDeletingTaskIds((current) => new Set(current).add(key));
+    try {
+      await api(`/api/sessions/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
+      setData((current) => current ? { ...current, sessions: current.sessions.filter((session) => session.id !== id) } : current);
+      forgetSession(id);
+      const tabId = workspaceBrowserResourceKey({
+        kind: "conversation",
+        conversationId: id,
+        ...(target?.scopeKind === "standalone" ? {} : target?.workspaceId ? { workspaceId: target.workspaceId } : {})
+      });
+      const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
+      closeWorkspaceBrowserResource(tabId);
+      if (activeSession?.id === id && !hadTab) setActiveSession(null);
+      setNotice("任务已移入回收站", "success");
+      void refreshNavigation().catch(() => undefined);
+    } catch (error) {
+      setNotice(`删除失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    } finally {
+      setDeletingTaskIds((current) => { const next = new Set(current); next.delete(key); return next; });
     }
-    await refresh();
   };
 
   const updateSessionMetadata = async (id: string, body: { title?: string; pinned?: boolean; archived?: boolean; folderId?: string | null }) => {
@@ -3712,16 +3753,34 @@ export function App() {
   };
 
   const deleteWorkflow = async (id: string) => {
-    if (sessionNavigationRef.current.phase === "loading") return;
-    if (!await confirmAction("删除这个编排任务记录？任务文件夹不会被删除。", { destructive: true })) return;
-    await api(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
     const target = data?.workflows.find((workflow) => workflow.id === id);
-    const tabId = workspaceBrowserResourceKey({ kind: "workflow", workflowId: id, ...(target?.workspaceId ? { workspaceId: target.workspaceId } : {}) });
-    const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
-    closeWorkspaceBrowserResource(tabId);
-    if (activeWorkflowId === id && !hadTab) { activateTaskKind("chat"); setActiveWorkflowId(""); setActiveSession(null); }
-    forgetWorkflow(id);
-    await refresh();
+    const key = deletionTaskKey("workflow", id);
+    if (deletingTaskIds.has(key)) return;
+    const policy = deletionPolicyFor("workflow", target || ({ id, status: "draft" } as WorkflowSummary));
+    const message = policy.requiresTermination
+      ? `${policy.reason || "任务编排仍在执行或暂停中"}。继续后会取消未完成节点，等待全部 Agent 退出，再删除任务记录。成果目录和已有文件不会被删除。`
+      : "删除这个编排任务记录？成果目录和已有文件不会被删除。";
+    if (!await confirmAction(message, {
+      title: policy.requiresTermination ? "取消并删除编排任务" : "删除编排任务",
+      confirmLabel: policy.requiresTermination ? "取消并删除" : "确认删除",
+      destructive: true
+    })) return;
+    setDeletingTaskIds((current) => new Set(current).add(key));
+    try {
+      await api(`/api/workflows/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
+      setData((current) => current ? { ...current, workflows: current.workflows.filter((workflow) => workflow.id !== id) } : current);
+      const tabId = workspaceBrowserResourceKey({ kind: "workflow", workflowId: id, ...(target?.workspaceId ? { workspaceId: target.workspaceId } : {}) });
+      const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
+      closeWorkspaceBrowserResource(tabId);
+      if (activeWorkflowId === id && !hadTab) { activateTaskKind("chat"); setActiveWorkflowId(""); setActiveSession(null); }
+      forgetWorkflow(id);
+      setNotice("编排任务记录已删除，成果目录保持不变", "success");
+      void refreshNavigation().catch(() => undefined);
+    } catch (error) {
+      setNotice(`删除失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    } finally {
+      setDeletingTaskIds((current) => { const next = new Set(current); next.delete(key); return next; });
+    }
   };
 
   const openWorkflowFolder = async (id: string) => {
@@ -4563,6 +4622,17 @@ export function App() {
   const sidebarVisible = sidebarOpen && view === "chat";
   const inspectorVisible = inspectorOpen && view === "chat" && !activeBrowserToolResource;
   const workspaceBrowserVisible = view === "chat" && workspaceBrowser.tabs.length > 0;
+  const displayedDeletionKind = displayedWorkflowId ? "workflow" : displayedSession ? "session" : null;
+  const displayedDeletionId = displayedWorkflowId || displayedSession?.id || "";
+  const displayedDeletionTarget = displayedDeletionKind === "workflow"
+    ? data.workflows.find((workflow) => workflow.id === displayedDeletionId)
+    : data.sessions.find((session) => session.id === displayedDeletionId);
+  const displayedDeletionPolicy = displayedDeletionKind && displayedDeletionTarget
+    ? deletionPolicyFor(displayedDeletionKind, displayedDeletionTarget)
+    : null;
+  const displayedDeletionBusy = displayedDeletionKind
+    ? deletingTaskIds.has(deletionTaskKey(displayedDeletionKind, displayedDeletionId))
+    : false;
 
   return (
     <div
@@ -4639,6 +4709,9 @@ export function App() {
         const isWorkflow = Boolean(workflow);
         const isStandaloneTask = Boolean(session?.scopeKind === "standalone");
         const cannotArchive = session ? session.status === "running" || session.status === "paused" : ["queued", "running", "integrating"].includes(workflow!.status);
+        const deletionKind = isWorkflow ? "workflow" : "session";
+        const deletionPolicy = deletionPolicyFor(deletionKind, task);
+        const deletionBusy = deletingTaskIds.has(deletionTaskKey(deletionKind, task.id));
         const updateMetadata = (body: { title?: string; pinned?: boolean; archived?: boolean; folderId?: string | null }) => isWorkflow ? updateWorkflowMetadata(task.id, body) : updateSessionMetadata(task.id, body);
         return <><button type="button" className="session-context-dismiss" aria-label="关闭任务菜单" onClick={() => setSessionContextMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}>
           {!task.archivedAt && <button type="button" onClick={() => void updateMetadata({ pinned: !task.pinned })}><Pin size={14} />{task.pinned ? "取消置顶" : "置顶任务"}</button>}
@@ -4650,7 +4723,7 @@ export function App() {
             {!taskFolders.length && <span className="session-folder-empty">暂无文件夹</span>}
           </div></details>}
           <button type="button" disabled={cannotArchive} title={cannotArchive ? "执行中的任务不能归档" : ""} onClick={() => void updateMetadata({ archived: !task.archivedAt })}>{task.archivedAt ? <ArchiveRestore size={14} /> : <Archive size={14} />}{task.archivedAt ? "恢复任务" : "归档任务"}</button>
-          <button type="button" className="danger" onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}><Trash2 size={14} />删除任务</button>
+          <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || ""} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除" : "停止并删除" : "删除任务"}</button>
         </div></>;
       })()}
       {!navigationPending && sessionAreaMenu && !standaloneActive && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
@@ -4694,7 +4767,7 @@ export function App() {
             </div>
           )}
           {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || data.settings.defaultEngine} onSelect={openModelSettings} />}
-          {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <IconButton label="删除当前任务" onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}><Trash2 size={17} /></IconButton>}
+          {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <IconButton disabled={displayedDeletionBusy} label={displayedDeletionPolicy?.requiresTermination ? displayedDeletionKind === "workflow" ? "取消并删除当前编排任务" : "停止并删除当前任务" : "删除当前任务"} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}</IconButton>}
           <ThemeToggle />
           {view === "chat" && !activeBrowserToolResource && <IconButton label={inspectorOpen ? "关闭检查器" : "打开检查器"} onClick={() => setInspectorOpen((value) => !value)}><Menu size={18} /></IconButton>}
         </header>

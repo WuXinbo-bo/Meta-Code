@@ -102,6 +102,7 @@ import { certifyPersonalDataBackup, createPersonalDataBackup, listPersonalDataBa
 import { BackupBusyError, BackupScheduler, type BackupTrigger } from "./persistence/backupScheduler.js";
 import { loadBackupPolicy, PERSONAL_BACKUP_RETENTION, saveBackupPolicy } from "./persistence/backupPolicy.js";
 import { workbenchInventoryItem } from "./sessionManagement/health.js";
+import { taskDeletionPolicy } from "./sessionManagement/deletionPolicy.js";
 import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
 import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
 import { parsePortableSessionImport } from "./sessionManagement/import.js";
@@ -3204,13 +3205,16 @@ function abortDelegatedTasksForParent(parentTaskId: string) {
   for (const active of activeDelegationTasks.values()) if (active.parentTaskId === parentTaskId) active.controller.abort();
 }
 
-async function stopAndWaitForDelegatedTasks(parentTaskId: string) {
+async function stopAndWaitForDelegatedTasks(parentTaskId: string, timeoutMs = 30_000) {
   abortDelegatedTasksForParent(parentTaskId);
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const active = [...activeDelegationTasks.values()].some((item) => item.parentTaskId === parentTaskId);
     if (!active) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if ([...activeDelegationTasks.values()].some((item) => item.parentTaskId === parentTaskId)) {
+    throw new Error("子 Agent 仍在结束，请稍后重试");
   }
 }
 
@@ -4447,6 +4451,29 @@ async function waitForActiveRunRelease(sessionId: string, activeRun: ActiveRun, 
   if (!settled && activeRuns.get(sessionId) === activeRun) throw new Error("任务进程仍在结束，请稍后重试");
 }
 
+async function terminateSessionForDeletion(session: Session) {
+  const activeRun = activeRuns.get(session.id);
+  abortDelegatedTasksForParent(session.id);
+  if (activeRun && !activeRun.controller.signal.aborted) {
+    activeRun.abortIntent = "stop";
+    activeRun.controller.abort();
+  }
+  if (activeRun) await waitForActiveRunRelease(session.id, activeRun);
+  await stopAndWaitForDelegatedTasks(session.id);
+  if (activeRuns.has(session.id)) throw new Error("任务进程仍在结束，请稍后重试");
+  const current = sessionById(session.id, session.ownerUserId);
+  if (!current) throw new Error("任务不存在");
+  if (current.status === "running" || current.status === "paused") {
+    const now = new Date().toISOString();
+    current.status = "stopped";
+    current.stopReason = "user";
+    current.runFinishedAt = now;
+    current.updatedAt = now;
+    current.revision += 1;
+  }
+  return current;
+}
+
 async function listSkills() {
   await fsp.mkdir(SKILLS_DIR, { recursive: true });
   const entries = await fsp.readdir(SKILLS_DIR, { withFileTypes: true });
@@ -5323,6 +5350,21 @@ const activeWorkflowIntegrations = new Map<string, AbortController>();
 const workflowTicks = new Set<string>();
 const WORKFLOW_RUNNER_ID = `workbench-${process.pid}-${crypto.randomUUID()}`;
 const WORKFLOW_PLANNER_RECOVERY_ATTEMPTS = 2;
+
+function workflowRuntimeActive(workflowId: string) {
+  return activeWorkflowPlanners.has(workflowId)
+    || activeWorkflowIntegrations.has(workflowId)
+    || workflowTicks.has(workflowId)
+    || [...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflowId}:`));
+}
+
+async function waitForWorkflowRuntimeRelease(workflowId: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (workflowRuntimeActive(workflowId) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (workflowRuntimeActive(workflowId)) throw new Error("任务编排的 Agent 仍在结束，请稍后重试");
+}
 
 function workflowPlannerRecoveryPrompt(reason: string) {
   return [
@@ -7036,15 +7078,39 @@ app.put("/api/workflows/:id/metadata", (req, res) => {
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-app.delete("/api/workflows/:id", (req, res) => {
+app.delete("/api/workflows/:id", async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "任务编排不存在" });
+  const terminate = req.query.terminate === "true" || req.query.terminate === "1";
+  const policy = taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id));
+  if (policy.requiresTermination && !terminate) {
+    return res.status(409).json({ error: `${policy.reason}，请使用“取消并删除”`, code: "TASK_TERMINATION_REQUIRED", deletionPolicy: policy });
+  }
   try {
-    if (activeWorkflowPlanners.has(workflow.id) || ["planning", "queued", "running", "integrating"].includes(workflow.status)) throw new Error("运行中的任务不能删除，请先取消并等待停止");
-    workflowRepository.delete(workflow.id, req.authUser!.id);
-    workflowEvent(workflow.id, "workflow.deleted", req.authUser!.id, workflow.workspaceId, workflow.revision + 1);
+    let current = workflow;
+    if (policy.requiresTermination) {
+      if (["draft", "planning", "awaiting_approval", "queued", "running", "integrating", "needs_review", "paused"].includes(current.status)) {
+        current = workflowRepository.cancel(current.id, req.authUser!.id, current.revision);
+        workflowStateFiles.sync(current);
+        workflowStateFiles.appendEvent(current, { type: "workflow.canceled", payload: { reason: "delete" } });
+        workflowEvent(current.id, "workflow.canceled", req.authUser!.id, current.workspaceId, current.revision);
+      }
+      activeWorkflowPlanners.get(current.id)?.abort(new Error("任务编排正在删除"));
+      for (const [key, controller] of activeWorkflowNodes) if (key.startsWith(`${current.id}:`)) {
+        workflowNodeIntents.set(key, "cancel");
+        controller.abort(new Error("任务编排正在删除"));
+      }
+      activeWorkflowIntegrations.get(current.id)?.abort(new Error("任务编排正在删除"));
+      await waitForWorkflowRuntimeRelease(current.id);
+    }
+    const latest = workflowRepository.get(current.id, req.authUser!.id);
+    if (!latest) return res.status(204).end();
+    const latestPolicy = taskDeletionPolicy("workflow", latest.status, workflowRuntimeActive(latest.id));
+    if (latestPolicy.requiresTermination) throw new Error(latestPolicy.reason || "任务编排仍在结束");
+    workflowRepository.delete(latest.id, req.authUser!.id);
+    workflowEvent(latest.id, "workflow.deleted", req.authUser!.id, latest.workspaceId, latest.revision + 1);
     res.status(204).end();
-  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.post("/api/workflows/:id/open-folder", async (req, res) => {
@@ -7895,9 +7961,12 @@ function navigationSnapshot(ownerUserId: string) {
     }),
     sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map(({ messages, ...session }) => ({
       ...session,
-      messageCount: messages.length
+      messageCount: messages.length,
+      deletionPolicy: taskDeletionPolicy("session", session.status, activeRuns.has(session.id))
     })),
-    workflows: workflowRepository.listNavigation(ownerUserId).filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId))
+    workflows: workflowRepository.listNavigation(ownerUserId)
+      .filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId))
+      .map((workflow) => ({ ...workflow, deletionPolicy: taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id)) }))
   };
 }
 
@@ -10770,9 +10839,15 @@ app.get("/api/sessions/:id/agents/:agentId", async (req, res) => {
 });
 
 app.delete("/api/sessions/:id", async (req, res) => {
-  const session = sessionById(req.params.id, req.authUser!.id);
+  let session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
+  const terminate = req.query.terminate === "true" || req.query.terminate === "1";
+  const policy = taskDeletionPolicy("session", session.status, activeRuns.has(session.id));
+  if (policy.requiresTermination && !terminate) {
+    return res.status(409).json({ error: `${policy.reason}，请使用“停止并删除”`, code: "TASK_TERMINATION_REQUIRED", deletionPolicy: policy });
+  }
   try {
+    if (policy.requiresTermination) session = await terminateSessionForDeletion(session);
     const trash = await moveSessionToTrash(session);
     res.json({ ok: true, recoverable: true, trashId: trash.id, expiresAt: trash.expiresAt });
   } catch (error) {
