@@ -4653,7 +4653,6 @@ export function App() {
           <button type="button" className={view === "mcp" ? "active" : ""} aria-label="MCP" title="MCP" onClick={() => { cancelSessionNavigation(); setView("mcp"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Plug size={19} /></button>
           <button type="button" className={view === "git" ? "active" : ""} aria-label="版本管理" title="版本管理" onClick={() => { cancelSessionNavigation(); setView("git"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><GitBranch size={19} /></button>
           <button type="button" className={view === "settings" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
-          <HelpButton topic="getting-started" />
         </div>
       </nav>
       <aside className="sidebar">
