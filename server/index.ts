@@ -935,17 +935,16 @@ async function installCliRuntime(runtimeId: CliRuntimeId, requestedVersion?: str
   }
 }
 
-async function startCliRuntimeInstall(runtimeId: CliRuntimeId, requestedVersion?: string) {
-  if (state.settings.runtime.selections[runtimeId]?.mode !== "managed") {
-    throw new Error("只有工作台托管模式可以由工作台安装或更新 CLI");
-  }
-  if (cliRuntimeManager.activeVersion(runtimeId)) {
+async function startCliRuntimeInstall(runtimeId: CliRuntimeId, requestedVersion?: string, repair = false) {
+  assertRuntimeIdle(runtimeId);
+  if (repair) requestedVersion = cliRuntimeManager.activeVersion(runtimeId) || requestedVersion;
+  if (!repair && cliRuntimeManager.activeVersion(runtimeId)) {
     const update = await cliRuntimeManager.checkUpdate(runtimeId);
     if (update.action !== "update") throw new Error(update.state === "latest" ? "当前托管版本已经是最新版" : "当前托管版本不低于公开最新版，未执行更新");
     requestedVersion = update.latestVersion;
   }
   if (!cliRuntimeManager.progress(runtimeId)?.active) {
-    void installCliRuntime(runtimeId, requestedVersion).catch((error) => console.error(`${cliRuntimeManager.definition(runtimeId).label} installation failed`, error));
+    void installCliRuntime(runtimeId, requestedVersion, { repair }).catch((error) => console.error(`${cliRuntimeManager.definition(runtimeId).label} installation failed`, error));
   }
   return cliRuntimeManager.progress(runtimeId);
 }
@@ -8060,8 +8059,26 @@ async function handshakeAcpProvider(agent: import("./providers/acp/registry.js")
   finally { await backend.close(); }
 }
 
-async function installMarketProvider(providerId: string, ownerUserId: string, requestedVersion?: string) {
-  const agent = await agentMarketStore.agent(providerId, true);
+async function installMarketProvider(providerId: string, ownerUserId: string, requestedVersion?: string, repair = false) {
+  const startedAt = new Date().toISOString();
+  setMarketInstallState(providerId, "installing", repair ? "正在准备重新安装" : "正在准备安装", startedAt);
+  try {
+    if (providerId === "codex" || providerId === "claude") {
+      await installCliRuntime(providerId, repair ? cliRuntimeManager.activeVersion(providerId) || requestedVersion : requestedVersion, { repair });
+      setMarketInstallState(providerId, "completed", "CLI 已安装，可配置账号或 API", startedAt);
+      eventHub.publish("agent-market.changed", { providerId, action: "installed" });
+      return;
+    }
+    return await installAcpMarketProvider(providerId, ownerUserId, requestedVersion, repair);
+  } catch (error) {
+    setMarketInstallState(providerId, "failed", error instanceof Error ? error.message : String(error), startedAt);
+    throw error;
+  }
+}
+
+async function installAcpMarketProvider(providerId: string, ownerUserId: string, requestedVersion?: string, repair = false) {
+  const existing = agentMarketStore.installed().find((item) => item.agent.id === providerId);
+  const agent = repair && existing ? existing.agent : await agentMarketStore.agent(providerId, true);
   const definition = createAcpRuntimeDefinition(agent);
   if (!definition) throw new Error(`${agent.name} 当前无法由工作台安装`);
   cliRuntimeManager.registerDefinition(definition);
@@ -8071,7 +8088,8 @@ async function installMarketProvider(providerId: string, ownerUserId: string, re
   setMarketInstallState(agent.id, "installing", `正在安装 ${agent.name}`, startedAt);
   try {
     let initialized: Awaited<ReturnType<typeof handshakeAcpProvider>> | null = null;
-    const status = await installCliRuntime(agent.id, requestedVersion || agent.version, {
+    const status = await installCliRuntime(agent.id, repair ? previousVersion || agent.version : requestedVersion || agent.version, {
+      repair,
       certify: async (candidate) => {
         setMarketInstallState(agent.id, "verifying", "CLI 已下载，正在进行 ACP 协议握手", startedAt);
         initialized = await handshakeAcpProvider(agent, ownerUserId, candidate.executable);
@@ -8177,9 +8195,9 @@ function ensureLegacyNativeProviderProfile(ownerUserId: string, providerId: "cod
     env: customEndpoint && baseUrl ? { [urlEnv]: baseUrl } : {},
     secretEnv: apiKey ? { [keyEnv]: apiKey } : {},
     isDefault: true,
-    healthStatus: "ready",
-    healthCheckedAt: new Date().toISOString(),
-    healthMessage: "已从原有配置安全迁移",
+    healthStatus: "unknown",
+    healthCheckedAt: "",
+    healthMessage: apiKey ? "已保留原有配置，请测试连接" : "请登录账号或配置 API 后测试连接",
     configOptions: [nativeProviderModelOption(providerId)],
     configValues: { model }
   }, ownerUserId, undefined, { trustPersistedHealth: true });
@@ -8340,12 +8358,12 @@ async function openMarketControlBackend(providerId: string, ownerUserId: string,
 
 app.get("/api/agent-market", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
-    const [codexRuntime, claudeRuntime] = await Promise.all([detectCodexRuntime(false, true), getClaudeRuntime(false, true)]);
+    const [codexRuntime, claudeRuntime] = await Promise.all([detectCodexRuntime(), getClaudeRuntime()]);
     const catalog = await agentMarketStore.catalog([
-      { id: "codex", name: "Codex CLI", version: codexRuntime.version, description: "Codex 原生线程、分支、子 Agent 与 app-server 增强能力", icon: "openai" },
-      { id: "claude", name: "Claude CLI", version: claudeRuntime.version, description: "Claude 原生 Session、Stream JSON、权限与子 Agent 增强能力", icon: "claude" }
+      { id: "codex", name: "Codex CLI", version: codexRuntime.version, installed: codexRuntime.available || codexRuntime.managed?.installed, description: "Codex 原生线程、分支、子 Agent 与 app-server 增强能力", icon: "openai" },
+      { id: "claude", name: "Claude CLI", version: claudeRuntime.version, installed: claudeRuntime.available || Boolean(cliRuntimeManager.activeVersion("claude")), description: "Claude 原生 Session、Stream JSON、权限与子 Agent 增强能力", icon: "claude" }
     ], req.query.refresh === "1");
-    const installedIds = new Set(catalog.items.filter((item) => item.installed).map((item) => item.id));
+    const installedIds = new Set(catalog.items.filter((item) => item.installed || item.native).map((item) => item.id));
     const runtimeEntries = await Promise.all([...installedIds].map(async (id) => {
       const status = id === "codex" ? codexRuntime : id === "claude" ? claudeRuntime : await cliRuntimeManager.detect(id);
       return [id, status] as const;
@@ -8382,20 +8400,34 @@ app.post("/api/agent-market/:id/install", auth.requireRoles("owner", "admin"), a
 app.post("/api/agent-market/:id/update", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
     const providerId = normalizeProviderId(req.params.id);
+    if (providerId === "codex" || providerId === "claude") {
+      const update = await cliRuntimeManager.checkUpdate(providerId);
+      if (update.action === "update" && !marketInstallStates.get(providerId)?.active) void installMarketProvider(providerId, req.authUser!.id, update.latestVersion).catch(() => undefined);
+      return res.json({ accepted: update.action === "update", update });
+    }
     const installed = agentMarketStore.installed().find((item) => item.agent.id === providerId);
     if (!installed) throw new Error("Agent 尚未安装");
     cliRuntimeManager.registerDefinition(createAcpRuntimeDefinition(await agentMarketStore.agent(providerId, true))!);
     const update = await cliRuntimeManager.checkUpdate(providerId);
-    if (update.action !== "update") throw new Error(update.state === "latest" ? "当前已经是最新版" : "当前版本无需更新");
+    if (update.action !== "update") return res.json({ accepted: false, update });
     if (!marketInstallStates.get(providerId)?.active) void installMarketProvider(providerId, req.authUser!.id, update.latestVersion).catch((error) => console.error(`Agent market update failed for ${providerId}`, error));
     res.status(202).json({ accepted: true, update });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/agent-market/:id/repair", auth.requireRoles("owner", "admin"), async (req, res) => {
+  try {
+    const providerId = registeredRuntimeId(req.params.id);
+    assertRuntimeIdle(providerId);
+    if (!marketInstallStates.get(providerId)?.active) void installMarketProvider(providerId, req.authUser!.id, undefined, true).catch(() => undefined);
+    res.status(202).json({ accepted: true, state: marketInstallStates.get(providerId) || null });
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.post("/api/agent-market/:id/rollback", auth.requireRoles("owner", "admin"), async (req, res) => {
   try {
     const providerId = normalizeProviderId(req.params.id);
-    if (!agentMarketStore.installed().some((item) => item.agent.id === providerId)) throw new Error("Agent 尚未安装");
+    if (providerId !== "codex" && providerId !== "claude" && !agentMarketStore.installed().some((item) => item.agent.id === providerId)) throw new Error("Agent 尚未安装");
     assertRuntimeIdle(providerId);
     const status = await cliRuntimeManager.rollback(providerId);
     await acpSessionRuntimes.get(providerId)?.closeAll();
@@ -10647,7 +10679,7 @@ app.post("/api/runtime/:runtimeId/install", auth.requireRoles("owner", "admin"),
   try {
     const runtimeId = registeredRuntimeId(req.params.runtimeId);
     const requestedVersion = String(req.body?.version || "").trim() || undefined;
-    res.status(202).json({ accepted: true, progress: await startCliRuntimeInstall(runtimeId, requestedVersion) });
+    res.status(202).json({ accepted: true, progress: await startCliRuntimeInstall(runtimeId, requestedVersion, req.body?.repair === true) });
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 app.post("/api/runtime/:runtimeId/discover", auth.requireRoles("owner", "admin"), async (req, res) => {

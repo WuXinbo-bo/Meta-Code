@@ -24,6 +24,8 @@ assert.match(buildScript, /path\.join\(root, "desktop", "installer\.nsh"\)/);
 assert.match(buildScript, /fsp\.rm\(path\.join\(artifacts, "builder-debug\.yml"\)/);
 assert.match(buildScript, /outputDirectory: "artifacts"/);
 assert.match(buildScript, /build-info\.json/);
+assert.match(buildScript, /prepare-node-toolchain\.mjs/);
+assert.match(buildScript, /path\.join\(runtime, "toolchains", "node"\)/);
 assert.match(buildScript, /METACODE_BUILD_ID/);
 assert.match(releaseWorkflow, /METACODE_SOURCE_COMMIT: \$\{\{ github\.sha \}\}[\s\S]+METACODE_BUILD_ID: \$\{\{ github\.sha \}\}/, "package and manifest build identities must use the same immutable commit");
 assert.match(buildScript, /fsp\.rm\(staging, \{ recursive: true, force: true \}\)/);

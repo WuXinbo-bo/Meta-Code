@@ -11,6 +11,8 @@ import { downloadArtifact } from "./downloader.js";
 import { CLI_REGISTRY, runtimePlatform } from "./registry.js";
 import { resolveNpmArtifacts } from "./source.js";
 import { RuntimeTaskStore } from "./taskStore.js";
+import { NodeToolchainManager } from "./toolchain.js";
+import { nodeToolchainEnvironment, registerAgentNode } from "./nodeEnvironment.js";
 import type { CliDefinition, CliRuntimeId, RuntimeInstallOptions, RuntimeInstallProgress, RuntimeSource, RuntimeStatus, RuntimeUpdateStatus } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,13 +44,24 @@ async function publishDirectory(staging: string, destination: string) {
   }
 }
 
-function npmCliPath() {
-  const candidates = [
-    process.env.npm_execpath || "",
-    path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
-    path.resolve(path.dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js")
-  ];
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
+export async function publishRuntimeInstallation<T>(staging: string, destination: string, repair: boolean, verify: () => Promise<T>) {
+  const backup = path.join(path.dirname(destination), `.repair-${crypto.randomUUID()}`);
+  const displaced = repair && fs.existsSync(destination);
+  if (displaced) await fsp.rename(destination, backup);
+  let result: T;
+  try {
+    await publishDirectory(staging, destination);
+    result = await verify();
+  } catch (error) {
+    if (displaced) {
+      await fsp.rm(destination, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+      await fsp.rename(backup, destination);
+    }
+    throw error;
+  }
+  // Cleanup must never roll back a certified installation to a partially removed backup.
+  if (displaced) await fsp.rm(backup, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }).catch(() => undefined);
+  return result;
 }
 
 function safeVersion(value: string) {
@@ -93,6 +106,7 @@ export async function runRuntimeActivationTransaction<T>(input: {
 }
 
 export class CliRuntimeManager {
+  private readonly toolchain: NodeToolchainManager;
   private readonly installs = new Map<CliRuntimeId, Promise<RuntimeStatus>>();
   private readonly installProgress = new Map<CliRuntimeId, RuntimeInstallProgress>();
   private readonly taskStore: RuntimeTaskStore;
@@ -103,6 +117,9 @@ export class CliRuntimeManager {
     private readonly runtimesRoot: string,
     private readonly onProgress?: (event: RuntimeInstallProgress) => void
   ) {
+    this.toolchain = new NodeToolchainManager(path.join(projectRoot, "toolchains", "node"), path.join(runtimesRoot, "_toolchains"));
+    const node = this.toolchain.discover();
+    if (node) registerAgentNode(node.node);
     this.taskStore = new RuntimeTaskStore(runtimesRoot);
     for (const id of this.ids()) {
       const progress = this.taskStore.get(id);
@@ -198,7 +215,10 @@ export class CliRuntimeManager {
 
   async detect(id: CliRuntimeId, configuredPath = "", forcedMode?: RuntimeUseMode, ignoreSelectedSystemPath = false): Promise<RuntimeStatus> {
     const definition = this.definition(id);
-    const npmAvailable = Boolean(npmCliPath());
+    const npmAvailable = Boolean(this.toolchain.discover());
+    const requiresNpm = definition.distribution.kind === "npm";
+    const supported = definition.distribution.kind === "npm" ? this.toolchain.canPrepare() : Boolean(definition.distribution.platforms[runtimePlatform()]);
+    const installation = { supported, requiresNpm, environment: !supported ? "unsupported" as const : !requiresNpm || npmAvailable ? "ready" as const : "preparable" as const };
     const selection = this.selection(id);
     const mode = forcedMode || selection.mode;
     const grouped = await this.candidateGroups(id, configuredPath);
@@ -225,13 +245,17 @@ export class CliRuntimeManager {
       }
       const selectedSystemPath = !ignoreSelectedSystemPath && selection.systemPath ? path.resolve(selection.systemPath) : "";
       const matchesSelectedSystemPath = mode !== "system" || !selectedSystemPath || (process.platform === "win32" ? resolved.toLowerCase() === selectedSystemPath.toLowerCase() : resolved === selectedSystemPath);
-      if (!selected && order.includes(candidate.source) && matchesSelectedSystemPath) selected = { id, available: true, source: candidate.source, path: resolved, version: candidateVersion, npmAvailable, networkRequired: false, message: `${label} ${definition.label} 可用`, managedVersion: candidate.managedVersion };
+      const active = this.activeVersion(id);
+      const matchesManagedVersion = mode !== "managed" || !active || candidate.managedVersion === active;
+      if (!selected && order.includes(candidate.source) && matchesSelectedSystemPath && matchesManagedVersion) selected = { id, available: true, source: candidate.source, path: resolved, version: candidateVersion, npmAvailable, networkRequired: false, message: `${label} ${definition.label} 可用`, managedVersion: candidate.managedVersion };
     }
     const activeManagedVersion = this.activeVersion(id);
-    const managed = { installed: Boolean(activeManagedVersion || selected?.source === "runtime"), activeVersion: activeManagedVersion, installedVersions: this.installedVersions(id) };
-    if (selected) return { ...selected, selectionMode: mode, candidates: resolvedCandidates, managed };
+    const healthy = resolvedCandidates.some((candidate) => candidate.source === "runtime" && (!activeManagedVersion || definition.executableCandidates(path.join(this.runtimeRoot(id), "versions", activeManagedVersion)).some((file) => path.resolve(file) === candidate.path)));
+    const managed = { installed: Boolean(activeManagedVersion || healthy), healthy, activeVersion: activeManagedVersion, installedVersions: this.installedVersions(id) };
+    if (selected) return { ...selected, installation, selectionMode: mode, candidates: resolvedCandidates, managed };
     const modeHint = mode === "system" ? "未找到系统安装" : mode === "custom" ? "指定路径不可用" : mode === "managed" ? "尚未安装托管副本" : `未找到 ${definition.label}`;
-    return { id, available: false, source: "missing", path: "", version: "", npmAvailable, networkRequired: true, selectionMode: mode, candidates: resolvedCandidates, managed, message: npmAvailable ? `${modeHint}，可安装到工作台专用目录` : `${modeHint}，且当前环境缺少 npm` };
+    const reason = mode === "managed" && managed.installed && !healthy ? "托管程序缺失或无法启动，可重新安装修复" : `${modeHint}，可安装到工作台专用目录`;
+    return { id, available: false, source: "missing", path: "", version: "", npmAvailable, installation, networkRequired: true, selectionMode: mode, candidates: resolvedCandidates, managed, message: !supported ? "当前平台尚不支持自动准备安装环境" : installation.environment === "preparable" ? `${reason}；安装时会自动准备必要环境` : reason };
   }
 
   async discoverSystem(id: CliRuntimeId) {
@@ -259,8 +283,10 @@ export class CliRuntimeManager {
   }
 
   private async installNpmDistribution(id: CliRuntimeId, definition: CliDefinition, packageName: string, version: string, staging: string, startedAt: string, configuration: RuntimeConfiguration) {
-    const npmCli = npmCliPath();
-    if (!npmCli) throw new Error("当前环境没有可用的 npm，请先安装 Node.js");
+    this.report({ runtimeId: id, phase: "probing", version, message: "正在准备 CLI 安装环境", startedAt, active: true, resumable: true });
+    const toolchain = await this.toolchain.ensure(configuration.network, (progress) => this.report({ runtimeId: id, phase: "downloading", version, message: "正在下载必要安装环境", artifact: "Node.js", downloadedBytes: progress.downloadedBytes, totalBytes: progress.totalBytes, bytesPerSecond: progress.bytesPerSecond, startedAt, active: true, resumable: true }));
+    registerAgentNode(toolchain.node);
+    const npmCli = toolchain.npm;
     this.report({ runtimeId: id, phase: "probing", version, message: "正在检测可用下载源", startedAt, active: true, resumable: true });
     const source = await resolveNpmArtifacts(packageName, version, configuration.network);
     this.report({ runtimeId: id, phase: "probing", version: source.version, message: `已选择 ${new URL(source.selected).host}`, registry: source.selected, sourceProbes: source.probes, startedAt, active: true, resumable: true });
@@ -273,10 +299,14 @@ export class CliRuntimeManager {
       archives.push({ artifact, file: archive });
     }
     this.report({ runtimeId: id, phase: "installing", version: source.version, message: "下载完成，正在安装本地已校验的软件包", registry: source.selected, sourceProbes: source.probes, startedAt, active: true, resumable: false });
-    const env = runtimeChildEnvironment(configuration.network);
+    const env = nodeToolchainEnvironment(toolchain.node, runtimeChildEnvironment(configuration.network));
+    for (const key of Object.keys(env)) if (/^npm_/i.test(key)) delete env[key];
+    env.npm_config_cache = path.join(this.runtimesRoot, "_toolchains", "npm-cache");
+    env.npm_config_userconfig = path.join(this.runtimesRoot, "_toolchains", "npmrc");
+    delete env.NODE_OPTIONS;
     const dnsOption = "--dns-result-order=ipv4first";
-    env.NODE_OPTIONS = env.NODE_OPTIONS?.includes(dnsOption) ? env.NODE_OPTIONS : [env.NODE_OPTIONS, dnsOption].filter(Boolean).join(" ");
-    const installArchive = async (prefix: string, archive: string) => execFileAsync(process.execPath, [npmCli, "install", "--prefix", prefix, archive, "--omit=optional", "--omit=dev", "--no-audit", "--no-fund", `--registry=${source.selected}`, "--prefer-offline", `--fetch-timeout=${configuration.network.inactivityTimeoutSeconds * 1000}`, "--fetch-retries=2"], { encoding: "utf8", timeout: NPM_LOCAL_INSTALL_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
+    env.NODE_OPTIONS = dnsOption;
+    const installArchive = async (prefix: string, archive: string) => execFileAsync(toolchain.node, [npmCli, "install", "--prefix", prefix, archive, "--omit=optional", "--omit=dev", "--no-audit", "--no-fund", `--registry=${source.selected}`, "--prefer-offline", `--fetch-timeout=${configuration.network.inactivityTimeoutSeconds * 1000}`, "--fetch-retries=2"], { encoding: "utf8", timeout: NPM_LOCAL_INSTALL_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
     try {
       await installArchive(staging, archives[0].file);
       for (const [index, item] of archives.slice(1).entries()) {
@@ -352,9 +382,9 @@ export class CliRuntimeManager {
         await definition.validateInstallation?.(staging, workingCandidate);
         await fsp.mkdir(path.dirname(finalRoot), { recursive: true });
         const executableRelative = path.relative(staging, workingCandidate);
-        await publishDirectory(staging, finalRoot);
+        await options.ensureCanActivate?.();
         const finalExecutable = path.join(finalRoot, executableRelative);
-        const status = await runRuntimeActivationTransaction({
+        const status = await publishRuntimeInstallation(staging, finalRoot, Boolean(options.repair), () => runRuntimeActivationTransaction({
           ensureCanActivate: options.ensureCanActivate,
           certify: options.certify ? async () => {
             this.report({ runtimeId: id, phase: "certifying", version: installedVersion, message: "正在验证协议、编排与委派兼容性", startedAt, active: true, resumable: false });
@@ -367,7 +397,7 @@ export class CliRuntimeManager {
             return detected;
           },
           restore: () => this.restoreActivation(id, previousVersion)
-        });
+        }));
         this.report({ runtimeId: id, phase: "activated", version: installedVersion, message: `${definition.label} ${installedVersion} 已启用`, startedAt, active: false, resumable: false });
         return status;
       } catch (error) {
@@ -411,7 +441,7 @@ export class CliRuntimeManager {
 
   async diagnostics(id: CliRuntimeId, configuredPath = "") {
     const status = await this.detect(id, configuredPath);
-    return { status, configuration: this.config(), activeVersion: this.activeVersion(id), installedVersions: this.installedVersions(id), runtimeRoot: this.runtimeRoot(id), npmPath: npmCliPath(), platform: runtimePlatform() };
+    return { status, configuration: this.config(), activeVersion: this.activeVersion(id), installedVersions: this.installedVersions(id), runtimeRoot: this.runtimeRoot(id), npmPath: this.toolchain.discover()?.npm || "", platform: runtimePlatform() };
   }
 
   async sourceDiagnostics(id: CliRuntimeId, requestedVersion = "latest") {

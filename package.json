@@ -76,6 +76,8 @@
     "test:codex-link": "npm run build && node scripts/test-codex-link.mjs",
     "test:app-paths": "node --import tsx scripts/test-app-paths.mjs",
     "test:cli-runtime": "node --import tsx scripts/test-cli-runtime-manager.mjs",
+    "test:cli-installation": "node --import tsx scripts/test-cli-installation.mjs",
+    "test:cli-clean-desktop": "npm run build && node scripts/test-cli-clean-desktop.mjs",
     "test:runtime-download": "node --import tsx scripts/test-runtime-download.mjs",
     "test:runtime-progress": "node --import tsx scripts/test-runtime-progress.mjs",
     "test:page-preferences": "node --import tsx scripts/test-page-preferences.mjs",

@@ -50,6 +50,9 @@ await fsp.mkdir(path.join(staging, "desktop"), { recursive: true });
 await fsp.mkdir(path.join(staging, "build"), { recursive: true });
 await fsp.mkdir(runtime, { recursive: true });
 
+await run(process.execPath, ["--import", "tsx", path.join(root, "scripts", "prepare-node-toolchain.mjs"), path.join(runtime, "toolchains", "node")], root);
+await fsp.rm(path.join(runtime, "toolchains", ".downloads"), { recursive: true, force: true });
+
 console.log(`[desktop] output: ${versionRoot}`);
 console.log("[desktop] compiling web and backend");
 await runNpm(["run", "build"], root);

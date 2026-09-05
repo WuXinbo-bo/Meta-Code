@@ -177,8 +177,8 @@ export function createProviderControlSnapshot(input: ProviderControlSnapshotInpu
   let connectionMessage = runtime.message || "CLI 不可用";
 
   if (runtime.available && transport === "native" && !profile) {
-    status = "ready";
-    connectionMessage = "原生增强运行时可用，正在使用兼容配置";
+    status = "attention";
+    connectionMessage = "CLI 已安装，请配置账号或 API 并测试连接";
   } else if (runtime.available && transport === "native" && profile?.healthStatus === "ready") {
     status = "ready";
     connectionMessage = profile.healthMessage || "账号与连接已验证";
@@ -225,8 +225,8 @@ export function createProviderControlSnapshot(input: ProviderControlSnapshotInpu
           ? runtime.managed?.installed ? "installed" : "missing"
           : status === "ready"
             ? "ready"
-            : transport === "acp" ? "needs-connection" : "installed",
-      installed: transport === "native" || runtime.available || Boolean(runtime.managed?.installed),
+            : "needs-connection",
+      installed: runtime.available || Boolean(runtime.managed?.installed),
       runtimeAvailable: runtime.available,
       version: runtime.version || "",
       source: runtime.source,

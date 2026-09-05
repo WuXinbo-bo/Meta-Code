@@ -1,5 +1,6 @@
 import { Component, Suspense, lazy, memo, startTransition, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { runtimeInstallationAction, type InstallationRuntime } from "./runtimeInstallation";
 import {
   ArrowDown,
   ArrowLeft,
@@ -374,7 +375,7 @@ function normalizeRuntimeConfiguration(configuration?: Partial<RuntimeConfigurat
     selections: Object.fromEntries(runtimeIds.map((id) => [id, normalizeSelection(id)]))
   };
 }
-type CodexRuntimeStatus = {
+type CodexRuntimeStatus = InstallationRuntime & {
   available: boolean;
   source: "configured" | "bundled" | "runtime" | "system" | "missing";
   path: string;
@@ -384,7 +385,7 @@ type CodexRuntimeStatus = {
   message: string;
   selectionMode?: RuntimeUseMode;
   candidates?: Array<{ source: "configured" | "bundled" | "runtime" | "system" | "missing"; path: string; version: string; label: string }>;
-  managed: { installed: boolean; activeVersion: string; installedVersions: string[] };
+  managed: { installed: boolean; healthy?: boolean; activeVersion: string; installedVersions: string[] };
 };
 type RuntimeUpdateStatus = {
   runtimeId: CliRuntimeId;
@@ -6009,6 +6010,7 @@ function SettingsView({
         try {
           const status = await api<CodexRuntimeStatus>(`/api/runtime/${progress.runtimeId}/status`);
           setRuntimeStatus(progress.runtimeId, status);
+          if (status.selectionMode) setForm((current) => ({ ...current, runtime: { ...current.runtime, selections: { ...current.runtime.selections, [progress.runtimeId]: { mode: status.selectionMode!, customPath: "", systemPath: "" } } } }));
           const update = await api<RuntimeUpdateStatus>(`/api/runtime/${progress.runtimeId}/check-update`, { method: "POST", timeoutMs: 60_000 });
           setRuntimeUpdates((current) => ({ ...current, [progress.runtimeId]: update }));
         } catch { /* The persisted completion remains visible if refresh fails. */ }
@@ -6154,13 +6156,14 @@ function SettingsView({
       setSaveState("error");
     }
   };
-  const startRuntimeInstall = async (runtimeId: CliRuntimeId) => {
+  const startRuntimeInstall = async (runtimeId: CliRuntimeId, repair = false) => {
+    if (!await confirmAction(repair ? "重新安装托管 CLI，保留账号配置和任务数据。" : "安装完成后将使用工作台托管的 CLI，现有系统安装保持不变。", { title: repair ? "修复 CLI" : "安装 CLI", confirmLabel: repair ? "重新安装" : "开始安装" })) return;
     if (runtimeId === "codex") { setInstallingCodexRuntime(true); setCodexRuntimeNotice("正在提交安装任务"); }
     else if (runtimeId === "claude") { setInstallingClaudeRuntime(true); setClaudeRuntimeNotice("正在提交安装任务"); }
     else setRuntimeNotice(runtimeId, "正在提交安装任务");
     try {
       const version = runtimeUpdates[runtimeId]?.latestVersion;
-      const result = await api<{ accepted: boolean; progress: RuntimeInstallProgress | null }>(`/api/runtime/${runtimeId}/install`, { method: "POST", body: JSON.stringify({ version }) });
+      const result = await api<{ accepted: boolean; progress: RuntimeInstallProgress | null }>(`/api/runtime/${runtimeId}/install`, { method: "POST", body: JSON.stringify({ version, repair }) });
       if (result.progress) recordRuntimeProgress(result.progress);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -6280,13 +6283,19 @@ function SettingsView({
     const currentVersion = mode === "managed" ? managed.activeVersion || runtimeVersionNumber(status.version || "") : runtimeVersionNumber(status.version || "");
     const updateCopy = !updateStatus ? (mode === "managed" && !managed.installed ? "尚未安装，将安装公开最新版" : "尚未检查公开版本") : updateStatus.state === "latest" ? "已是最新版" : updateStatus.state === "available" ? `可更新至 ${updateStatus.latestVersion}` : updateStatus.state === "not-installed" ? `将安装 ${updateStatus.latestVersion}` : updateStatus.state === "newer-local" ? "本地版本高于公开最新版" : `公开最新版 ${updateStatus.latestVersion}，外部安装不会被修改`;
     const providerControl = providerControls.find((control) => control.providerId === runtimeId);
+    const installation = runtimeInstallationAction(status);
+    const pendingSource = Boolean(status.selectionMode && status.selectionMode !== mode);
     return <section className="settings-provider-panel runtime-provider-panel" key={runtimeId}>
       <header><ProviderIcon provider={runtimeId} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={22} /><span><strong>{label}</strong><small>{status.version || "尚未检测版本"}</small></span><div className={`runtime-health ${status.available ? "ready" : "missing"}`}><i />{status.available ? "可用" : "未连接"}</div><i className={`runtime-source-badge ${status.available ? "ready" : "missing"}`}>{runtimeSourceLabel(status)}</i></header>
       <div className="settings-grid">
         {runtimeChoicePanel(runtimeId, status)}
-        {!status.available && <p className="runtime-inline-note wide">{status.message}</p>}
+        {pendingSource ? <p className="runtime-inline-note wide">请填写并应用路径，验证后生效；也可以直接安装到工作台。</p> : !status.available && <p className="runtime-inline-note wide">{status.message}</p>}
         <div className="runtime-version-row wide"><div><span>当前版本</span><strong>{currentVersion || "未安装"}</strong>{updateStatus?.latestVersion && <small>公开版 {updateStatus.latestVersion}</small>}</div><div className={`runtime-update-state ${updateStatus?.state === "latest" ? "ready" : updateStatus?.state === "available" || updateStatus?.state === "not-installed" ? "available" : ""}`}>{updateStatus?.state === "latest" && <Check size={13} />}{updateCopy}</div></div>
-        <div className="runtime-actions wide"><button type="button" disabled={checkingUpdate || installing} onClick={() => void checkRuntimeUpdate(runtimeId)}><RefreshCw className={checkingUpdate ? "spin" : ""} size={14} />{checkingUpdate ? "正在检查" : updateStatus ? "重新检查" : mode === "managed" && !managed.installed ? "查看最新版" : "检查版本"}</button>{mode === "managed" && !managed.installed && <button type="button" className="primary" disabled={!status.npmAvailable || installing} onClick={() => void startRuntimeInstall(runtimeId)}><Download size={14} />{installing ? "安装中" : updateStatus?.latestVersion ? `安装 ${updateStatus.latestVersion}` : "安装最新版"}</button>}{mode === "managed" && managed.installed && updateStatus?.action === "update" && <button type="button" className="primary" disabled={!status.npmAvailable || installing} onClick={() => void startRuntimeInstall(runtimeId)}><Download size={14} />{installing ? "更新中" : `更新到 ${updateStatus.latestVersion}`}</button>}</div>
+        <div className="runtime-actions wide">
+          <button type="button" disabled={checkingUpdate || installing || pendingSource} onClick={() => void checkRuntimeUpdate(runtimeId)}><RefreshCw className={checkingUpdate ? "spin" : ""} size={14} />{checkingUpdate ? "正在检查" : updateStatus ? "重新检查" : "检查版本"}</button>
+          {(!managed.installed || installation.repair) && <button type="button" className="primary" disabled={!installation.supported || installing} onClick={() => void startRuntimeInstall(runtimeId, installation.repair)}><Download size={14} />{installing ? "处理中" : installation.label}</button>}
+          {mode === "managed" && managed.installed && !installation.repair && updateStatus?.action === "update" && <button type="button" className="primary" disabled={!installation.supported || installing} onClick={() => void startRuntimeInstall(runtimeId)}><Download size={14} />{installing ? "更新中" : `更新到 ${updateStatus.latestVersion}`}</button>}
+        </div>
         {runtimeProgressPanel(runtimeId)}
         {notice && notice !== runtimeInstallFeeds[runtimeId].progress?.message && <p className={`settings-runtime-note wide ${/失败|错误|不可用|未找到/.test(notice) ? "error" : "success"}`}>{notice}</p>}
         <div className="runtime-path-line wide"><span>路径</span><code title={status.path}>{status.path || "尚未检测到可用 CLI"}</code></div>
@@ -6319,7 +6328,7 @@ function SettingsView({
     <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={setSettingsSection} onAgentPageChange={setAiSettingsPage} />
     <div className="settings-page-content">
     {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
-    {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId) => { onProviderChange(providerId); setAiSettingsPage("providers"); window.setTimeout(() => document.getElementById("native-provider-settings")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0); }} /></div>}
+    {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId, runtime) => { onProviderChange(providerId); setAiSettingsPage(runtime ? "runtime" : "providers"); }} /></div>}
     {settingsSection === "ai" && aiSettingsPage === "overview" && <div className="settings-section settings-agent-overview">
       <div className="settings-page-heading"><h2>Agent 总览</h2><p>设置默认主脑，并查看所有已连接 Agent 的运行状态。</p></div>
       <div className="settings-default-engine"><div><strong>默认主脑</strong><span>新任务默认使用的 Agent；任务内仍可随时切换，协作模式由工作区 Skill 管理。</span>{selectedDefaultControl && !selectedDefaultEligible && <small>{selectedDefaultControl.connection.message}</small>}</div><select value={form.defaultEngine} onChange={(event) => update("defaultEngine", event.target.value)}>{selectedDefaultControl && !selectedDefaultEligible && <option value={selectedDefaultControl.providerId} disabled>{selectedDefaultControl.identity.shortName}（待连接）</option>}{eligibleDefaultControls.map((control) => <option key={control.providerId} value={control.providerId}>{control.identity.shortName}</option>)}</select></div>

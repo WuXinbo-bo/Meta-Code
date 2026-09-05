@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Download, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, Download, ExternalLink, LoaderCircle, RefreshCw, Search, Settings2, Undo2, Wrench } from "lucide-react";
+import { confirmAction } from "../components/ConfirmationProvider";
+import { runtimeInstallationAction, type InstallationRuntime } from "../runtimeInstallation";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import { ProviderConnectionControl } from "./ProviderConnectionControl";
 import type { ProviderControlSnapshot } from "../providers/types";
 
-type MarketRuntimeStatus = {
+type MarketRuntimeStatus = InstallationRuntime & {
   available: boolean;
   source: "configured" | "bundled" | "runtime" | "system" | "missing";
   version: string;
   path: string;
   message: string;
-  managed: { installed: boolean; activeVersion: string; installedVersions: string[] };
+  managed: { installed: boolean; healthy?: boolean; activeVersion: string; installedVersions: string[] };
 };
 
 type MarketInstallProgress = {
@@ -56,6 +58,7 @@ type MarketItem = {
 };
 
 type MarketResponse = {
+  registryWarning?: string;
   registryVersion: string;
   registrySource: "network" | "cache";
   items: MarketItem[];
@@ -96,7 +99,7 @@ function MarketIcon({ item, size = 28 }: { item: MarketItem; size?: number }) {
   return <ProviderIcon provider={item.id} icon={item.icon} accent={item.accent} size={size} className="agent-market-icon" />;
 }
 
-export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(providerId: "codex" | "claude"): void }) {
+export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(providerId: "codex" | "claude", runtime?: boolean): void }) {
   const [market, setMarket] = useState<MarketResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -129,9 +132,10 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
       }
     };
     const unsubscribeChanged = realtimeCoordinator.subscribe("agent-market.changed", changed);
+    const unsubscribeRuntime = realtimeCoordinator.subscribe("runtime.changed", changed);
     const unsubscribeInstall = realtimeCoordinator.subscribe("agent-market.install", install);
     const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => void loadMarket());
-    return () => { unsubscribeChanged(); unsubscribeInstall(); unsubscribeReconcile(); };
+    return () => { unsubscribeChanged(); unsubscribeRuntime(); unsubscribeInstall(); unsubscribeReconcile(); };
   }, [loadMarket]);
 
   const selected = market?.items.find((item) => item.id === selectedId) || null;
@@ -168,19 +172,22 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
     });
   }, [market?.items, filter, query]);
 
-  const runAction = async (action: "install" | "update" | "rollback") => {
+  const runAction = async (action: "install" | "update" | "rollback" | "repair") => {
     if (!selected) return;
+    if (action === "repair" && !await confirmAction("重新安装工作台托管的 CLI，账号配置和任务数据保持不变。系统安装不会被修改。", { title: "修复 CLI", confirmLabel: "重新安装" })) return;
     setActionBusy(action);
     setActionNotice("");
     try {
-      await marketApi(`/api/agent-market/${encodeURIComponent(selected.id)}/${action}`, { method: "POST", body: "{}" });
-      setActionNotice(action === "rollback" ? "已回退到上一版本" : action === "update" ? "更新任务已开始" : "安装任务已开始");
+      const result = await marketApi<{ accepted?: boolean; update?: { state: string } }>(`/api/agent-market/${encodeURIComponent(selected.id)}/${action}`, { method: "POST", body: "{}" });
+      setActionNotice(action === "rollback" ? "已回退到上一版本" : action === "update" ? result.accepted ? "更新任务已开始" : result.update?.state === "external" ? "正在使用外部 CLI，可在运行环境中安装托管副本" : "当前版本无需更新" : action === "repair" ? "重新安装已开始" : "安装任务已开始");
       await loadMarket();
     } catch (cause) { setActionNotice(cause instanceof Error ? cause.message : String(cause)); }
     finally { setActionBusy(""); }
   };
 
   const progress = selected ? installProgress[selected.id] : null;
+  const selectedRuntime = selected ? market?.runtimes[selected.id] : undefined;
+  const installation = runtimeInstallationAction(selectedRuntime);
   const percent = progress?.totalBytes ? Math.min(100, Math.round((progress.downloadedBytes || 0) / progress.totalBytes * 100)) : null;
 
   return <div className="agent-market-settings">
@@ -195,6 +202,7 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
       </div>
     </div>
     {error && <div className="agent-market-error">{error}</div>}
+    {market?.registryWarning && <div className="agent-market-notice">{market.registryWarning}</div>}
     <div className={`agent-market-layout ${detailOpen ? "detail-open" : ""}`}>
       <div className="agent-market-list" aria-busy={loading}>
         {loading && !market ? <div className="agent-market-loading"><LoaderCircle className="spin" size={18} />正在读取市场</div> : visibleItems.map((item) => {
@@ -219,8 +227,14 @@ export function AgentMarketSettings({ onNativeConfigure }: { onNativeConfigure(p
         {selectedInstall?.active && <div className="agent-market-progress"><div><span>{selectedInstall.message}</span>{percent !== null && <b>{percent}%</b>}</div><i>{percent !== null ? <span style={{ width: `${percent}%` }} /> : <span className="indeterminate" />}</i>{progress?.downloadedBytes ? <small>{bytes(progress.downloadedBytes)}{progress.totalBytes ? ` / ${bytes(progress.totalBytes)}` : ""}{progress.bytesPerSecond ? ` · ${bytes(progress.bytesPerSecond)}/s` : ""}</small> : null}</div>}
         {selectedInstall?.phase === "failed" && <div className="agent-market-error">{selectedInstall.message}</div>}
         <div className="agent-market-actions">
-          {selected.native ? <button type="button" onClick={() => onNativeConfigure(selected.id as "codex" | "claude")}><Settings2 size={14} />配置</button> : !selected.installed ? <button type="button" className="primary" disabled={!selected.installable || Boolean(selectedInstall?.active) || Boolean(actionBusy)} title={selected.installReason} onClick={() => void runAction("install")}><Download size={14} />{actionBusy === "install" ? "提交中" : "安装"}</button> : <><button type="button" disabled={Boolean(selectedInstall?.active) || Boolean(actionBusy)} onClick={() => void runAction("update")}><RefreshCw className={actionBusy === "update" ? "spin" : ""} size={14} />检查更新</button>{(market?.runtimes[selected.id]?.managed.installedVersions.length || 0) > 1 && <button type="button" disabled={Boolean(actionBusy)} onClick={() => void runAction("rollback")}><Undo2 size={14} />回退</button>}</>}
+          {!selected.installed ? <button type="button" className="primary" disabled={!selected.installable || !installation.supported || Boolean(selectedInstall?.active) || Boolean(actionBusy)} title={selected.installReason} onClick={() => void runAction("install")}><Download size={14} />{actionBusy === "install" ? "提交中" : "安装"}</button> : <>
+            {(installation.repair || !selectedRuntime?.available) && <button type="button" className="primary" disabled={!installation.supported || Boolean(selectedInstall?.active) || Boolean(actionBusy)} onClick={() => void runAction("repair")}><Wrench size={14} />重新安装修复</button>}
+            {selectedRuntime?.available && <button type="button" disabled={Boolean(selectedInstall?.active) || Boolean(actionBusy)} onClick={() => void runAction("update")}><RefreshCw className={actionBusy === "update" ? "spin" : ""} size={14} />检查更新</button>}
+            {(selectedRuntime?.managed.installedVersions.length || 0) > 1 && <button type="button" disabled={Boolean(selectedInstall?.active) || Boolean(actionBusy)} onClick={() => void runAction("rollback")}><Undo2 size={14} />回退</button>}
+          </>}
+          {selected.native && <button type="button" onClick={() => onNativeConfigure(selected.id as "codex" | "claude", !selectedRuntime?.available)}><Settings2 size={14} />{selectedRuntime?.available ? "配置账号 / API" : "使用已有 CLI"}</button>}
         </div>
+        {installation.environmentMessage && <small className="agent-market-reason">{installation.environmentMessage}</small>}
         {!selected.native && !selected.installed && <small className="agent-market-reason">{selected.installReason}</small>}
         {!selected.native && selected.installed && <ProviderConnectionControl providerId={selected.id} />}
         {actionNotice && <div className="agent-market-notice">{actionNotice}</div>}

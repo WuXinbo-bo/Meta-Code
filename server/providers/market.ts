@@ -169,15 +169,19 @@ export class AgentMarketStore {
     return agent;
   }
 
-  async catalog(native: Array<{ id: "codex" | "claude"; name: string; version: string; description: string; icon?: string }>, force = false) {
-    const { document, source } = await this.registry(force);
+  async catalog(native: Array<{ id: "codex" | "claude"; name: string; version: string; description: string; icon?: string; installed?: boolean }>, force = false) {
+    let registryWarning = "";
+    const { document, source } = await this.registry(force).catch(() => {
+      registryWarning = "暂时无法连接市场，仍可安装内置 Agent；请稍后刷新其他条目";
+      return { document: { version: "local", agents: this.installed().map((item) => item.agent) }, source: "cache" as const };
+    });
     const installedIds = new Set(this.installed().map((item) => item.agent.id));
     const nativeItems: AgentMarketCatalogItem[] = native.map((item) => ({
-      ...item, authors: [], license: "native", transport: "native", native: true, installed: true,
+      ...item, authors: [], license: "native", transport: "native", native: true, installed: Boolean(item.installed),
       accent: item.id === "claude" ? "#d97757" : "#111111",
-      installable: false, installReason: "工作台原生增强 Provider", distributionTypes: ["native"], ...curation(item.id)
+      installable: true, installReason: "安装官方 CLI，保留原生增强能力", distributionTypes: ["npm"], ...curation(item.id)
     }));
-    const registryItems = document.agents.filter((agent) => !NATIVE_WRAPPER_IDS.has(agent.id)).map((agent): AgentMarketCatalogItem => {
+    const registryItems = document.agents.filter((agent) => !NATIVE_WRAPPER_IDS.has(agent.id) && !NATIVE_IDS.has(agent.id)).map((agent): AgentMarketCatalogItem => {
       const availability = installability(agent);
       return {
         id: agent.id, name: agent.name, version: agent.version, description: agent.description,
@@ -188,6 +192,6 @@ export class AgentMarketStore {
       };
     });
     const items = [...nativeItems, ...registryItems].sort((left, right) => left.rank - right.rank || left.name.localeCompare(right.name));
-    return { schemaVersion: 2 as const, registryVersion: document.version, registrySource: source, items };
+    return { schemaVersion: 2 as const, registryVersion: document.version, registrySource: source, registryWarning, items };
   }
 }

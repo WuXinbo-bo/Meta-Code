@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 const packageJson = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
 const environmentDependent = new Set([
   "test:ci",
+  "test:cli-clean-desktop",
   "test:workflow-codex-real",
   "test:workflow-claude-permissions",
   "test:claude-real",

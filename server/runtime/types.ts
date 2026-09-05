@@ -10,6 +10,7 @@ export type RuntimeStatus = {
   path: string;
   version: string;
   npmAvailable: boolean;
+  installation?: { supported: boolean; environment: "ready" | "preparable" | "unsupported"; requiresNpm: boolean };
   networkRequired: boolean;
   message: string;
   managedVersion?: string;
@@ -17,6 +18,7 @@ export type RuntimeStatus = {
   candidates?: RuntimeCandidate[];
   managed: {
     installed: boolean;
+    healthy?: boolean;
     activeVersion: string;
     installedVersions: string[];
   };
@@ -31,6 +33,7 @@ export type RuntimeInstallCandidate = {
 };
 
 export type RuntimeInstallOptions = {
+  repair?: boolean;
   ensureCanActivate?: () => void | Promise<void>;
   certify?: (candidate: RuntimeInstallCandidate) => void | Promise<void>;
 };

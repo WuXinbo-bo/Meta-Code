@@ -8,6 +8,7 @@ import { AGENT_ADAPTER_SDK_VERSION, type AgentProviderManifestV1 } from "../../a
 import { acpRegistryPlatform, type AcpRegistryAgent } from "./registry.js";
 import type { AcpLaunchSpec } from "../types.js";
 import { providerBrandAccent } from "../branding.js";
+import { agentNodeExecutable } from "../../runtime/nodeEnvironment.js";
 
 const execFileAsync = promisify(execFile);
 const COMMAND_NAMES: Record<string, string> = {
@@ -118,7 +119,7 @@ export function acpLaunchSpecForRuntime(agent: AcpRegistryAgent, executable: str
   const env = safeAcpRegistryEnv(distribution.env);
   const isNodeScript = Boolean(agent.distribution.npx) && !/\.(?:exe|cmd|bat)$/i.test(executable);
   return {
-    command: isNodeScript ? process.execPath : executable,
+    command: isNodeScript ? agentNodeExecutable() : executable,
     args: isNodeScript ? [executable, ...args] : args,
     ...(Object.keys(env).length ? { env } : {}),
     registryId: agent.id,
