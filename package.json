@@ -52,6 +52,7 @@
     "test:composer-provider": "node --import tsx scripts/test-composer-provider-configuration.mjs",
     "test:runtime-archives": "node --import tsx scripts/test-runtime-archives.mjs",
     "test:activity-diff": "node --import tsx scripts/test-activity-diff.mjs",
+    "test:git-service": "npm run build && node scripts/test-git-service.mjs",
     "test:app-server-events": "node --import tsx scripts/test-app-server-events.mjs",
     "test:codex-item-identity": "node --import tsx scripts/test-codex-item-identity.mjs",
     "test:session-input-queue": "node --import tsx scripts/test-session-input-queue.mjs",

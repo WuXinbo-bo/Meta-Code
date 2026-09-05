@@ -68,6 +68,7 @@ import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTra
 import { normalizeSessionScope } from "./sessionScope.js";
 import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
 import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
+import { readBranches, readCommitDiff, readCommits, readGitSnapshot, readWorkspaceDiff } from "./git/service.js";
 import { previewDocx } from "./docxPreview.js";
 import { DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES, readMarkdownPreviewPage } from "./markdownPreview.js";
 import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, TEXT_PREVIEW_EXTENSIONS, looksLikeTextPreview } from "./filePreviewTypes.js";
@@ -9205,6 +9206,47 @@ app.get("/api/workspaces/:id/file-diff", async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }
+});
+
+async function gitWorkspaceRoot(workspace: Workspace) {
+  const root = await readGitSnapshot(workspace.root);
+  if (!isPathInside(workspace.root, root.root, true)) throw new Error("Git 仓库根目录必须位于当前工作区内");
+  return root.root;
+}
+
+app.get("/api/workspaces/:id/git/status", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.get("/api/workspaces/:id/git/branches", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json(await readBranches(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.get("/api/workspaces/:id/git/commits", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json({ commits: await readCommits(workspace.root, Number(req.query.limit || 200)) }); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.get("/api/workspaces/:id/git/diff", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json({ diff: await readWorkspaceDiff(workspace.root, req.query.staged === "1") }); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.get("/api/workspaces/:id/git/commits/:sha/diff", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json({ diff: await readCommitDiff(workspace.root, req.params.sha) }); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
 });
 
 app.post("/api/workspaces/:id/files/move", async (req, res) => {

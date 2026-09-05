@@ -118,6 +118,7 @@ import { PendingTurnTray } from "./chat/PendingTurnTray";
 import { OperationCenter } from "./components/OperationCenter";
 import { confirmAction } from "./components/ConfirmationProvider";
 import { WorkspaceDropZone } from "./workspaces/WorkspaceDropZone";
+import { GitWorkbench } from "./git/GitWorkbench";
 import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
 import type { AgentProviderDescriptor } from "./agents/types";
@@ -2039,7 +2040,7 @@ export function App() {
   const [sessionContextMenu, setSessionContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [sessionAreaMenu, setSessionAreaMenu] = useState<{ x: number; y: number } | null>(null);
   const [taskFolderMenu, setTaskFolderMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const [view, setView] = useState<"chat" | "agents" | "mcp" | "settings">("chat");
+  const [view, setView] = useState<"chat" | "agents" | "mcp" | "settings" | "git">("chat");
   const [activeWorkflowId, setActiveWorkflowId] = useState("");
   const [workflowDraftOpen, setWorkflowDraftOpen] = useState(false);
   const activeTaskKindRef = useRef<typeof activeTaskKind>(null);
@@ -4650,6 +4651,7 @@ export function App() {
         <div className="activity-secondary">
           <button type="button" className={view === "agents" ? "active" : ""} aria-label="Skill 中心" title="Skill 中心" onClick={() => { cancelSessionNavigation(); setView("agents"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Sparkles size={19} /></button>
           <button type="button" className={view === "mcp" ? "active" : ""} aria-label="MCP" title="MCP" onClick={() => { cancelSessionNavigation(); setView("mcp"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Plug size={19} /></button>
+          <button type="button" className={view === "git" ? "active" : ""} aria-label="版本管理" title="版本管理" onClick={() => { cancelSessionNavigation(); setView("git"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><GitBranch size={19} /></button>
           <button type="button" className={view === "settings" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
           <HelpButton topic="getting-started" />
         </div>
@@ -4736,7 +4738,7 @@ export function App() {
         <header className="topbar">
           {view !== "chat" && <IconButton label="返回任务" onClick={() => setView("chat")}><ArrowLeft size={18} /></IconButton>}
           <div className="title-block">
-            <strong>{view === "chat" ? activeWorkspaceBrowserTab?.title || (workflowDraftOpen ? "Meta 任务编排" : activeWorkflowId ? data.workflows.find((item) => item.id === activeWorkflowId)?.title : activeSession?.title) || "新任务" : view === "agents" ? "Skill 中心" : view === "mcp" ? "MCP" : "设置"}</strong>
+            <strong>{view === "chat" ? activeWorkspaceBrowserTab?.title || (workflowDraftOpen ? "Meta 任务编排" : activeWorkflowId ? data.workflows.find((item) => item.id === activeWorkflowId)?.title : activeSession?.title) || "新任务" : view === "agents" ? "Skill 中心" : view === "mcp" ? "MCP" : view === "git" ? "版本管理" : "设置"}</strong>
             <span>{view === "chat" && activeWorkspaceBrowserTab?.detail ? activeWorkspaceBrowserTab.detail : workspace?.root || "请添加一个工作区"}</span>
           </div>
           {displayedSession?.status === "running" && <div className="run-status"><LoaderCircle className="spin" size={13} />执行中</div>}
@@ -5183,6 +5185,7 @@ export function App() {
           }} />
         )}
         {view === "mcp" && <McpView servers={data.mcpServers || []} workspaces={data.workspaces} activeWorkspaceId={activeWorkspaceId} onChanged={refresh} onNotice={setNotice} />}
+        {view === "git" && <GitWorkbench workspaceId={activeWorkspaceId} />}
         {view === "settings" && <RecoverableSectionBoundary resetKey={`${settingsTarget}:${settingsProvider}`} title="设置页面暂时无法显示"><SettingsView
           initialSection={settingsTarget}
           settings={data.settings}
