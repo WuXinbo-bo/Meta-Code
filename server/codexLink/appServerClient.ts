@@ -221,7 +221,7 @@ export class CodexAppServerClient {
       clientInfo: {
         name: "meta_code_workbench",
         title: "Meta Code Workbench",
-        version: process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development"
+        version: "0.1.3"
       }
     }, 15_000);
     this.sendNotification("initialized", {});

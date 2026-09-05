@@ -374,7 +374,6 @@ type CodexRuntimeStatus = RuntimeStatus;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const APP_VERSION = process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development";
 const APP_PATHS = resolveWorkbenchPaths(ROOT);
 const PORT = Number(process.env.PORT || 4338);
 const DATA_OWNER_LEASE = WorkbenchDataOwnerLease.acquire(APP_PATHS.dataDir, {
@@ -1824,7 +1823,7 @@ async function testMcpConnection(server: McpServer, workspace: Workspace) {
       : new StreamableHTTPClientTransport(new URL(server.url!), { fetch: fetchWithHeaders, requestInit: { headers: server.headers || {} } });
   let stderr = "";
   if (transport instanceof StdioClientTransport && transport.stderr) transport.stderr.on("data", (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-8_000); });
-  const client = new McpClient({ name: "meta-code", version: APP_VERSION });
+  const client = new McpClient({ name: "meta-code", version: "0.1.3" });
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
@@ -10643,7 +10642,7 @@ app.get("/api/data/diagnostics/export", auth.requireRoles("owner", "admin"), asy
     const payload = {
       schemaVersion: 1,
       product: "Meta Code",
-      appVersion: APP_VERSION,
+      appVersion: process.env.METACODE_APP_VERSION || process.env.npm_package_version || "development",
       generatedAt: new Date().toISOString(),
       platform: { os: process.platform, arch: process.arch, node: process.version },
       summary: {
