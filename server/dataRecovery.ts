@@ -51,6 +51,35 @@ export type PersonalDataRestoreResult = {
 };
 
 const BACKUP_FILE = /^(workbench-state|auth)-([\w.-]+)\.db$/;
+const MOVE_RETRY_DELAYS = [100, 200, 400, 800, 1000, 1000];
+const moveWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+function retryDataMove(error: unknown, attempt: number) {
+  return process.platform === "win32" && attempt < MOVE_RETRY_DELAYS.length
+    && ["EPERM", "EACCES", "EBUSY"].includes(String((error as NodeJS.ErrnoException)?.code));
+}
+
+// Windows scanners can briefly retain a handle after verification closes a file.
+// Retry the atomic move, never emulate it by deleting the destination.
+async function renameDataPath(source: string, destination: string) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { await fsp.rename(source, destination); return; }
+    catch (error) {
+      if (!retryDataMove(error, attempt)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, MOVE_RETRY_DELAYS[attempt]));
+    }
+  }
+}
+
+function renameDataPathSync(source: string, destination: string) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { fs.renameSync(source, destination); return; }
+    catch (error) {
+      if (!retryDataMove(error, attempt)) throw error;
+      Atomics.wait(moveWaitBuffer, 0, 0, MOVE_RETRY_DELAYS[attempt]);
+    }
+  }
+}
 
 export function completeBackupGroups(backupDir: string): BackupGroup[] {
   if (!fs.existsSync(backupDir)) return [];
@@ -202,7 +231,7 @@ export async function createPersonalDataBackup(input: {
     };
     await fsp.writeFile(path.join(temporary, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     certifyPersonalDataBackup(temporary);
-    await fsp.rename(temporary, destination);
+    await renameDataPath(temporary, destination);
 
     const retain = Math.max(1, input.retain ?? PERSONAL_BACKUP_RETENTION);
     const maxTotalBytes = Math.max(256 * 1024 * 1024, input.maxTotalBytes ?? 8 * 1024 * 1024 * 1024);
@@ -306,7 +335,7 @@ export function certifyPersonalDataBackup(directory: string) {
   const file = path.join(directory, "verification.json");
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(verification, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(temporary, file);
+  renameDataPathSync(temporary, file);
   return { manifest, verification };
 }
 
@@ -332,7 +361,7 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
       if (!fs.existsSync(live)) continue;
       const recovery = path.join(recoveryDir, name);
       fs.mkdirSync(path.dirname(recovery), { recursive: true });
-      fs.renameSync(live, recovery);
+      renameDataPathSync(live, recovery);
       moved.push({ from: recovery, to: live });
     }
     for (const name of names) {
@@ -340,7 +369,7 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
       if (!fs.existsSync(staged)) continue;
       const live = path.join(dataDir, name);
       fs.mkdirSync(path.dirname(live), { recursive: true });
-      fs.renameSync(staged, live);
+      renameDataPathSync(staged, live);
       installed.push(live);
     }
     for (const name of PERSONAL_DATA_DATABASES) {
@@ -353,7 +382,7 @@ export function restorePersonalDataBackup(input: { dataDir: string; backupDir?: 
     for (const target of installed.reverse()) fs.rmSync(target, { recursive: true, force: true });
     for (const item of moved.reverse()) {
       fs.mkdirSync(path.dirname(item.to), { recursive: true });
-      fs.renameSync(item.from, item.to);
+      renameDataPathSync(item.from, item.to);
     }
     fs.rmSync(stagingDir, { recursive: true, force: true });
     fs.rmSync(recoveryDir, { recursive: true, force: true });
@@ -382,7 +411,7 @@ export function rollbackPersonalDataRestore(result: PersonalDataRestoreResult) {
     const recovery = path.join(recoveryDir, name);
     if (!fs.existsSync(recovery)) continue;
     fs.mkdirSync(path.dirname(live), { recursive: true });
-    fs.renameSync(recovery, live);
+    renameDataPathSync(recovery, live);
   }
   for (const name of PERSONAL_DATA_DATABASES) {
     const file = path.join(dataDir, name);
@@ -397,7 +426,7 @@ export function finalizePersonalDataRestore(result: PersonalDataRestoreResult) {
 }
 
 function moveIfPresent(source: string, destination: string) {
-  if (fs.existsSync(source)) fs.renameSync(source, destination);
+  if (fs.existsSync(source)) renameDataPathSync(source, destination);
 }
 
 export function restoreWorkbenchBackup(input: { dataDir: string; backupDir?: string; stamp?: string }) {
@@ -446,9 +475,9 @@ export function restoreWorkbenchBackup(input: { dataDir: string; backupDir?: str
         moved.push({ from: destination, to: source });
       }
     }
-    fs.renameSync(stagedState, live.state);
+    renameDataPathSync(stagedState, live.state);
     replaced.add(live.state);
-    fs.renameSync(stagedAuth, live.auth);
+    renameDataPathSync(stagedAuth, live.auth);
     replaced.add(live.auth);
     verifySqliteDatabase(live.state);
     verifySqliteDatabase(live.auth);

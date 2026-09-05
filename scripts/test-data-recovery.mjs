@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -53,6 +54,12 @@ fs.mkdirSync(path.join(personalRoot, "profiles", "codex", "sessions"), { recursi
 fs.writeFileSync(path.join(personalRoot, "profiles", "codex", "sessions", "thread.jsonl"), "history");
 fs.mkdirSync(path.join(personalRoot, "runtimes", "codex"), { recursive: true });
 fs.writeFileSync(path.join(personalRoot, "runtimes", "codex", "large-runtime.bin"), "re-downloadable");
+const originalRename = fsp.rename;
+let publicationAttempts = 0;
+fsp.rename = async (...args) => {
+  if (process.platform === "win32" && String(args[0]).endsWith(".tmp") && publicationAttempts++ < 2) throw Object.assign(new Error("transient scanner lock"), { code: "EPERM" });
+  return originalRename(...args);
+};
 const personal = await createPersonalDataBackup({
   dataDir: personalRoot,
   appVersion: "0.1.2-dev",
@@ -61,15 +68,34 @@ const personal = await createPersonalDataBackup({
   databases: handles,
   retain: 2,
   maxTotalBytes: 512 * 1024 * 1024
-});
+}).finally(() => { fsp.rename = originalRename; });
+if (process.platform === "win32") assert.equal(publicationAttempts, 3, "backup publication must retry transient Windows locks");
 for (const item of handles) item.db.close();
 assert.equal(listPersonalDataBackups(path.join(personalRoot, "backups")).length, 1);
 assert.equal(verifyPersonalDataBackup(path.join(personalRoot, "backups", personal.name)).appVersion, "0.1.2-dev");
 assert.equal(listPersonalDataBackups(path.join(personalRoot, "backups"))[0].verification?.level, "restore-rehearsal", "published backups must already have a restore rehearsal receipt");
 assert.equal(fs.existsSync(path.join(personalRoot, "backups", personal.name, "data", "runtimes")), false, "managed runtimes are recoverable downloads, not personal data");
+for (const failureCode of process.platform === "win32" ? ["ENOSPC", "EPERM"] : ["ENOSPC"]) {
+  let attempts = 0;
+  fsp.rename = async () => { attempts += 1; throw Object.assign(new Error("persistent publication failure"), { code: failureCode }); };
+  try {
+    await assert.rejects(createPersonalDataBackup({ dataDir: personalRoot, appVersion: "test", dataSchemaVersion: 2, componentSchemas: {}, databases: [], retain: 1 }), /persistent publication failure/);
+  } finally { fsp.rename = originalRename; }
+  assert.equal(attempts, failureCode === "EPERM" ? 7 : 1, "only transient failures receive bounded retries");
+  assert.deepEqual(listPersonalDataBackups(path.join(personalRoot, "backups")).map(item => item.name), [personal.name], "failed publication must retain the previous certified backup");
+}
 fs.writeFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "changed");
 database(path.join(personalRoot, "temporary.db"), "unrelated");
-const personalRestore = restorePersonalDataBackup({ dataDir: personalRoot, name: personal.name });
+const originalRenameSync = fs.renameSync;
+let restoreAttempts = 0;
+fs.renameSync = (...args) => {
+  if (process.platform === "win32" && restoreAttempts++ < 2) throw Object.assign(new Error("transient restore lock"), { code: "EACCES" });
+  return originalRenameSync(...args);
+};
+let personalRestore;
+try { personalRestore = restorePersonalDataBackup({ dataDir: personalRoot, name: personal.name }); }
+finally { fs.renameSync = originalRenameSync; }
+if (process.platform === "win32") assert.ok(restoreAttempts > 2, "restore moves must retry transient Windows locks");
 assert.equal(fs.readFileSync(path.join(personalRoot, "credentials", "secrets.dat"), "utf8"), "encrypted-secret");
 assert.equal(marker(path.join(personalRoot, "codex-link.db")), "live-codex-link.db");
 assert.ok(personalRestore.restored.some((file) => file.endsWith("session-management.db")));
