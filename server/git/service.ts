@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { GitBranch, GitCommit, GitFileStatus, GitSnapshot } from "./types.js";
+import type { GitBranch, GitCommit, GitFileStatus, GitRemote, GitSnapshot } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT = 15_000;
@@ -90,6 +90,31 @@ export async function readBranches(workspaceRoot: string): Promise<GitBranch[]> 
     const name = fullName.replace(/^refs\/(heads|remotes)\//, "");
     return { name, fullName, remote, current: head === "*", upstream: upstream || undefined, ahead: Number(track.match(/ahead (\d+)/)?.[1] || 0), behind: Number(track.match(/behind (\d+)/)?.[1] || 0), subject, sha };
   });
+}
+
+export async function readRemotes(workspaceRoot: string): Promise<GitRemote[]> {
+  const root = await gitRoot(workspaceRoot);
+  const output = await runGit(root, ["remote", "-v"]);
+  const remotes = new Map<string, GitRemote>();
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^([^\s]+)\s+(.+?)\s+\((fetch|push)\)$/);
+    if (!match) continue;
+    const [, name, url, kind] = match;
+    const current = remotes.get(name) || { name, fetchUrl: "" };
+    if (kind === "fetch") current.fetchUrl = url;
+    else current.pushUrl = url;
+    remotes.set(name, current);
+  }
+  return [...remotes.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function fetchRemote(workspaceRoot: string, remoteName = "") {
+  const root = await gitRoot(workspaceRoot);
+  const remotes = await readRemotes(root);
+  const name = remoteName.trim() || remotes[0]?.name;
+  if (!name || !remotes.some((remote) => remote.name === name)) throw new Error("未找到可用的 Git 远程仓库");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) throw new Error("远程仓库名称无效");
+  await runGit(root, ["fetch", "--prune", "--no-tags", name], 60_000);
 }
 
 export async function readCommits(workspaceRoot: string, limit = 200): Promise<GitCommit[]> {

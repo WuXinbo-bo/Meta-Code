@@ -68,7 +68,7 @@ import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTra
 import { normalizeSessionScope } from "./sessionScope.js";
 import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
 import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
-import { checkoutBranch, commitFiles, createBranch, readBranches, readCommitDiff, readCommits, readGitSnapshot, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
+import { checkoutBranch, commitFiles, createBranch, fetchRemote, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
 import { previewDocx } from "./docxPreview.js";
 import { DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES, readMarkdownPreviewPage } from "./markdownPreview.js";
 import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, TEXT_PREVIEW_EXTENSIONS, looksLikeTextPreview } from "./filePreviewTypes.js";
@@ -9226,6 +9226,24 @@ app.get("/api/workspaces/:id/git/branches", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
   try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json(await readBranches(workspace.root)); }
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.get("/api/workspaces/:id/git/remotes", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); res.json(await readRemotes(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.post("/api/workspaces/:id/git/fetch", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    await fetchRemote(workspace.root, String(req.body?.remote || ""));
+    auth.auditRequest(req, { action: "workspace.git.fetch", targetType: "workspace", targetId: workspace.id });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ remotes: await readRemotes(workspace.root), branches: await readBranches(workspace.root), status: await readGitSnapshot(workspace.root) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-fetch-failed" }); }
 });
 
 app.get("/api/workspaces/:id/git/commits", async (req, res) => {

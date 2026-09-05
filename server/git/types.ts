@@ -30,6 +30,12 @@ export type GitCommit = {
   refs: string[];
 };
 
+export type GitRemote = {
+  name: string;
+  fetchUrl: string;
+  pushUrl?: string;
+};
+
 export type GitSnapshot = {
   isRepository: boolean;
   root: string;
