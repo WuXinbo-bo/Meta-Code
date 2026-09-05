@@ -18,6 +18,13 @@ async function runGit(root: string, args: string[], timeout = GIT_TIMEOUT) {
   }
 }
 
+function safePathspecs(paths: string[]) {
+  const normalized = [...new Set(paths.map((item) => String(item || "").replace(/\\/g, "/").trim()).filter(Boolean))];
+  if (!normalized.length) throw new Error("请选择至少一个文件");
+  for (const item of normalized) if (item.startsWith("/") || /^[A-Za-z]:\//.test(item) || item === ".." || item.startsWith("../") || item.includes("\0")) throw new Error("文件路径不在当前 Git 工作区内");
+  return normalized;
+}
+
 export async function gitRoot(input: string) {
   const root = path.resolve(input);
   const result = (await runGit(root, ["rev-parse", "--show-toplevel"], 5_000)).trim();
@@ -101,4 +108,36 @@ export async function readCommitDiff(workspaceRoot: string, sha: string) {
 export async function readWorkspaceDiff(workspaceRoot: string, staged = false) {
   const root = await gitRoot(workspaceRoot);
   return runGit(root, ["diff", ...(staged ? ["--cached"] : []), "--find-renames", "--no-ext-diff", "--patch"], 30_000);
+}
+
+export async function stageFiles(workspaceRoot: string, paths: string[]) {
+  const root = await gitRoot(workspaceRoot);
+  await runGit(root, ["add", "--", ...safePathspecs(paths)]);
+}
+
+export async function unstageFiles(workspaceRoot: string, paths: string[]) {
+  const root = await gitRoot(workspaceRoot);
+  await runGit(root, ["restore", "--staged", "--", ...safePathspecs(paths)]);
+}
+
+export async function commitFiles(workspaceRoot: string, message: string) {
+  const root = await gitRoot(workspaceRoot);
+  const subject = message.trim();
+  if (!subject) throw new Error("提交说明不能为空");
+  if (subject.length > 2000) throw new Error("提交说明过长");
+  await runGit(root, ["commit", "-m", subject], 30_000);
+}
+
+export async function createBranch(workspaceRoot: string, name: string) {
+  const root = await gitRoot(workspaceRoot);
+  const branch = name.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,89}$/.test(branch) || branch.endsWith("/") || branch.includes("..")) throw new Error("分支名称无效");
+  await runGit(root, ["switch", "-c", branch], 15_000);
+}
+
+export async function checkoutBranch(workspaceRoot: string, name: string) {
+  const root = await gitRoot(workspaceRoot);
+  const branch = name.trim();
+  if (!branch || branch.includes("\0") || branch.startsWith("-") || branch.includes("..")) throw new Error("分支名称无效");
+  await runGit(root, ["switch", branch], 15_000);
 }

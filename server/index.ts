@@ -68,7 +68,7 @@ import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTra
 import { normalizeSessionScope } from "./sessionScope.js";
 import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
 import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
-import { readBranches, readCommitDiff, readCommits, readGitSnapshot, readWorkspaceDiff } from "./git/service.js";
+import { checkoutBranch, commitFiles, createBranch, readBranches, readCommitDiff, readCommits, readGitSnapshot, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
 import { previewDocx } from "./docxPreview.js";
 import { DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES, readMarkdownPreviewPage } from "./markdownPreview.js";
 import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, TEXT_PREVIEW_EXTENSIONS, looksLikeTextPreview } from "./filePreviewTypes.js";
@@ -9247,6 +9247,41 @@ app.get("/api/workspaces/:id/git/commits/:sha/diff", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
   try { res.setHeader("Cache-Control", "no-store"); await gitWorkspaceRoot(workspace); res.json({ diff: await readCommitDiff(workspace.root, req.params.sha) }); }
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-unavailable" }); }
+});
+
+app.post("/api/workspaces/:id/git/stage", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { const paths = Array.isArray(req.body?.paths) ? req.body.paths : []; await stageFiles(workspace.root, paths); auth.auditRequest(req, { action: "workspace.git.stage", targetType: "workspace", targetId: workspace.id, summary: { count: paths.length } }); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/workspaces/:id/git/unstage", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { const paths = Array.isArray(req.body?.paths) ? req.body.paths : []; await unstageFiles(workspace.root, paths); auth.auditRequest(req, { action: "workspace.git.unstage", targetType: "workspace", targetId: workspace.id, summary: { count: paths.length } }); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/workspaces/:id/git/commit", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { await commitFiles(workspace.root, String(req.body?.message || "")); auth.auditRequest(req, { action: "workspace.git.commit", targetType: "workspace", targetId: workspace.id, summary: { messageLength: String(req.body?.message || "").length } }); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/workspaces/:id/git/branch", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { await createBranch(workspace.root, String(req.body?.name || "")); auth.auditRequest(req, { action: "workspace.git.branch.create", targetType: "workspace", targetId: workspace.id }); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/workspaces/:id/git/checkout", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { const current = await readGitSnapshot(workspace.root); if (current.files.length) throw new Error("当前工作树有未提交修改，请先暂存或提交后再切换分支"); await checkoutBranch(workspace.root, String(req.body?.name || "")); auth.auditRequest(req, { action: "workspace.git.checkout", targetType: "workspace", targetId: workspace.id }); res.json(await readGitSnapshot(workspace.root)); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.post("/api/workspaces/:id/files/move", async (req, res) => {

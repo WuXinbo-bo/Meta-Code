@@ -7,8 +7,8 @@ type GitStatus = { isRepository: boolean; root: string; branch: string; head: st
 type GitBranch = { name: string; fullName: string; remote: boolean; current: boolean; upstream?: string; ahead: number; behind: number; subject: string; sha: string };
 type GitCommit = { sha: string; shortSha: string; parents: string[]; author: string; authoredAt: string; subject: string; refs: string[] };
 
-async function request<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, { cache: "no-store", ...options });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || "Git 数据读取失败");
   return body as T;
@@ -34,6 +34,9 @@ export function GitWorkbench({ workspaceId }: { workspaceId: string }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
 
   const load = async (background = false) => {
     if (!workspaceId) return;
@@ -65,6 +68,12 @@ export function GitWorkbench({ workspaceId }: { workspaceId: string }) {
   }, [commits, query]);
   const localBranches = branches.filter((item) => !item.remote);
   const remoteBranches = branches.filter((item) => item.remote);
+  const mutate = async (path: string, body: unknown) => {
+    setActionBusy(true); setError("");
+    try { await request<GitStatus>(`/api/workspaces/${encodeURIComponent(workspaceId)}/git/${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }); setSelectedPaths([]); await load(true); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setActionBusy(false); }
+  };
 
   if (loading) return <section className="git-workbench git-state"><LoaderCircle className="spin" size={18} /><strong>正在读取版本管理</strong><span>检测 Git 仓库、当前分支和最近提交…</span></section>;
   if (error) return <section className="git-workbench git-state git-error"><AlertTriangle size={22} /><strong>无法读取版本管理</strong><span>{error}</span><button type="button" onClick={() => void load()}><RefreshCw size={14} />重试</button></section>;
@@ -78,6 +87,6 @@ export function GitWorkbench({ workspaceId }: { workspaceId: string }) {
       <div className="git-history"><div className="git-panel-title"><strong>提交历史</strong><span>{filteredCommits.length}</span></div><label className="git-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提交、作者或分支" />{query && <button type="button" aria-label="清除搜索" onClick={() => setQuery("")}><X size={13} /></button>}</label><div className="git-commit-list">{filteredCommits.map((commit) => <button type="button" className={`git-commit-row ${selectedSha === commit.sha ? "selected" : ""}`} key={commit.sha} onClick={() => setSelectedSha(commit.sha)}><span className="git-graph-node"><i /></span><span className="git-commit-copy"><strong>{commit.subject || "（无提交说明）"}</strong><small>{commit.author} · {relativeTime(commit.authoredAt)}</small><em>{commit.refs.length ? commit.refs.join(" · ") : commit.shortSha}</em></span></button>)}{!filteredCommits.length && <p className="git-empty">没有匹配的提交</p>}</div></div>
       <aside className="git-detail"><div className="git-panel-title"><strong>提交详情</strong></div>{selectedSha ? (() => { const commit = commits.find((item) => item.sha === selectedSha); if (!commit) return null; return <><div className="git-detail-heading"><GitCommitHorizontal size={17} /><strong>{commit.subject}</strong><code>{commit.shortSha}</code></div><dl className="git-detail-meta"><div><dt>作者</dt><dd>{commit.author}</dd></div><div><dt>时间</dt><dd>{relativeTime(commit.authoredAt)}</dd></div><div><dt>父提交</dt><dd>{commit.parents.length ? commit.parents.map((parent) => parent.slice(0, 8)).join("、") : "根提交"}</dd></div></dl><pre className="git-diff"><code>{diff || "正在读取 Diff…"}</code></pre></>; })() : <p className="git-empty">选择一个提交查看详情</p>}</aside>
     </div>
-    <footer className="git-working-tree"><div className="git-panel-title"><strong>当前工作树</strong><span>{status.files.length} 个文件</span></div>{status.files.length ? <div className="git-file-grid">{status.files.map((file) => <div className={`git-file-row ${file.status === "conflicted" ? "danger" : ""}`} key={file.path}><span className="git-file-status">{file.status === "conflicted" ? "!" : file.status[0]?.toUpperCase()}</span><span>{file.path}</span><small>{statusLabel(file.status)}{file.additions !== null || file.deletions !== null ? ` · +${file.additions || 0} -${file.deletions || 0}` : ""}</small></div>)}</div> : <p className="git-clean-note"><Check size={14} />当前没有未提交修改</p>}</footer>
+    <footer className="git-working-tree"><div className="git-panel-title"><strong>当前工作树</strong><span>{status.files.length} 个文件</span></div>{status.files.length ? <><div className="git-file-actions"><button type="button" disabled={!selectedPaths.length || actionBusy} onClick={() => void mutate("stage", { paths: selectedPaths })}>暂存所选</button><button type="button" disabled={!selectedPaths.length || actionBusy || !status.files.some((item) => selectedPaths.includes(item.path) && item.staged)} onClick={() => void mutate("unstage", { paths: selectedPaths })}>取消暂存</button><input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="提交说明…" /><button type="button" className="primary" disabled={actionBusy || !commitMessage.trim() || !status.files.some((item) => item.staged)} onClick={() => { if (window.confirm("提交当前已暂存的文件？")) void mutate("commit", { message: commitMessage }); }}>提交</button></div><div className="git-file-grid">{status.files.map((file) => <label className={`git-file-row ${file.status === "conflicted" ? "danger" : ""} ${selectedPaths.includes(file.path) ? "selected" : ""}`} key={file.path}><input type="checkbox" checked={selectedPaths.includes(file.path)} onChange={() => setSelectedPaths((current) => current.includes(file.path) ? current.filter((item) => item !== file.path) : [...current, file.path])} /><span className="git-file-status">{file.status === "conflicted" ? "!" : file.status[0]?.toUpperCase()}</span><span>{file.path}</span><small>{statusLabel(file.status)}{file.additions !== null || file.deletions !== null ? ` · +${file.additions || 0} -${file.deletions || 0}` : ""}</small></label>)}</div></> : <p className="git-clean-note"><Check size={14} />当前没有未提交修改</p>}</footer>
   </section>;
 }
