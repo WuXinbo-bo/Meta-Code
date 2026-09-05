@@ -9,6 +9,7 @@ $env:METACODE_HOME = $dataRoot
 $runtimeLogRoot = Join-Path $dataRoot "logs"
 $backendUrl = "http://127.0.0.1:4338/api/health"
 $webUrl = "http://127.0.0.1:4339/"
+$packageVersion = node -p "require('./package.json').version"
 
 function Test-HttpEndpoint([string]$Url) {
   try {
@@ -21,6 +22,24 @@ function Test-HttpEndpoint([string]$Url) {
 
 function Test-ListeningPort([int]$Port) {
   return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Get-PortOwner([int]$Port) {
+  $connection = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $connection) { return $null }
+  return Get-CimInstance Win32_Process -Filter "ProcessId=$($connection.OwningProcess)" -ErrorAction SilentlyContinue
+}
+
+function Stop-StaleProjectService([int]$Port) {
+  $owner = Get-PortOwner $Port
+  if (-not $owner) { return $false }
+  $commandLine = [string]$owner.CommandLine
+  if ($commandLine -notlike "*$projectRoot*") {
+    throw "端口 $Port 已被其他项目占用（PID $($owner.ProcessId)）。请先关闭占用该端口的服务，不能混用不同项目的工作台后端。"
+  }
+  Stop-Process -Id $owner.ProcessId -Force -ErrorAction Stop
+  Start-Sleep -Milliseconds 300
+  return $true
 }
 
 function Start-NodeService([string]$Name, [string[]]$Arguments, [int]$Port) {
@@ -53,6 +72,23 @@ if (-not (Test-Path (Join-Path $projectRoot "node_modules"))) {
 }
 
 New-Item -ItemType Directory -Path $runtimeLogRoot -Force | Out-Null
+if (Test-ListeningPort 4338) {
+  try {
+    $health = Invoke-RestMethod -Uri $backendUrl -UseBasicParsing -TimeoutSec 2
+    if ([string]$health.version -ne [string]$packageVersion) {
+      Write-Host "发现旧版工作台后端（$($health.version)），当前源码为 $packageVersion，正在重启当前项目服务..."
+      Stop-StaleProjectService 4338 | Out-Null
+    }
+  } catch {
+    Stop-StaleProjectService 4338 | Out-Null
+  }
+}
+if (Test-ListeningPort 4339) {
+  $webOwner = Get-PortOwner 4339
+  if ($webOwner -and ([string]$webOwner.CommandLine -notlike "*$projectRoot*")) {
+    throw "端口 4339 已被其他项目占用（PID $($webOwner.ProcessId)）。请先关闭占用该端口的服务。"
+  }
+}
 Start-NodeService "backend" @(
   (Join-Path $projectRoot "node_modules\tsx\dist\cli.mjs"),
   "server/index.ts"
@@ -63,6 +99,14 @@ Start-NodeService "web" @(
 ) 4339
 
 Wait-ForEndpoint "Backend" $backendUrl 35
+try {
+  $finalHealth = Invoke-RestMethod -Uri $backendUrl -UseBasicParsing -TimeoutSec 2
+  if ([string]$finalHealth.version -ne [string]$packageVersion) {
+    throw "后端版本校验失败：收到 $($finalHealth.version)，预期 $packageVersion。"
+  }
+} catch {
+  throw "工作台后端版本校验失败。$($_.Exception.Message)"
+}
 Wait-ForEndpoint "Web" $webUrl 35
 
 if (-not $NoBrowser) {
