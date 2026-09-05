@@ -9246,6 +9246,27 @@ app.post("/api/workspaces/:id/git/fetch", async (req, res) => {
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-fetch-failed" }); }
 });
 
+app.get("/api/workspaces/:id/git/activity", (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 12)));
+  const records = state.sessions
+    .filter((session) => session.ownerUserId === req.authUser!.id && session.workspaceId === workspace.id)
+    .flatMap((session) => session.messages.map((message) => ({ session, message })))
+    .filter(({ message }) => Boolean(message.activity?.semanticType === "file" || message.activity?.semanticType === "command"))
+    .sort((left, right) => right.message.createdAt.localeCompare(left.message.createdAt))
+    .slice(0, limit)
+    .map(({ session, message }) => {
+      const detail = message.activity?.detail && typeof message.activity.detail === "object" && !Array.isArray(message.activity.detail) ? message.activity.detail as Record<string, unknown> : {};
+      const changes = Array.isArray(detail.changes) ? detail.changes : [];
+      const paths = changes.map((change) => change && typeof change === "object" ? String((change as Record<string, unknown>).path || "") : "").filter(Boolean);
+      if (!paths.length && typeof detail.command === "string") paths.push(detail.command);
+      return { sessionId: session.id, sessionTitle: session.title, engine: session.engine, activityId: message.activity?.id || message.id, type: message.activity?.semanticType || "unknown", title: message.activity?.title || message.text, paths: [...new Set(paths)].slice(0, 20), occurredAt: message.createdAt };
+    });
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ records });
+});
+
 app.get("/api/workspaces/:id/git/commits", async (req, res) => {
   const workspace = fileScopeById(req.params.id, req.authUser!.id);
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
