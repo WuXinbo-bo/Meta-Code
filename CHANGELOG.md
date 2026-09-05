@@ -25,6 +25,7 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 - Follow-up guidance, pause, resume, and cancellation preserve the user's intent through session transitions.
 - Task deletion coordinates active execution and persisted state before removing a task.
 - Backup publication and restore moves tolerate transient Windows file locks without deleting the destination or bypassing verification.
+- Development hot reload excludes generated packages and test data, avoiding unnecessary scans and Windows directory locks during release validation.
 - Provider configuration remains visible across bootstrap refreshes; reasoning activity and context-compaction notices have consistent lifecycles.
 
 ## [0.1.3] - 2026-09-04

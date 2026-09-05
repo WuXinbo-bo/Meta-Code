@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [server, app] = await Promise.all([
+const [server, app, viteConfig] = await Promise.all([
   readFile(new URL("../server/index.ts", import.meta.url), "utf8"),
-  readFile(new URL("../src/App.tsx", import.meta.url), "utf8")
+  readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+  readFile(new URL("../vite.config.ts", import.meta.url), "utf8")
 ]);
+
+for (const directory of [".runtime", "output", "release-artifacts", "dist", "dist-server", ".local-release-notes", ".workbench-data"]) {
+  assert.ok(viteConfig.includes(`"**/${directory}/**"`), `hot reload must not lock generated or personal-data directories: ${directory}`);
+}
 
 const bootstrapStart = server.indexOf('app.get("/api/bootstrap"');
 const bootstrapEnd = server.indexOf('app.get("/api/runtime/codex"', bootstrapStart);

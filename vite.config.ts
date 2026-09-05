@@ -27,7 +27,7 @@ export default defineConfig({
   server: {
     port: webPort,
     watch: {
-      ignored: ["**/.runtime/**"]
+      ignored: ["**/.runtime/**", "**/output/**", "**/release-artifacts/**", "**/dist/**", "**/dist-server/**", "**/.local-release-notes/**", "**/.workbench-data/**"]
     },
     proxy: {
       "/api": { target: `http://127.0.0.1:${apiPort}`, headers: { [LOCAL_API_TOKEN_HEADER]: apiToken } }
