@@ -86,6 +86,9 @@ not roll back a valid install to a partially deleted backup.
 - Run `node --import tsx scripts/prepare-node-toolchain.mjs output/cli-install-validation/toolchains/node`
   followed by `node scripts/test-cli-clean-desktop.mjs --bundled` to verify the
   bundled-toolchain path. Outputs remain under ignored `output/`.
+- After packaging, run `node scripts/test-cli-clean-desktop.mjs --package-root <win-unpacked>`
+  to exercise the actual packaged executable, production dependencies and bundled
+  toolchain with an isolated personal-data directory.
 
 The real download test is excluded from offline CI. These isolated-process tests
 do not replace final Windows Sandbox/VM installation and authenticated task

@@ -4,6 +4,28 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-05
+
+### Added
+
+- A private, verified Node/npm toolchain bundled with Windows packages, with automatic bootstrap when missing.
+- Unified install and same-version repair actions for native Claude, Codex, and supported ACP Agents.
+- Verified automatic personal-data backups with two-snapshot retention and restore-point controls.
+
+### Changed
+
+- Conversation actions and completed activity summaries use a more compact layout while keeping detailed command and file changes accessible.
+- Conversation tabs display the actual lead Agent icon; community and contribution documentation has been refreshed.
+- Provider discovery runs outside the critical bootstrap path, and navigation snapshots avoid unnecessary heavy scans.
+
+### Fixed
+
+- Fresh computers no longer report native CLIs as already installed or require a separately configured npm before installation.
+- CLI repair restores the previous installation if certification fails; installing a CLI no longer falsely verifies an account connection.
+- Follow-up guidance, pause, resume, and cancellation preserve the user's intent through session transitions.
+- Task deletion coordinates active execution and persisted state before removing a task.
+- Provider configuration remains visible across bootstrap refreshes; reasoning activity and context-compaction notices have consistent lifecycles.
+
 ## [0.1.3] - 2026-09-04
 
 ### Added

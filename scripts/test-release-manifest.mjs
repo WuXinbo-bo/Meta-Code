@@ -15,7 +15,7 @@ const signingKeys = crypto.generateKeyPairSync("ed25519");
 const signingKeyId = "release-test-key";
 config.manifestSigning.trustedKeys[signingKeyId] = signingKeys.publicKey.export({ type: "spki", format: "der" }).toString("base64");
 assert.equal(config.productName, "Meta Code");
-assert.equal(config.currentVersion, "0.1.3", "发布版本必须保持为 0.1.3");
+assert.equal(config.currentVersion, "0.1.4", "发布版本必须保持为 0.1.4");
 assert.equal(config.dataSchemaVersion, CURRENT_STATE_SCHEMA_VERSION, "发布清单的数据 Schema 必须与状态存储一致");
 
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "meta-code-release-"));
@@ -27,18 +27,18 @@ try {
     config,
     channel: "stable",
     publishedAt: "2026-08-31T00:00:00.000Z",
-    releaseNotes: "Meta Code 0.1.3",
-    releaseUrl: "https://example.com/releases/0.1.3",
-    buildId: "test-build-0.1.3",
+    releaseNotes: "Meta Code 0.1.4",
+    releaseUrl: "https://example.com/releases/0.1.4",
+    buildId: "test-build-0.1.4",
     signingKeyId,
     signingPrivateKey: signingKeys.privateKey.export({ type: "pkcs8", format: "pem" }),
-    assets: [{ file: asset, url: "https://example.com/meta-code-0.1.3.zip", platform: "win32", arch: "x64" }]
+    assets: [{ file: asset, url: "https://example.com/meta-code-0.1.4.zip", platform: "win32", arch: "x64" }]
   });
-  assert.equal(manifest.version, "0.1.3");
-  assert.equal(manifest.buildId, "test-build-0.1.3");
+  assert.equal(manifest.version, "0.1.4");
+  assert.equal(manifest.buildId, "test-build-0.1.4");
   assert.equal(manifest.assets[0].size, content.byteLength);
   assert.equal(manifest.assets[0].sha256, crypto.createHash("sha256").update(content).digest("hex"));
-  const output = path.join(temporary, "release-artifacts", "meta-code-0.1.3", "stable", "latest.json");
+  const output = path.join(temporary, "release-artifacts", "meta-code-0.1.4", "stable", "latest.json");
   await writeReleaseManifest(output, manifest);
   const persisted = parseAppUpdateManifest(JSON.parse(await fs.readFile(output, "utf8")), config);
   assert.deepEqual(persisted, manifest);

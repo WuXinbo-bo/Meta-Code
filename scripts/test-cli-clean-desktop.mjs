@@ -7,17 +7,21 @@ import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageIndex = process.argv.indexOf("--package-root");
+if (packageIndex >= 0 && !process.argv[packageIndex + 1]) throw new Error("--package-root requires a win-unpacked directory");
+const packageRoot = packageIndex >= 0 ? path.resolve(process.argv[packageIndex + 1]) : null;
+const bundled = Boolean(packageRoot) || process.argv.includes("--bundled");
 const output = path.join(root, "output", "cli-install-validation");
 await fsp.mkdir(output, { recursive: true });
 const sandbox = await fsp.mkdtemp(path.join(output, "desktop-"));
-const appRoot = path.join(sandbox, "app");
+const appRoot = packageRoot ? path.join(packageRoot, "resources", "workbench") : path.join(sandbox, "app");
 const dataRoot = path.join(sandbox, "data");
 const profile = path.join(sandbox, "profile");
 await fsp.mkdir(profile, { recursive: true });
-for (const item of ["dist-server", "dist", "public", "server-assets", "skills", "release.config.json", "package.json"]) {
+for (const item of packageRoot ? [] : ["dist-server", "dist", "public", "server-assets", "skills", "release.config.json", "package.json"]) {
   await fsp.cp(path.join(root, item), path.join(appRoot, item), { recursive: true });
 }
-if (process.argv.includes("--bundled")) {
+if (bundled && !packageRoot) {
   await fsp.cp(path.join(output, "toolchains", "node"), path.join(appRoot, "toolchains", "node"), { recursive: true });
 }
 const server = net.createServer();
@@ -32,7 +36,8 @@ Object.assign(env, {
   ELECTRON_RUN_AS_NODE: "1", NODE_ENV: "production", PORT: String(port), METACODE_HOME: dataRoot,
   METACODE_DESKTOP: "1", WORKBENCH_PACKAGED: "1", METACODE_API_TOKEN: "clean-desktop-installation-test-token", WORKSPACE_ROOT: profile
 });
-const backend = spawn(path.join(root, "node_modules", "electron", "dist", "electron.exe"), [path.join(appRoot, "dist-server", "index.js")], {
+const executable = packageRoot ? path.join(packageRoot, "Meta Code.exe") : path.join(root, "node_modules", "electron", "dist", "electron.exe");
+const backend = spawn(executable, [path.join(appRoot, "dist-server", "index.js")], {
   cwd: appRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"]
 });
 let logs = "";
@@ -79,7 +84,7 @@ try {
     const status = await request(`/api/runtime/${id}/status`);
     assert.equal(status.available, false, "fresh profile must not reuse developer CLI");
     assert.equal(status.installation.supported, true);
-    assert.equal(status.npmAvailable, process.argv.includes("--bundled"));
+    assert.equal(status.npmAvailable, bundled);
   }
   const market = await request("/api/agent-market");
   for (const id of ["claude", "codex"]) {
@@ -108,8 +113,8 @@ try {
     assert.equal(finalMarket.items.find((item) => item.id === id).installed, true);
     assert.equal(finalMarket.controls[id].connection.status, "attention", "installing a CLI must not certify an unconfigured account");
   }
-  const result = { environment: "Electron, empty profile, no system Node/npm/CLI on PATH", bundled: process.argv.includes("--bundled"), versions: Object.fromEntries(Object.entries(installed).map(([id, status]) => [id, status.version])), sameVersionRepair: true };
-  await fsp.writeFile(path.join(output, `clean-desktop-${result.bundled ? "bundled" : "bootstrap"}-result.json`), JSON.stringify(result, null, 2));
+  const result = { environment: "Electron, empty profile, no system Node/npm/CLI on PATH", packaged: Boolean(packageRoot), bundled, versions: Object.fromEntries(Object.entries(installed).map(([id, status]) => [id, status.version])), sameVersionRepair: true };
+  await fsp.writeFile(path.join(output, `clean-desktop-${packageRoot ? "packaged" : bundled ? "bundled" : "bootstrap"}-result.json`), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
   if (process.argv.includes("--inspect")) {
     console.log("Browser inspection window: 180 seconds");
