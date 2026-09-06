@@ -19,7 +19,10 @@
 }
 .session-switch-loading > svg { color: var(--mc-text-tertiary); }
 .messages {
-  padding: 28px max(28px, calc((100% - var(--mc-content)) / 2)) 30px;
+  /* A deliberately narrower reading column keeps long transcripts calm and
+     scannable on wide monitors while the media query below restores compact
+     gutters on phones and small panes. */
+  padding: 28px max(48px, calc((100% - var(--mc-content)) / 2)) 30px;
   scrollbar-gutter: stable;
 }
 .new-task-view .messages {
@@ -471,7 +474,7 @@
 .resume-note button { border-color: var(--mc-line-strong); color: var(--mc-text); background: var(--mc-surface); }
 
 .composer-wrap {
-  padding: 10px max(28px, calc((100% - var(--mc-content)) / 2)) 12px;
+  padding: 10px max(36px, calc((100% - var(--mc-content)) / 2)) 12px;
   border-color: var(--mc-line);
   background: color-mix(in srgb, var(--mc-surface) 96%, transparent);
 }

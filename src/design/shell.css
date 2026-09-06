@@ -459,7 +459,7 @@
 @media (max-width: 1099px) {
   .app-shell,
   .app-shell.inspector-collapsed {
-    grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(0, 1fr) 0;
+    grid-template-columns: var(--activity-rail-width) min(300px, var(--sidebar-width)) minmax(0, 1fr) 0;
   }
   .app-shell.sidebar-collapsed,
   .app-shell.sidebar-collapsed.inspector-collapsed {

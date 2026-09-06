@@ -36,7 +36,10 @@
   --mc-space-6: 24px;
   --mc-space-8: 32px;
   /* Reading width shared by messages, composer and task launch surfaces. */
-  --mc-content: 960px;
+  /* Keep the transcript visually focused on wide workspaces.  The shell can
+     still grow, but conversation content should retain a comfortable reading
+     measure instead of stretching across the entire center pane. */
+  --mc-content: 900px;
   --mc-fast: 140ms;
   --mc-normal: 200ms;
 

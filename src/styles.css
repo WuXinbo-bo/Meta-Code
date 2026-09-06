@@ -1522,9 +1522,12 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 }
 @media (max-width: 1050px) {
   .pane-resizer { display: none; }
-  .app-shell, .app-shell.inspector-collapsed { grid-template-columns: 230px minmax(0, 1fr) 0; }
+  /* Keep the activity rail as a first-class column.  This legacy breakpoint
+     previously reintroduced a three-column grid and overrode the shell
+     layout, making the center pane unexpectedly narrow or misaligned. */
+  .app-shell, .app-shell.inspector-collapsed { grid-template-columns: var(--activity-rail-width, 46px) min(300px, var(--sidebar-width, 300px)) minmax(0, 1fr) 0; }
   .inspector { display: none; }
-  .app-shell.sidebar-collapsed, .app-shell.sidebar-collapsed.inspector-collapsed { grid-template-columns: 0 minmax(0, 1fr) 0; }
+  .app-shell.sidebar-collapsed, .app-shell.sidebar-collapsed.inspector-collapsed { grid-template-columns: var(--activity-rail-width, 46px) 0 minmax(0, 1fr) 0; }
 }
 @media (max-width: 720px) {
   .app-shell, .app-shell.sidebar-collapsed, .app-shell.inspector-collapsed, .app-shell.sidebar-collapsed.inspector-collapsed { grid-template-columns: var(--activity-rail-width, 0px) 0 minmax(0, 1fr) 0; }
