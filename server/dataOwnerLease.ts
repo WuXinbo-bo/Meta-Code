@@ -13,6 +13,10 @@ export type DataOwnerRecord = {
 };
 
 const HEARTBEAT_INTERVAL_MS = 5_000;
+// A lease is considered stale when its heartbeat is older than this window.
+// This also protects against Windows PID reuse: a dead Meta Code process may
+// leave owner.json behind and its old PID can later belong to another app.
+const LEASE_STALE_AFTER_MS = HEARTBEAT_INTERVAL_MS * 4;
 function processExists(pid: number) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -35,9 +39,12 @@ export function activeDataOwner(dataDir: string) {
   const file = path.join(path.resolve(dataDir), "owner.json");
   const owner = readRecord(file);
   if (!owner) return null;
-  // A recently written heartbeat does not prove that its process is still alive.
-  // Treat a dead PID as stale immediately so crash recovery is not delayed.
-  return processExists(owner.pid) ? owner : null;
+  // A recently written heartbeat does not prove that its process is still alive
+  // (Windows may reuse a PID after a crash). Require both a live PID and a
+  // fresh heartbeat; stale records are safely reclaimed by acquire().
+  const heartbeatAt = Date.parse(owner.heartbeatAt);
+  const heartbeatFresh = Number.isFinite(heartbeatAt) && Date.now() - heartbeatAt <= LEASE_STALE_AFTER_MS;
+  return heartbeatFresh && processExists(owner.pid) ? owner : null;
 }
 
 export class WorkbenchDataOwnerLease {
