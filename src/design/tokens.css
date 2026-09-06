@@ -35,7 +35,8 @@
   --mc-space-4: 16px;
   --mc-space-6: 24px;
   --mc-space-8: 32px;
-  --mc-content: 860px;
+  /* Reading width shared by messages, composer and task launch surfaces. */
+  --mc-content: 920px;
   --mc-fast: 140ms;
   --mc-normal: 200ms;
 

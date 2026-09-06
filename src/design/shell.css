@@ -1,8 +1,8 @@
 .app-shell {
   --activity-rail-width: 46px;
-  --sidebar-width: 232px;
-  --inspector-width: 296px;
-  grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(420px, 1fr) var(--inspector-width);
+  --sidebar-width: 248px;
+  --inspector-width: 280px;
+  grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(560px, 1fr) var(--inspector-width);
   background: var(--mc-canvas);
 }
 
@@ -80,7 +80,7 @@
 .sidebar-pane-header > span { min-width: 0; }
 .sidebar-pane-header strong,
 .sidebar-pane-header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-pane-header strong { color: var(--mc-text); font-size: 13px; font-weight: 680; }
+.sidebar-pane-header strong { color: var(--mc-text); font-size: 13.5px; font-weight: 680; }
 .sidebar-pane-header small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; font-weight: 450; }
 .sidebar-workspace-row {
   display: grid;
@@ -108,7 +108,7 @@
 .sidebar-workspace-current > span { min-width: 0; }
 .sidebar-workspace-current strong,
 .sidebar-workspace-current small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-workspace-current strong { color: var(--mc-text); font-size: 12px; font-weight: 620; }
+.sidebar-workspace-current strong { color: var(--mc-text); font-size: 12.5px; font-weight: 620; }
 .sidebar-workspace-current small { margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; }
 .sidebar-task-actions {
   display: flex;
@@ -293,7 +293,7 @@
 .session-select { min-height: 40px; padding: 6px 4px 5px 8px; }
 .session-select > svg { margin-top: 1px; color: var(--mc-text-tertiary); }
 .session-select > .session-provider-icon { width: 15px; height: 15px; margin-top: 1px; opacity: .78; }
-.session-list strong { max-width: none; color: var(--mc-text); font-size: 12px; font-weight: 600; }
+.session-list strong { max-width: none; color: var(--mc-text); font-size: 12.5px; font-weight: 600; }
 .session-list small { max-width: none; margin-top: 2px; color: var(--mc-text-tertiary); font-size: 11px; }
 .workspace-panel-list .workspace-menu-item-copy strong { font-size: 13px; }
 .workspace-panel-list .workspace-menu-item-copy small { font-size: 11px; }
@@ -310,7 +310,7 @@
   background: var(--mc-surface);
   backdrop-filter: blur(14px);
 }
-.title-block strong { color: var(--mc-text); font-size: 13px; font-weight: 650; }
+.title-block strong { color: var(--mc-text); font-size: 14px; font-weight: 650; }
 .title-block span { margin-top: 2px; color: var(--mc-text-tertiary); font: 9px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .run-status { gap: 4px; color: var(--mc-success); font-size: 11px; }
 .run-status.paused { color: var(--mc-warning); }
@@ -453,7 +453,7 @@
 .inspector h3 { color: var(--mc-text); }
 
 @media (max-width: 1439px) and (min-width: 1100px) {
-  .app-shell:not(.inspector-collapsed) { grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(0, 1fr) var(--inspector-width); }
+  .app-shell:not(.inspector-collapsed) { grid-template-columns: var(--activity-rail-width) 232px minmax(0, 1fr) 264px; }
 }
 
 @media (max-width: 1099px) {
