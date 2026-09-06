@@ -46,6 +46,8 @@ export function ComposerRuntimeControl({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [collaborationPromptOpen, setCollaborationPromptOpen] = useState(false);
+  const [rememberCollaborationChoice, setRememberCollaborationChoice] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const label = descriptor?.shortName || (provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : provider);
   const modeLabel = executionMode === "collaborative" ? "协作" : "原生";
@@ -111,6 +113,29 @@ export function ComposerRuntimeControl({
     finally { setSaving(false); }
   };
 
+  const collaborationPromptSuppressed = () => {
+    try { return window.localStorage.getItem("metacode.collaboration-confirm.v1") === "1"; }
+    catch { return false; }
+  };
+
+  const requestModeChange = (mode: ExecutionMode) => {
+    if (mode !== "collaborative" || collaborationPromptSuppressed()) {
+      void saveMode(mode);
+      return;
+    }
+    setRememberCollaborationChoice(false);
+    setCollaborationPromptOpen(true);
+  };
+
+  const confirmCollaboration = async () => {
+    if (rememberCollaborationChoice) {
+      try { window.localStorage.setItem("metacode.collaboration-confirm.v1", "1"); }
+      catch { /* preferences are optional; the mode change must still work */ }
+    }
+    setCollaborationPromptOpen(false);
+    await saveMode("collaborative");
+  };
+
   const saveSessionOption = async (configId: string, value: string | boolean) => {
     setSaving(true);
     setError("");
@@ -132,7 +157,7 @@ export function ComposerRuntimeControl({
     {open && <section className="composer-runtime-popover" role="dialog" aria-label={`${label} 运行配置`}>
       <div className="composer-runtime-mode-heading"><span>运行模式</span><HelpButton topic="delegation-protocol" /></div>
       <div className="composer-runtime-mode" role="radiogroup" aria-label="运行模式">
-        {(["native", "collaborative"] as ExecutionMode[]).map((mode) => <button type="button" role="radio" aria-checked={executionMode === mode} className={executionMode === mode ? "selected" : ""} disabled={saving || (mode === "collaborative" && !collaborationAvailable)} title={mode === "collaborative" && !collaborationAvailable ? "该 Agent 未声明终端能力，无法调用工作台委派桥接" : undefined} key={mode} onClick={() => void saveMode(mode)}><span>{mode === "native" ? "原生" : "协作"}</span>{executionMode === mode && <Check size={12} />}</button>)}
+        {(["native", "collaborative"] as ExecutionMode[]).map((mode) => <button type="button" role="radio" aria-checked={executionMode === mode} className={executionMode === mode ? "selected" : ""} disabled={saving || (mode === "collaborative" && !collaborationAvailable)} title={mode === "collaborative" && !collaborationAvailable ? "该 Agent 未声明终端能力，无法调用工作台委派桥接" : undefined} key={mode} onClick={() => requestModeChange(mode)}><span>{mode === "native" ? "原生" : "协作"}</span>{executionMode === mode && <Check size={12} />}</button>)}
       </div>
       {!collaborationAvailable && <div className="composer-runtime-empty">该 Agent 当前仅支持原生运行</div>}
       {!isAcp && (control?.capabilities.configuration.models !== false || efforts.length > 0) && <div className="composer-runtime-fields">
@@ -158,5 +183,13 @@ export function ComposerRuntimeControl({
       {(loading || saving) && <LoaderCircle className="spin composer-runtime-progress" size={13} />}
       {error && <p>{error}</p>}
     </section>}
+    {collaborationPromptOpen && <div className="collaboration-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCollaborationPromptOpen(false); }}>
+      <section className="collaboration-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="collaboration-confirm-title">
+        <strong id="collaboration-confirm-title">开启协作模式？</strong>
+        <p>协作模式会由主Agent自主调度不同子 Agent，也可以主动要求有什么模型来完成什么任务，请确认理解协作模式后再启动。<br />原生模式即模型原生能力，包括其subAgent能力。</p>
+        <label><input type="checkbox" checked={rememberCollaborationChoice} onChange={(event) => setRememberCollaborationChoice(event.target.checked)} />以后不再提示</label>
+        <footer><button type="button" onClick={() => setCollaborationPromptOpen(false)}>取消</button><button type="button" className="primary" disabled={saving} onClick={() => void confirmCollaboration()}>开启协作</button></footer>
+      </section>
+    </div>}
   </div>;
 }

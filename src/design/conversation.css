@@ -691,6 +691,35 @@
 .composer-runtime-progress { position: absolute; top: 14px; right: 13px; color: var(--mc-text-tertiary); }
 .composer-runtime-popover > p { margin: 6px 2px 0; color: var(--mc-danger); font-size: 11px; }
 .composer-runtime-empty { padding: 8px 6px; color: var(--mc-text-tertiary); font-size: 11px; text-align: center; }
+.collaboration-confirm-backdrop {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--mc-backdrop) 72%, transparent);
+  backdrop-filter: blur(3px);
+}
+.collaboration-confirm-dialog {
+  width: min(430px, calc(100vw - 40px));
+  padding: 20px;
+  border: 1px solid var(--mc-line-strong);
+  border-radius: var(--mc-r-lg);
+  background: var(--mc-overlay);
+  color: var(--mc-text);
+  box-shadow: var(--mc-shadow-dialog);
+}
+.collaboration-confirm-dialog > strong { display: block; font-size: 15px; font-weight: 680; }
+.collaboration-confirm-dialog > p { margin: 12px 0 14px; color: var(--mc-text-secondary); font-size: 12px; line-height: 1.7; }
+.collaboration-confirm-dialog > label { display: inline-flex; align-items: center; gap: 7px; color: var(--mc-text-secondary); font-size: 11px; cursor: pointer; }
+.collaboration-confirm-dialog > label input { margin: 0; accent-color: var(--mc-brand); }
+.collaboration-confirm-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.collaboration-confirm-dialog > footer button { min-height: 31px; padding: 0 12px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-md); color: var(--mc-text-secondary); background: var(--mc-surface); font-size: 11px; cursor: pointer; }
+.collaboration-confirm-dialog > footer button:hover { color: var(--mc-text); background: var(--mc-surface-subtle); }
+.collaboration-confirm-dialog > footer button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); background: var(--mc-brand); }
+.collaboration-confirm-dialog > footer button.primary:hover { filter: brightness(.94); }
+.collaboration-confirm-dialog > footer button:disabled { opacity: .55; cursor: default; }
 .pending-turn-tray {
   margin-bottom: 7px;
   overflow: hidden;

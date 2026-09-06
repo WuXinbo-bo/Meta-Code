@@ -9046,7 +9046,9 @@ app.post("/api/workspaces", async (req, res) => {
       archivedAt: null,
       taskFolders: [],
       agentSkillPolicies: defaultManagedSkillPolicies(),
-      agentExecutionMode: "collaborative"
+      // New workspaces use native execution by default. Collaboration is an
+      // explicit user choice and is persisted afterwards.
+      agentExecutionMode: "native"
     };
     state.workspaces.unshift(workspace);
     syncWorkspaceSkillProjection(workspace, workspaceAgentConfig(workspace).skillPolicies);
@@ -10545,7 +10547,9 @@ app.post("/api/sessions", async (req, res) => {
     ? completeSkillPolicies(standaloneProfile?.skillPolicies || req.body.skillPolicies)
     : undefined;
   const standaloneExecutionMode = scopeKind === "standalone"
-    ? normalizeExecutionMode(req.body.executionMode, standalonePolicies || {})
+    // New conversations start natively unless the caller explicitly opts in.
+    // Existing persisted sessions retain their stored mode during migration.
+    ? normalizeExecutionMode(req.body.executionMode, {})
     : undefined;
   const now = new Date().toISOString();
   const connectionProfile = providerConnectionFor(engine, req.authUser!.id);

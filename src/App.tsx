@@ -330,6 +330,7 @@ type Session = SessionSummary & {
   branchedFromMessageId?: string;
   messageWindow?: MessageWindow;
 };
+type PendingCreatedSession = { id: string; scopeKey: string };
 type MessageWindow = { start: number; end: number; total: number; hasMore: boolean };
 type MessagePage = { messages: Message[]; window: MessageWindow };
 type ActivityMessageGroup = { id: string; role: "activity-group"; messages: Message[] };
@@ -2049,6 +2050,9 @@ export function App() {
   const [workflowDraftOpen, setWorkflowDraftOpen] = useState(false);
   const activeTaskKindRef = useRef<typeof activeTaskKind>(null);
   const taskSelectionGenerationRef = useRef(0);
+  // A newly-created task must win over restored tabs and background refreshes
+  // until its first navigation transaction has fully settled.
+  const pendingCreatedSessionRef = useRef<PendingCreatedSession | null>(null);
   const requestCoordinatorRef = useRef(new RequestCoordinator());
   const sessionNavigationRef = useRef<SessionNavigationState>(sessionNavigation);
   const updateSessionNavigation = useCallback((next: SessionNavigationState) => {
@@ -3135,7 +3139,7 @@ export function App() {
   const activeCapabilityProfileId = activeSession?.scopeKind === "standalone" ? activeSession.standaloneCapabilityProfileId || null : workspace?.agentCapabilityProfileId || null;
   const activeCapabilityProfile = useMemo(() => data?.capabilityProfiles?.find((profile) => profile.id === activeCapabilityProfileId) || null, [data?.capabilityProfiles, activeCapabilityProfileId]);
   const currentExecutionMode: ExecutionMode = activeSession?.scopeKind === "standalone"
-    ? activeSession.standaloneExecutionMode || "collaborative"
+    ? activeSession.standaloneExecutionMode || "native"
     : workspace?.agentExecutionMode || ((skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "auto" || skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "always") ? "collaborative" : "native");
   const recentCapabilityProfiles = useMemo(() => [...(data?.capabilityProfiles || [])].sort((left, right) => (right.lastUsedAt || right.updatedAt).localeCompare(left.lastUsedAt || left.updatedAt)).slice(0, 4), [data?.capabilityProfiles]);
   const applyCapabilityProfile = async (profileId: string | null, savedProfile?: CapabilityProfile) => {
@@ -3557,6 +3561,21 @@ export function App() {
       if (activeSession) setActiveSession(null);
       return;
     }
+    const pendingCreated = pendingCreatedSessionRef.current;
+    if (pendingCreated) {
+      const pendingSummary = data.sessions.find((session) => session.id === pendingCreated.id);
+      if (pendingSummary) {
+        const pendingResourceKey = workspaceBrowserResourceKey({
+          kind: "conversation",
+          conversationId: pendingCreated.id,
+          ...(pendingSummary.scopeKind === "standalone" ? {} : { workspaceId: pendingSummary.workspaceId })
+        });
+        // Do not let the normal remembered-session or restored-tab
+        // reconciliation steal focus while creation is still settling.
+        if (activeSession?.id !== pendingCreated.id || workspaceBrowser.activeTabId !== pendingResourceKey) return;
+        pendingCreatedSessionRef.current = null;
+      }
+    }
     if (workspaceBrowser.activeTabId !== null) return;
     if (workspaceBrowser.activeTabId === null && workspaceBrowser.tabs.length > 0) {
       if (activeSession) setActiveSession(null);
@@ -3672,11 +3691,12 @@ export function App() {
     try {
       const session = await api<Session>(`/api/sessions?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
         method: "POST",
-        body: JSON.stringify({ workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined, scopeKind, engine, skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined, capabilityProfileId: scopeKind === "standalone" ? activeCapabilityProfileId : undefined, executionMode: scopeKind === "standalone" ? currentExecutionMode : undefined })
+        body: JSON.stringify({ workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined, scopeKind, engine, skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined, capabilityProfileId: scopeKind === "standalone" ? activeCapabilityProfileId : undefined, executionMode: "native" })
       });
       const scopeKey = scopeKind === "standalone" ? "__standalone__" : activeWorkspaceId;
       rememberSession(scopeKey, session.id);
       forgetWorkspaceWorkflow(scopeKey);
+      pendingCreatedSessionRef.current = { id: session.id, scopeKey };
       commitSessionSelection({ ...session, messageCount: 0 }, "task");
       const preparedAttachments = await uploadDraftFiles(session.id, initialAttachments);
       if (initialPrompt || preparedAttachments.length) {
@@ -3696,6 +3716,7 @@ export function App() {
       setView("chat");
       await refresh();
     } catch (error) {
+      pendingCreatedSessionRef.current = null;
       setPrompt(initialPrompt);
       setDraftAttachments(initialAttachments);
       setDialog(null);
@@ -4295,6 +4316,8 @@ export function App() {
     workspaceBrowserHydratedRef.current = true;
     if (activeTab.status === "error") return;
     if (resource.kind === "conversation") {
+      const pendingCreated = pendingCreatedSessionRef.current;
+      if (pendingCreated && pendingCreated.id !== resource.conversationId) return;
       const loadingThisConversation = sessionNavigationRef.current.phase === "loading"
         && sessionNavigationRef.current.sessionId === resource.conversationId;
       if (activeSession?.id === resource.conversationId || loadingThisConversation) return;
