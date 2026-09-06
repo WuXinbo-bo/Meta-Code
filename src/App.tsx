@@ -482,8 +482,12 @@ const ACTIVE_TASK_SCOPE_KEY = "modelx.activeTaskScope";
 const ACTIVE_SESSION_MAP_KEY = "modelx.activeSessionByWorkspace";
 const ACTIVE_WORKFLOW_MAP_KEY = "modelx.activeWorkflowByWorkspace";
 const AGENT_SELECTION_KEY_PREFIX = "modelx.agentSelection";
-const LAYOUT_WIDTHS_KEY = "modelx.workspaceLayoutWidths.v2";
-const DEFAULT_LAYOUT_WIDTHS = { sidebar: 228, inspector: 250 } as const;
+// Layout defaults are versioned so an old, user-resized v2 layout cannot
+// silently override the current proportions after a visual redesign.
+const LAYOUT_WIDTHS_KEY = "modelx.workspaceLayoutWidths.v3";
+const DEFAULT_LAYOUT_WIDTHS = { sidebar: 360, inspector: 320 } as const;
+const LAYOUT_MIN_WIDTH = 260;
+const LAYOUT_MAX_WIDTH = 480;
 const SESSION_CACHE_FRESH_MS = 15_000;
 const ACTIVE_TASK_STATUSES = new Set(["running", "paused", "queued", "integrating"]);
 type LayoutWidths = { sidebar: number; inspector: number };
@@ -495,8 +499,8 @@ function readLayoutWidths(): LayoutWidths {
   try {
     const parsed = JSON.parse(localStorage.getItem(LAYOUT_WIDTHS_KEY) || "{}");
     return {
-      sidebar: Number.isFinite(parsed.sidebar) ? Math.min(420, Math.max(220, Number(parsed.sidebar))) : DEFAULT_LAYOUT_WIDTHS.sidebar,
-      inspector: Number.isFinite(parsed.inspector) ? Math.min(420, Math.max(220, Number(parsed.inspector))) : DEFAULT_LAYOUT_WIDTHS.inspector
+      sidebar: Number.isFinite(parsed.sidebar) ? Math.min(LAYOUT_MAX_WIDTH, Math.max(LAYOUT_MIN_WIDTH, Number(parsed.sidebar))) : DEFAULT_LAYOUT_WIDTHS.sidebar,
+      inspector: Number.isFinite(parsed.inspector) ? Math.min(LAYOUT_MAX_WIDTH, Math.max(LAYOUT_MIN_WIDTH, Number(parsed.inspector))) : DEFAULT_LAYOUT_WIDTHS.inspector
     };
   } catch {
     return { ...DEFAULT_LAYOUT_WIDTHS };
@@ -2268,8 +2272,8 @@ export function App() {
     const otherWidth = pane === "sidebar"
       ? inspectorOpen && view === "chat" ? layoutWidths.inspector : 0
       : sidebarOpen ? layoutWidths.sidebar : 0;
-    const maxWidth = Math.min(420, Math.max(220, window.innerWidth - otherWidth - 480));
-    setLayoutWidths((current) => ({ ...current, [pane]: Math.round(Math.min(maxWidth, Math.max(220, width))) }));
+    const maxWidth = Math.min(LAYOUT_MAX_WIDTH, Math.max(LAYOUT_MIN_WIDTH, window.innerWidth - otherWidth - 620));
+    setLayoutWidths((current) => ({ ...current, [pane]: Math.round(Math.min(maxWidth, Math.max(LAYOUT_MIN_WIDTH, width))) }));
   };
 
   const beginPaneResize = (pane: ResizingPane, event: React.PointerEvent<HTMLButtonElement>) => {
@@ -2298,7 +2302,7 @@ export function App() {
 
   const handlePaneResizeKeyDown = (pane: ResizingPane, event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "Home") { event.preventDefault(); resetPaneWidth(pane); return; }
-    if (event.key === "End") { event.preventDefault(); setPaneWidth(pane, Math.min(420, window.innerWidth - (pane === "sidebar" ? layoutWidths.inspector : layoutWidths.sidebar) - 480)); return; }
+    if (event.key === "End") { event.preventDefault(); setPaneWidth(pane, Math.min(LAYOUT_MAX_WIDTH, window.innerWidth - (pane === "sidebar" ? layoutWidths.inspector : layoutWidths.sidebar) - 620)); return; }
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const direction = pane === "sidebar" ? (event.key === "ArrowRight" ? 1 : -1) : (event.key === "ArrowLeft" ? 1 : -1);
@@ -4731,7 +4735,7 @@ export function App() {
       {!navigationPending && sessionAreaMenu && !standaloneActive && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
       {!navigationPending && taskFolderMenu && (() => { const folder = taskFolders.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
       {sidebarVisible && <button className="mobile-sidebar-backdrop" aria-label="关闭侧栏" onClick={() => setSidebarOpen(false)} />}
-      {sidebarVisible && <button className="pane-resizer pane-resizer-sidebar" type="button" role="separator" aria-label="调整任务区宽度" aria-valuemin={220} aria-valuemax={420} aria-valuenow={layoutWidths.sidebar} onPointerDown={(event) => beginPaneResize("sidebar", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("sidebar")} onKeyDown={(event) => handlePaneResizeKeyDown("sidebar", event)}><GripVertical size={14} /></button>}
+      {sidebarVisible && <button className="pane-resizer pane-resizer-sidebar" type="button" role="separator" aria-label="调整任务区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.sidebar} onPointerDown={(event) => beginPaneResize("sidebar", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("sidebar")} onKeyDown={(event) => handlePaneResizeKeyDown("sidebar", event)}><GripVertical size={14} /></button>}
 
       <main className={`main-panel ${workspaceBrowserVisible ? "has-workspace-browser-tabs" : ""}`} aria-busy={navigationPending}>
         <header className="topbar">
@@ -5247,7 +5251,7 @@ export function App() {
           {treeHasVisibleItems ? <RecoverableSectionBoundary resetKey={`${activeFileScopeId}:${treeUpdatedAt?.getTime() || 0}`} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary> : <p className="empty-note">{treeLoading ? "正在读取工作区文件" : treeQuery ? "没有匹配的文件" : "没有可显示的文件"}</p>}
         </aside>
       )}
-      {inspectorVisible && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={220} aria-valuemax={420} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
+      {inspectorVisible && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
 
       {dialog === "workspace" && <WorkspaceDialog onClose={() => setDialog(null)} onCreated={async (item) => {
         await refresh();

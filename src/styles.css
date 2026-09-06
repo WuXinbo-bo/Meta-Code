@@ -52,10 +52,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 *::-webkit-scrollbar-track { background: transparent; }
 
 .app-shell {
-  --sidebar-width: 260px;
-  --inspector-width: 270px;
+  /* Fallback values mirror design/shell.css so the shell remains coherent
+     even while the design layer is loading. */
+  --activity-rail-width: 46px;
+  --sidebar-width: 360px;
+  --inspector-width: 320px;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(420px, 1fr) var(--inspector-width);
+  grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(560px, 1fr) var(--inspector-width);
   position: relative;
   width: 100vw;
   height: 100vh;
@@ -64,9 +67,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .app-shell.sidebar-collapsed { --sidebar-width: 0px; }
 .app-shell.inspector-collapsed { --inspector-width: 0px; }
-.sidebar { grid-column: 1; }
-.main-panel { grid-column: 2; }
-.inspector { grid-column: 3; }
+.activity-rail { grid-column: 1; }
+.sidebar { grid-column: 2; }
+.main-panel { grid-column: 3; }
+.inspector { grid-column: 4; }
 
 .sidebar, .inspector {
   min-width: 0;

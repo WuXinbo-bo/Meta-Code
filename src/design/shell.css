@@ -1,7 +1,7 @@
 .app-shell {
   --activity-rail-width: 46px;
-  --sidebar-width: 248px;
-  --inspector-width: 280px;
+  --sidebar-width: 360px;
+  --inspector-width: 320px;
   grid-template-columns: var(--activity-rail-width) var(--sidebar-width) minmax(560px, 1fr) var(--inspector-width);
   background: var(--mc-canvas);
 }
@@ -453,7 +453,7 @@
 .inspector h3 { color: var(--mc-text); }
 
 @media (max-width: 1439px) and (min-width: 1100px) {
-  .app-shell:not(.inspector-collapsed) { grid-template-columns: var(--activity-rail-width) 232px minmax(0, 1fr) 264px; }
+  .app-shell:not(.inspector-collapsed) { grid-template-columns: var(--activity-rail-width) 300px minmax(0, 1fr) 280px; }
 }
 
 @media (max-width: 1099px) {
