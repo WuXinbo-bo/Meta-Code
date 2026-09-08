@@ -45,14 +45,14 @@ const NATIVE_WRAPPER_IDS = new Set(["codex-acp", "claude-acp"]);
 const DEEPSEEK_HARNESS: AcpRegistryAgent = {
   id: "deepseek-harness",
   name: "DeepSeek Harness",
-  version: "0.1.1-rc.2",
+  version: "0.1.2-rc.1",
   description: "DeepSeek 官方开源 Agent Harness，使用 ACP 标准接入（开发者预览版）",
   repository: "https://github.com/deepseek-ai/deepseek-harness",
   website: "https://deepseek-harness.github.io/deepseek-harness/",
   authors: ["DeepSeek AI"],
   license: "MIT",
   icon: "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/master/apps/web/public/favicon.svg",
-  distribution: { npx: { package: "@deepseek-ai/dsh@0.1.1-rc.2", args: ["--profile", "acp"] } }
+  distribution: { npx: { package: "@deepseek-ai/dsh@0.1.2-rc.1", args: ["--profile", "acp"] } }
 };
 
 const CURATION: Record<string, Partial<Pick<AgentMarketCatalogItem, "rank" | "tier" | "region" | "verified" | "maturity" | "hiddenByDefault">>> = {

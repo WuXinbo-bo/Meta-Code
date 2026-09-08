@@ -19,6 +19,99 @@ const execFileAsync = promisify(execFile);
 const NPM_LOCAL_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const PUBLISH_RETRY_DELAYS_MS = [80, 160, 320, 640, 1_280, 2_560, 4_000];
 
+type NpmInstallFailure = Error & { killed?: boolean; signal?: string; stderr?: string; stdout?: string; code?: string | number };
+
+function npmFailureText(error: unknown) {
+  const failure = error as NpmInstallFailure;
+  return [failure?.message, failure?.stderr, failure?.stdout, failure?.code].filter(Boolean).join("\n");
+}
+
+function registryHost(registry: string) {
+  try { return new URL(registry).host; } catch { return registry; }
+}
+
+export function isRetryableNpmInstallError(error: unknown) {
+  const failure = error as NpmInstallFailure;
+  if (failure?.killed || failure?.signal === "SIGTERM") return true;
+  return /(?:EIDLETIMEOUT|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|ERR_SOCKET_TIMEOUT|ERR_TLS|HTTP\s+(?:408|429|5\d\d)|(?:502|503|504)\s+(?:Bad Gateway|Service Unavailable|Gateway Timeout))/i.test(npmFailureText(error));
+}
+
+export function npmInstallRegistryCandidates(selected: string, probes: Array<{ registry: string; available: boolean }>, registryMode: RuntimeConfiguration["network"]["registryMode"]) {
+  const available = probes.filter((probe) => probe.available).map((probe) => probe.registry);
+  const fallback = registryMode === "auto" ? ["https://registry.npmjs.org"] : [];
+  return [...new Set([selected, ...available, ...fallback].map((item) => item.trim().replace(/\/+$/, "")).filter(Boolean))];
+}
+
+export function npmInstallArguments(prefix: string, packages: string[], registry: string, network: RuntimeConfiguration["network"]) {
+  return [
+    "install", "--prefix", prefix, ...packages,
+    "--legacy-peer-deps", "--omit=dev", "--no-audit", "--no-fund",
+    `--registry=${registry}`, "--prefer-offline",
+    `--fetch-timeout=${network.inactivityTimeoutSeconds * 1000}`, "--fetch-retries=2"
+  ];
+}
+
+export async function withNpmRegistryFallback<T>(candidates: string[], action: (registry: string) => Promise<T>, onRetry?: (registry: string) => void) {
+  const failures: string[] = [];
+  for (const [index, registry] of candidates.entries()) {
+    if (index > 0) onRetry?.(registry);
+    try {
+      return await action(registry);
+    } catch (error) {
+      failures.push(`${registryHost(registry)}: ${npmFailureText(error).replace(/\s+/g, " ").trim().slice(0, 240)}`);
+      if (!isRetryableNpmInstallError(error) || index === candidates.length - 1) {
+        const failure = error as NpmInstallFailure;
+        const detail = failures.join("；");
+        const wrapped = new Error(detail || npmFailureText(error), { cause: error });
+        Object.assign(wrapped, { killed: failure.killed, signal: failure.signal, stderr: detail });
+        throw wrapped;
+      }
+    }
+  }
+  throw new Error("没有可用的 npm 下载源");
+}
+
+function topLevelPackageRoots(nodeModules: string) {
+  let entries: fs.Dirent[] = [];
+  try { entries = fs.readdirSync(nodeModules, { withFileTypes: true }); } catch { return []; }
+  const roots: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === ".bin") continue;
+    const candidate = path.join(nodeModules, entry.name);
+    if (!entry.name.startsWith("@")) {
+      roots.push(candidate);
+      continue;
+    }
+    let scopedEntries: fs.Dirent[] = [];
+    try { scopedEntries = fs.readdirSync(candidate, { withFileTypes: true }); } catch { continue; }
+    for (const scoped of scopedEntries) if (scoped.isDirectory()) roots.push(path.join(candidate, scoped.name));
+  }
+  return roots;
+}
+
+export function missingRequiredPeerDependencies(prefix: string) {
+  const nodeModules = path.join(prefix, "node_modules");
+  const requirements = new Map<string, Set<string>>();
+  for (const packageRoot of topLevelPackageRoots(nodeModules)) {
+    const manifest = readJson<{ peerDependencies?: Record<string, string>; peerDependenciesMeta?: Record<string, { optional?: boolean }> }>(path.join(packageRoot, "package.json"));
+    for (const [name, range] of Object.entries(manifest?.peerDependencies || {})) {
+      if (manifest?.peerDependenciesMeta?.[name]?.optional) continue;
+      if (fs.existsSync(path.join(nodeModules, ...name.split("/"), "package.json"))) continue;
+      const ranges = requirements.get(name) || new Set<string>();
+      ranges.add(range);
+      requirements.set(name, ranges);
+    }
+  }
+  return [...requirements.entries()].map(([name, ranges]) => {
+    const values = [...ranges];
+    const valid = values.map((value) => semver.validRange(value));
+    if (valid.every(Boolean) && valid.some((value, index) => valid.slice(index + 1).some((other) => !semver.intersects(value!, other!)))) {
+      throw new Error(`${name} 的运行时依赖版本互不兼容：${values.join("、")}`);
+    }
+    return `${name}@${values[0]}`;
+  }).sort();
+}
+
 function isTransientWindowsRenameError(error: unknown) {
   if (process.platform !== "win32" || !error || typeof error !== "object") return false;
   return ["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"].includes(String((error as NodeJS.ErrnoException).code || ""));
@@ -306,12 +399,40 @@ export class CliRuntimeManager {
     delete env.NODE_OPTIONS;
     const dnsOption = "--dns-result-order=ipv4first";
     env.NODE_OPTIONS = dnsOption;
-    const installArchive = async (prefix: string, archive: string) => execFileAsync(toolchain.node, [npmCli, "install", "--prefix", prefix, archive, "--omit=optional", "--omit=dev", "--no-audit", "--no-fund", `--registry=${source.selected}`, "--prefer-offline", `--fetch-timeout=${configuration.network.inactivityTimeoutSeconds * 1000}`, "--fetch-retries=2"], { encoding: "utf8", timeout: NPM_LOCAL_INSTALL_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
+    const registries = npmInstallRegistryCandidates(source.selected, source.probes, configuration.network.registryMode);
+    const runNpm = (prefix: string, packages: string[], registry: string) => execFileAsync(toolchain.node, [npmCli, ...npmInstallArguments(prefix, packages, registry, configuration.network)], { encoding: "utf8", timeout: NPM_LOCAL_INSTALL_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
+    const resetPrefix = async (prefix: string) => {
+      await fsp.rm(prefix, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+      await fsp.mkdir(prefix, { recursive: true });
+    };
+    const installRoot = async (registry: string) => {
+      await resetPrefix(staging);
+      await runNpm(staging, [archives[0].file], registry);
+      for (let pass = 0; pass < 4; pass += 1) {
+        const peers = missingRequiredPeerDependencies(staging);
+        if (!peers.length) return;
+        this.report({ runtimeId: id, phase: "installing", version: source.version, message: `正在补齐 ${peers.length} 个运行时依赖`, registry, sourceProbes: source.probes, startedAt, active: true, resumable: false });
+        await runNpm(staging, peers, registry);
+      }
+      const unresolved = missingRequiredPeerDependencies(staging);
+      if (unresolved.length) throw new Error(`安装后仍缺少运行时依赖：${unresolved.slice(0, 8).join("、")}`);
+    };
+    const installPlatformArchive = async (prefix: string, archive: string, registry: string) => {
+      await resetPrefix(prefix);
+      await runNpm(prefix, [archive], registry);
+    };
+    const reportRetry = (registry: string) => {
+      this.report({ runtimeId: id, phase: "installing", version: source.version, message: `下载源连接失败，正在切换到 ${registryHost(registry)}`, registry, sourceProbes: source.probes, startedAt, active: true, resumable: false });
+    };
     try {
-      await installArchive(staging, archives[0].file);
+      const installedRegistry = await withNpmRegistryFallback(registries, async (registry) => {
+        await installRoot(registry);
+        return registry;
+      }, reportRetry);
       for (const [index, item] of archives.slice(1).entries()) {
         const platformRoot = path.join(staging, `.platform-${index}`);
-        await installArchive(platformRoot, item.file);
+        const orderedRegistries = [installedRegistry, ...registries.filter((registry) => registry !== installedRegistry)];
+        await withNpmRegistryFallback(orderedRegistries, (registry) => installPlatformArchive(platformRoot, item.file, registry), reportRetry);
         const sourcePackage = path.join(platformRoot, "node_modules", ...item.artifact.packageName.split("/"));
         const targetPackage = path.join(staging, "node_modules", ...item.artifact.installName.split("/"));
         if (!fs.existsSync(sourcePackage)) throw new Error(`本地安装缺少 ${item.artifact.packageName}`);
@@ -322,9 +443,9 @@ export class CliRuntimeManager {
       await definition.finalizeInstallation?.(staging);
     } catch (error) {
       const failure = error as Error & { killed?: boolean; signal?: string; stderr?: string };
-      if (failure.killed || failure.signal === "SIGTERM") throw new Error(`${definition.label} 本地安装超过 10 分钟，已安全终止`);
+      if ((failure.killed || failure.signal === "SIGTERM") && !failure.stderr) throw new Error(`${definition.label} 本地安装超过 10 分钟，已安全终止`);
       const stderr = String(failure.stderr || "").replace(/\s+/g, " ").trim();
-      throw new Error(`${definition.label} 安装失败：${(stderr || "本地软件包安装进程被中断").slice(0, 500)}`);
+      throw new Error(`${definition.label} 安装失败：${(stderr || failure.message || "本地软件包安装进程被中断").slice(0, 500)}`);
     }
     const packageFile = path.join(staging, "node_modules", ...packageName.split("/"), "package.json");
     return readJson<{ version?: string }>(packageFile)?.version || source.version;

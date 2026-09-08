@@ -37,7 +37,7 @@ assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.verif
 assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.maturity, "preview");
 assert.equal(catalog.items.find((item) => item.id === "deepseek-harness")?.installable, true);
 const deepseek = await store.agent("deepseek-harness");
-assert.equal(deepseek.distribution.npx?.package, "@deepseek-ai/dsh@0.1.1-rc.2");
+assert.equal(deepseek.distribution.npx?.package, "@deepseek-ai/dsh@0.1.2-rc.1");
 assert.equal(createAcpRuntimeDefinition(deepseek)?.command, "dsh");
 assert.equal(catalog.items.find((item) => item.id === "fixture-agent")?.installed, false);
 assert.equal(catalog.items.find((item) => item.id === "fixture-agent")?.accent, providerBrandAccent("fixture-agent"));
