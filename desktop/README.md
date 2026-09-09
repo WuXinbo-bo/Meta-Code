@@ -5,7 +5,7 @@
 默认产物目录位于仓库的同级目录之外：
 
 ```text
-../Meta-Code-Packages/0.1.4/
+../Meta-Code-Packages/0.1.5/
 ```
 
 桌面版使用 Electron 自带的固定 Node 运行时启动编译后的后端，随机选择本地端口，不占用开发版的 `4338/4339`。个人数据继续保存在 `%USERPROFILE%\.metacode`；卸载程序不得删除该目录。
