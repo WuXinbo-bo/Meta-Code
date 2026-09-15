@@ -75,6 +75,7 @@ import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from
 import type { CodexLinkBinding } from "./codex-link/model";
 import { RequestCoordinator } from "./requestCoordinator";
 import { WorkspaceResourceCache } from "./workspaceResourceCache";
+import { agentChangeTargets } from "./agentRealtime";
 import { realtimeCoordinator } from "./realtimeCoordinator";
 import { isSessionPayload, matchesSessionNavigation } from "./sessionNavigation";
 import {
@@ -734,6 +735,7 @@ type AgentThread = {
   mode?: "analysis" | "review" | "implementation";
   task?: string;
   logCount?: number;
+  revision?: number;
 };
 
 const agentThreadSummaryCache = new WorkspaceResourceCache<AgentThread[]>(12);
@@ -931,7 +933,7 @@ function agentModeLabel(mode?: AgentThread["mode"]) {
 function agentThreadsSnapshot(agents: AgentThread[]) {
   return agents.map((agent) => {
     const latest = agent.logs[0];
-    return [agent.id, agent.status, agent.updatedAt, agent.logs.length, latest?.id || "", String(latest?.text || "").length].join(":");
+    return [agent.id, agent.status, agent.revision || 0, agent.updatedAt, agent.logCount ?? agent.logs.length, latest?.id || "", String(latest?.text || "").length].join(":");
   }).join("|");
 }
 
@@ -952,7 +954,8 @@ function normalizeAgentThreads(value: unknown): AgentThread[] {
       id: String(source.id || `legacy-agent-${threadIndex}`), parentThreadId: String(source.parentThreadId || ""), nickname: String(source.nickname || `子 Agent ${threadIndex + 1}`), path: String(source.path || ""), status,
       updatedAt: typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt)) ? source.updatedAt : logs.at(-1)?.createdAt || new Date(0).toISOString(),
       usage: { input_tokens: Number(usage?.input_tokens) || 0, cached_input_tokens: Number(usage?.cached_input_tokens) || 0, output_tokens: Number(usage?.output_tokens) || 0, reasoning_output_tokens: Number(usage?.reasoning_output_tokens) || 0 },
-      logs, provider, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length
+      logs, provider, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length,
+      revision: Math.max(0, Number(source.revision) || 0)
     }];
   }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -1591,29 +1594,81 @@ function SubagentDrawer({
       setAgentDetailLoading(false);
       return;
     }
-    const cacheKey = `${sessionId}:${selectedAgentSummary.id}`;
+    const agentId = selectedAgentSummary.id;
+    const cacheKey = `${sessionId}:${agentId}`;
     const cached = agentThreadDetailCache.get(cacheKey);
-    if (cached?.updatedAt === selectedAgentSummary.updatedAt) {
-      setSelectedAgentDetail(cached);
-      setAgentDetailLoading(false);
-      return;
-    }
-    const controller = new AbortController();
     setSelectedAgentDetail(cached || null);
-    setAgentDetailLoading(true);
-    api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(selectedAgentSummary.id)}`, { signal: controller.signal })
-      .then((value) => normalizeAgentThreads([value])[0])
-      .then((agent) => {
-        if (!agent || controller.signal.aborted) return;
+    setAgentDetailLoading(!cached);
+    let stopped = false;
+    let loading = false;
+    let rerunRequested = false;
+    let failures = 0;
+    let timer: number | undefined;
+    let controller: AbortController | undefined;
+    const schedule = (delay: number) => {
+      if (stopped) return;
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(requestLoad, delay);
+    };
+    const requestLoad = () => {
+      if (stopped) return;
+      if (timer) window.clearTimeout(timer);
+      timer = undefined;
+      if (loading) {
+        rerunRequested = true;
+        return;
+      }
+      void loadDetail();
+    };
+    const loadDetail = async () => {
+      if (stopped) return;
+      if (document.hidden) {
+        schedule(1_200);
+        return;
+      }
+      loading = true;
+      setAgentDetailLoading(true);
+      controller = new AbortController();
+      let nextDelay: number | null = null;
+      try {
+        const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, { signal: controller.signal });
+        const agent = normalizeAgentThreads([value])[0];
+        if (!agent || stopped) return;
+        failures = 0;
         agentThreadDetailCache.set(cacheKey, agent);
         setSelectedAgentDetail(agent);
-      })
-      .catch((error) => {
-        if (!(error instanceof DOMException && error.name === "AbortError")) setSelectedAgentDetail((current) => current || null);
-      })
-      .finally(() => { if (!controller.signal.aborted) setAgentDetailLoading(false); });
-    return () => controller.abort();
-  }, [sessionId, selectedAgentSummary?.id, selectedAgentSummary?.updatedAt]);
+        if (sessionRunning || agent.status === "running") nextDelay = 1_000;
+      } catch (error) {
+        if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
+        failures += 1;
+        nextDelay = Math.min(8_000, 1_000 * (2 ** Math.min(failures, 3)));
+      } finally {
+        loading = false;
+        if (stopped) return;
+        setAgentDetailLoading(false);
+        if (rerunRequested) {
+          rerunRequested = false;
+          schedule(0);
+        } else if (nextDelay !== null) schedule(nextDelay);
+      }
+    };
+    const onAgentsChanged = (detail: Record<string, unknown>) => {
+      if (agentChangeTargets(detail, sessionId, agentId)) requestLoad();
+    };
+    const onVisibilityChange = () => { if (!document.hidden) requestLoad(); };
+    requestLoad();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const unsubscribeAgents = realtimeCoordinator.subscribe("agents.changed", onAgentsChanged);
+    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => requestLoad());
+    return () => {
+      stopped = true;
+      controller?.abort();
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      unsubscribeAgents();
+      unsubscribeReconcile();
+    };
+  }, [sessionId, selectedAgentSummary?.id, sessionRunning]);
   const selectedAgent = selectedAgentDetail || selectedAgentSummary;
   const selectedAgentLogs = useMemo(() => (selectedAgentDetail?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => left.createdAt.localeCompare(right.createdAt)), [selectedAgentDetail?.logs]);
   const related = useMemo(() => messages.filter((candidate) => {

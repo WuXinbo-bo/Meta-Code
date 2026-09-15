@@ -32,7 +32,7 @@ import { settleSupersededReasoning } from "./activity/lifecycle.js";
 import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexContextCompactionNotice, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
-import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, mergeAgentRuntimeStatus, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
+import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, isNativeAgentProjection, mergeAgentRuntimeStatus, nativeAgentMessageCanReuse, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
 import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
 import { WorkbenchEventHub } from "./eventHub.js";
@@ -297,6 +297,7 @@ type DelegatedTask = {
   retryCount?: number;
   retryOf?: string;
   runtimeBinding?: RuntimeExecutionIdentity;
+  agentRevision?: number;
 };
 
 type AgentLog = {
@@ -326,6 +327,7 @@ type AgentThread = {
   mode?: DelegationMode;
   task?: string;
   logCount?: number;
+  revision?: number;
 };
 
 const MAX_STORED_AGENT_LOGS = 120;
@@ -487,6 +489,7 @@ const codexAgentTranscriptIndex = new AgentTranscriptIndex(
 );
 const codexAgentSummaryFileCache = new Map<string, { mtimeMs: number; size: number; agent: AgentThread }>();
 const codexAgentThreadFileCache = new Map<string, { mtimeMs: number; size: number; agent: AgentThread }>();
+const claudeAgentThreadFileCache = new Map<string, { mtimeMs: number; size: number; agent: AgentThread }>();
 let queuePaused = false;
 const BACKUP_DIR = APP_PATHS.backupsDir;
 let backupPolicy = loadBackupPolicy(BACKUP_POLICY_FILE);
@@ -2170,6 +2173,57 @@ type AcpBridgeAgentState = AgentThread & {
 };
 
 const activeDelegationTasks = new Map<string, { parentTaskId: string; providerId: AgentProviderId; controller: AbortController }>();
+const pendingAgentPublishes = new Map<string, { session: Session; agent: AgentThread }>();
+const agentPublishTimers = new Map<string, NodeJS.Timeout>();
+const publishedAgentRevisions = new Map<string, number>();
+
+function emitAgentChanged(session: Session, agent: AgentThread) {
+  const key = `${session.id}:${agent.id}`;
+  const revision = Math.max(0, Number(agent.revision || 0));
+  if ((publishedAgentRevisions.get(key) ?? -1) >= revision && agent.status === "running") return;
+  publishedAgentRevisions.set(key, revision);
+  eventHub.publish("agents.changed", {
+    sessionId: session.id,
+    agentId: agent.id,
+    revision,
+    status: agent.status,
+    logCount: agent.logCount ?? agent.logs.length
+  }, [session.ownerUserId]);
+}
+
+function publishAgentChanged(session: Session, agent: AgentThread, immediate = agent.status !== "running") {
+  const key = `${session.id}:${agent.id}`;
+  pendingAgentPublishes.set(key, { session, agent });
+  if (immediate) {
+    const timer = agentPublishTimers.get(key);
+    if (timer) clearTimeout(timer);
+    agentPublishTimers.delete(key);
+    const pending = pendingAgentPublishes.get(key);
+    pendingAgentPublishes.delete(key);
+    if (pending) emitAgentChanged(pending.session, pending.agent);
+    return;
+  }
+  if (agentPublishTimers.has(key)) return;
+  const timer = setTimeout(() => {
+    agentPublishTimers.delete(key);
+    const pending = pendingAgentPublishes.get(key);
+    pendingAgentPublishes.delete(key);
+    if (pending) emitAgentChanged(pending.session, pending.agent);
+  }, 150);
+  timer.unref();
+  agentPublishTimers.set(key, timer);
+}
+
+function clearAgentPublishState(sessionId?: string) {
+  const matches = (key: string) => !sessionId || key.startsWith(`${sessionId}:`);
+  for (const [key, timer] of agentPublishTimers) {
+    if (!matches(key)) continue;
+    clearTimeout(timer);
+    agentPublishTimers.delete(key);
+  }
+  for (const key of pendingAgentPublishes.keys()) if (matches(key)) pendingAgentPublishes.delete(key);
+  for (const key of publishedAgentRevisions.keys()) if (matches(key)) publishedAgentRevisions.delete(key);
+}
 type MainAgentRunner = (session: Session, workspace: Workspace, prompt: string, activeRun: ActiveRun) => Promise<TurnOutcome>;
 type WorkflowPlannerRunner = typeof runBuiltinWorkflowPlan;
 type WorkflowWorkerRunner = typeof runBuiltinWorkflowNode;
@@ -2520,6 +2574,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     path: "Codex CLI · 独立线程",
     status: "running",
     updatedAt: new Date().toISOString(),
+    revision: 1,
     usage: emptyUsage(),
     logs: [],
     task: prompt,
@@ -2553,6 +2608,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
         threadId = id;
         agent.path = `Codex CLI · ${id}`;
         agent.updatedAt = new Date().toISOString();
+        agent.revision = (agent.revision || 0) + 1;
         upsertCodexBridgeMessage(parentSession, agent);
         await flushStateSave();
       },
@@ -2573,6 +2629,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
         agent.status = "failed";
       }
       agent.updatedAt = new Date().toISOString();
+      agent.revision = (agent.revision || 0) + 1;
       upsertCodexBridgeMessage(parentSession, agent);
       if (["thread.started", "turn.started", "turn.completed", "turn.failed", "error"].includes(event.type)) await flushStateSave();
       else scheduleStateSave();
@@ -2582,6 +2639,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     if (terminal.failure) throw new Error(terminal.failure);
     agent.finalText = finalText;
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     upsertCodexBridgeMessage(parentSession, agent);
     await saveState();
     return { ok: true, taskId, threadId, parentTaskId, cwd, status: agent.status, usage: agent.usage, finalText, events: newestAgentLogs(agent.logs).slice(0, 40) };
@@ -2589,6 +2647,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     const timedOut = timeoutReason(controller.signal);
     agent.status = timedOut ? "failed" : controller.signal.aborted ? "interrupted" : "failed";
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     const message = timedOut?.message || (error instanceof Error ? error.message : String(error));
     agent.logs.push({ id: uid("log"), createdAt: agent.updatedAt, kind: controller.signal.aborted ? "status" : "error", title: timedOut ? "任务超时" : controller.signal.aborted ? "任务已中断" : "执行失败", text: message });
     if (persistedTask && timedOut) {
@@ -2776,7 +2835,7 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "codex", nickname: agent.nickname,
     cwd: agent.cwd, task: agent.task, status: agent.status, updatedAt: agent.updatedAt,
-    usage: agent.usage, finalText: agent.finalText
+    usage: agent.usage, finalText: agent.finalText, agentRevision: agent.revision
   });
   const sourceId = `codex-worker:${agent.id}`;
   const running = agent.status === "running";
@@ -2794,6 +2853,7 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
     path: agent.path,
     updatedAt: agent.updatedAt,
     usage: agent.usage,
+    revision: agent.revision,
     logs: agent.logs,
     finalText: agent.finalText
   };
@@ -2811,6 +2871,7 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
   }
   parentSession.updatedAt = now;
   parentSession.revision += 1;
+  publishAgentChanged(parentSession, agent);
 }
 
 function claudeToolEventType(toolName = "") {
@@ -3042,7 +3103,7 @@ function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAg
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "claude", mode: agent.mode,
     nickname: agent.nickname, cwd: agent.cwd, task: agent.task, status: agent.status,
-    updatedAt: agent.updatedAt, usage: agent.usage, finalText: agent.finalText
+    updatedAt: agent.updatedAt, usage: agent.usage, finalText: agent.finalText, agentRevision: agent.revision
   });
   const sourceId = `claude-worker:${agent.id}`;
   const running = agent.status === "running";
@@ -3061,6 +3122,7 @@ function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAg
     path: agent.path,
     updatedAt: agent.updatedAt,
     usage: agent.usage,
+    revision: agent.revision,
     logs: agent.logs,
     finalText: agent.finalText
   };
@@ -3078,6 +3140,7 @@ function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAg
   }
   parentSession.updatedAt = now;
   parentSession.revision += 1;
+  publishAgentChanged(parentSession, agent);
 }
 
 function assertExecutionCwd(workspace: Workspace, input: string) {
@@ -3113,6 +3176,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
     path: "Claude CLI · 独立上下文",
     status: "running",
     updatedAt: new Date().toISOString(),
+    revision: 1,
     usage: emptyUsage(),
     logs: [],
     task: prompt,
@@ -3165,6 +3229,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
         if (event.type === "assistant" || event.type === "turn.completed") finalText = event.text || finalText;
         if (event.usage) agent.usage = addUsage(agent.usage, event.usage);
         agent.updatedAt = new Date().toISOString();
+        agent.revision = (agent.revision || 0) + 1;
         upsertClaudeBridgeMessage(parentSession, agent);
         if (["turn.completed", "error"].includes(event.type)) await flushStateSave();
         else scheduleStateSave();
@@ -3175,6 +3240,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
     agent.finalText = finalText;
     agent.status = "completed";
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     upsertClaudeBridgeMessage(parentSession, agent);
     await saveState();
     return { ok: true, taskId, sessionId: result.sessionId, parentTaskId, status: agent.status, usage: agent.usage, finalText, events: newestAgentLogs(agent.logs).slice(0, 40) };
@@ -3182,6 +3248,7 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
     const timedOut = timeoutReason(controller.signal);
     agent.status = timedOut ? "failed" : controller.signal.aborted ? "interrupted" : "failed";
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     const message = timedOut?.message || (error instanceof Error ? error.message : String(error));
     agent.logs.push({ id: uid("log"), createdAt: agent.updatedAt, kind: controller.signal.aborted ? "status" : "error", title: timedOut ? "任务超时" : controller.signal.aborted ? "任务已中断" : "执行失败", text: message });
     if (persistedTask && timedOut) {
@@ -3776,7 +3843,7 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: agent.provider, adapterId: descriptor?.adapterId, mode: agent.mode,
     nickname: agent.nickname, cwd: agent.cwd, task: agent.task, status: agent.status,
-    updatedAt: agent.updatedAt, usage: agent.usage, finalText: agent.finalText
+    updatedAt: agent.updatedAt, usage: agent.usage, finalText: agent.finalText, agentRevision: agent.revision
   });
   const sourceId = `${agent.provider}-worker:${agent.id}`;
   const running = agent.status === "running";
@@ -3795,6 +3862,7 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
     path: agent.path,
     updatedAt: agent.updatedAt,
     usage: agent.usage,
+    revision: agent.revision,
     logs: agent.logs,
     finalText: agent.finalText
   };
@@ -3813,6 +3881,7 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
   }
   parentSession.updatedAt = now;
   parentSession.revision += 1;
+  publishAgentChanged(parentSession, agent);
   publishSessionChanged(parentSession);
 }
 
@@ -3842,6 +3911,7 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
     path: `${manifest.shortName} ACP · 独立上下文`,
     status: "running",
     updatedAt: new Date().toISOString(),
+    revision: 1,
     usage: emptyUsage(),
     logs: [],
     provider: manifest.id,
@@ -3873,6 +3943,7 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
       onEngineSessionId: (sessionId) => {
         agent.path = `${manifest.shortName} ACP · ${sessionId}`;
         agent.updatedAt = new Date().toISOString();
+        agent.revision = (agent.revision || 0) + 1;
         upsertAcpBridgeMessage(parentSession, agent);
       },
       onConfigOptions: () => undefined,
@@ -3886,6 +3957,7 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
         else agent.logs.push(log);
         trimAgentLogs(agent.logs);
         agent.updatedAt = new Date().toISOString();
+        agent.revision = (agent.revision || 0) + 1;
         upsertAcpBridgeMessage(parentSession, agent);
         if (["turn.completed", "error"].includes(event.type)) await flushStateSave();
         else scheduleStateSave();
@@ -3894,12 +3966,14 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
     agent.finalText = finalText;
     agent.status = "completed";
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     upsertAcpBridgeMessage(parentSession, agent);
     await saveState();
     return { ok: true, taskId, parentTaskId, status: agent.status, usage: agent.usage, finalText, events: newestAgentLogs(agent.logs).slice(0, 40) };
   } catch (error) {
     agent.status = controller.signal.aborted ? "interrupted" : "failed";
     agent.updatedAt = new Date().toISOString();
+    agent.revision = (agent.revision || 0) + 1;
     const message = error instanceof Error ? error.message : String(error);
     agent.logs.push({ id: uid("log"), createdAt: agent.updatedAt, kind: controller.signal.aborted ? "status" : "error", title: controller.signal.aborted ? "任务已中断" : "执行失败", text: message });
     trimAgentLogs(agent.logs);
@@ -4778,6 +4852,7 @@ async function codexAgentSummaryFromTranscript(descriptor: AgentTranscriptDescri
       path: String(meta?.agent_path || spawn?.agent_path || ""),
       status,
       updatedAt: new Date(descriptor.mtimeMs).toISOString(),
+      revision: Math.max(0, Math.floor(descriptor.mtimeMs)),
       usage,
       logs: [],
       logCount: detailed && detailed.mtimeMs === descriptor.mtimeMs && detailed.size === descriptor.size
@@ -4861,7 +4936,7 @@ async function codexAgentThreadFromTranscript(descriptor: AgentTranscriptDescrip
   const agent: AgentThread = {
     id: descriptor.threadId, parentThreadId: descriptor.parentThreadId,
     nickname: String(meta?.agent_nickname || spawn?.agent_nickname || "子 Agent"), path: String(meta?.agent_path || spawn?.agent_path || ""),
-    status, updatedAt, usage, logs: newestAgentLogs(logs), logCount: logs.length, provider: "codex"
+    status, updatedAt, revision: Math.max(0, Math.floor(descriptor.mtimeMs)), usage, logs: newestAgentLogs(logs), logCount: logs.length, provider: "codex"
   };
   codexAgentThreadFileCache.set(descriptor.file, { mtimeMs: descriptor.mtimeMs, size: descriptor.size, agent });
   return agent;
@@ -4927,9 +5002,29 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
   const files = (await Promise.all(roots.map(jsonlFiles))).flat();
   const agents: AgentThread[] = [];
   for (const file of files) {
+    let fileStat: fs.Stats;
+    try {
+      fileStat = await fsp.stat(file);
+    } catch {
+      continue;
+    }
+    const cached = claudeAgentThreadFileCache.get(file);
+    if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+      agents.push({
+        ...cached.agent,
+        status: cached.agent.status === "completed" || cached.agent.status === "failed"
+          ? cached.agent.status
+          : parentIsRunning ? "running" : "interrupted"
+      });
+      continue;
+    }
     let records: Record<string, unknown>[];
     try {
-      records = (await fsp.readFile(file, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      records = (await fsp.readFile(file, "utf8")).split(/\r?\n/).flatMap((line) => {
+        if (!line.trim()) return [];
+        try { return [JSON.parse(line) as Record<string, unknown>]; }
+        catch { return []; }
+      });
     } catch {
       continue;
     }
@@ -4960,7 +5055,7 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
       }
     });
     const logs = [...logsById.values()];
-    const updatedAt = records.map((record) => typeof record.timestamp === "string" ? record.timestamp : "").filter(Boolean).sort().at(-1) || new Date(0).toISOString();
+    const updatedAt = records.map((record) => typeof record.timestamp === "string" ? record.timestamp : "").filter(Boolean).sort().at(-1) || fileStat.mtime.toISOString();
     const terminal = [...records].reverse().find((record) => record.type === "assistant");
     const terminalMessage = recordOf(terminal?.message);
     const failed = records.some((record) => /error|failed/i.test(String(record.type || "")) && record.isSidechain === true);
@@ -4982,18 +5077,21 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
         reasoning_output_tokens: 0
       });
     }
-    agents.push({
+    const agent: AgentThread = {
       id: agentId,
       parentThreadId: parentSessionId,
       nickname: String(metadata.description || metadata.agentType || `Claude Agent ${agents.length + 1}`),
       path: String(metadata.agentType || "Claude CLI · 原生 Agent"),
       status,
       updatedAt,
+      revision: Math.max(0, Math.floor(fileStat.mtimeMs)),
       usage,
       logs: newestAgentLogs(logs),
       provider: "claude",
       task
-    });
+    };
+    claudeAgentThreadFileCache.set(file, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, agent });
+    agents.push(agent);
   }
   return agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -5044,7 +5142,7 @@ async function reconcileNativeCodexDelegatedTasks() {
 
 function listManagedAgentThreads(session: Session): AgentThread[] {
   const seen = new Set<string>();
-  return session.messages.filter((message) => message.eventType === "subagent").map((message, index): AgentThread => {
+  return session.messages.filter((message) => message.eventType === "subagent" && !isNativeAgentProjection(message.payload)).map((message, index): AgentThread => {
     const payload = message.payload as Record<string, any> | undefined;
     if (payload && (payload.action === "spawn_agent" || String(payload.type || "").endsWith("_subagent"))) {
       const provider = String(payload.provider || (payload.type === "codex_subagent" ? "codex" : "claude")).trim().toLowerCase();
@@ -5060,6 +5158,7 @@ function listManagedAgentThreads(session: Session): AgentThread[] {
           session.status === "running"
         ),
         updatedAt: String(payload.updatedAt || message.createdAt),
+        revision: Math.max(0, Number(payload.revision || 0)),
         usage: payload.usage || emptyUsage(),
         logs: Array.isArray(payload.logs) ? newestAgentLogs(payload.logs) : [],
         provider,
@@ -5108,6 +5207,7 @@ function mergeAgentThreads(...groups: AgentThread[][]) {
         task: existing.task || agent.task,
         toolUseId: existing.toolUseId || agent.toolUseId,
         updatedAt: existing.updatedAt > agent.updatedAt ? existing.updatedAt : agent.updatedAt,
+        revision: Math.max(existing.revision || 0, agent.revision || 0),
         status: mergeAgentRuntimeStatus(existing.status, agent.status),
         logs: logs.slice(0, MAX_VISIBLE_AGENT_LOGS),
         usage: {
@@ -5132,6 +5232,7 @@ function listPersistedDelegatedAgentThreads(session: Session): AgentThread[] {
       path: task.cwd,
       status: task.status === "queued" ? "running" : task.status,
       updatedAt: task.updatedAt,
+      revision: Math.max(0, Number(task.agentRevision || 0)),
       usage: task.usage || emptyUsage(),
       logs: task.finalText ? [withCanonicalAgentActivity({ id: `${task.id}:final`, createdAt: task.updatedAt, kind: "message", title: `${providerDisplayName(task.provider)} 回复`, text: task.finalText }, {
         provider: task.provider,
@@ -5167,8 +5268,11 @@ async function listSessionAgentThreads(session: Session, agentId?: string): Prom
       ? await listCodexAgentThreadDetails(session.codexThreadId || "", session.status === "running", agentId)
       : await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
     : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
+  // Detail reads are side-effect free. Project native lifecycle cards only while
+  // reconciling the session-wide summary, otherwise summary/detail timestamps can
+  // alternate and create a self-sustaining refresh loop.
+  if (!agentId) syncNativeAgentMessages(session, native);
   const merged = mergeAgentThreads(native, managed, persisted);
-  syncNativeAgentMessages(session, merged);
   return agentId ? merged.filter((agent) => agent.id === agentId) : merged;
 }
 
@@ -5188,6 +5292,7 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
       status: agent.status,
       task: agent.task || "",
       updatedAt: agent.updatedAt,
+      revision: agent.revision,
       usage: agent.usage,
       native: true
     };
@@ -5196,7 +5301,10 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
       ? `${agent.nickname}正在原生 ${providerDisplayName(provider)} Agent 中执行`
       : `${agent.nickname}${agent.status === "completed" ? "已完成" : agent.status === "failed" ? "执行失败" : "已中断"}`;
     const existing = messageBySourceId(session, sourceId)
-      || session.messages.find((message) => message.eventType === "subagent" && String(recordOf(message.payload)?.agent_id || "") === agent.id);
+      || session.messages.find((message) => {
+        const previous = recordOf(message.payload);
+        return message.eventType === "subagent" && nativeAgentMessageCanReuse(previous, agent.id);
+      });
     if (existing) {
       const previous = recordOf(existing.payload);
       if (existing.text === text && existing.eventPhase === eventPhase && previous?.updatedAt === agent.updatedAt
@@ -5215,7 +5323,7 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
   session.updatedAt = new Date().toISOString();
   session.revision += 1;
   scheduleStateSave();
-  eventHub.publish("agents.changed", { sessionId: session.id }, [session.ownerUserId]);
+  for (const agent of agents) publishAgentChanged(session, agent);
   publishSessionChanged(session);
   return true;
 }
@@ -5310,6 +5418,7 @@ async function shutdown(reason: string) {
     for (const timer of sessionPublishTimers.values()) clearTimeout(timer);
     sessionPublishTimers.clear();
     pendingSessionPublishes.clear();
+    clearAgentPublishState();
     if (workflowLeaseReconciler) clearInterval(workflowLeaseReconciler);
     if (sessionTrashCleaner) clearInterval(sessionTrashCleaner);
     appUpdateService.close();
@@ -9835,6 +9944,7 @@ async function moveSessionToTrash(session: Session, options: { batchId?: string 
     throw error;
   }
   if (!options.deferSave) {
+    clearAgentPublishState(session.id);
     sessionManagementRepository.log(session.ownerUserId, session.id, "trash", true, { trashId: trash.id });
     eventHub.publish("session.deleted", { sessionId: session.id, recoverable: true, trashId: trash.id }, [session.ownerUserId]);
     eventHub.publish("sessions.changed", {}, [session.ownerUserId]);

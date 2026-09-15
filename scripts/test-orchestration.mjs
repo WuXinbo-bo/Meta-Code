@@ -5,6 +5,8 @@ import {
   delegationAdmission,
   delegationIdempotency,
   mergeAgentRuntimeStatus,
+  nativeAgentMessageCanReuse,
+  isNativeAgentProjection,
   orchestrationCapabilities,
   recoverDelegatedTaskAfterRestart,
   recoverSessionAfterRestart,
@@ -40,6 +42,15 @@ assert.equal(codexTerminalStatusFromMarkers(["error:1", "task_complete"]), "comp
 assert.equal(codexTerminalStatusFromMarkers(["turn.failed"]), "failed");
 assert.equal(codexTerminalStatusFromMarkers(["error:1"]), undefined);
 console.log("agent terminal status reconciliation contracts OK");
+
+const bridgePayload = { type: "codex_subagent", action: "spawn_agent", agent_id: "worker-1", logs: [{ id: "live-1" }] };
+assert.equal(isNativeAgentProjection(bridgePayload), false);
+assert.equal(nativeAgentMessageCanReuse(bridgePayload, "worker-1"), false, "native projection must not overwrite live bridge logs");
+const nativePayload = { type: "codex_subagent", native: true, agent_id: "thread-1" };
+assert.equal(isNativeAgentProjection(nativePayload), true);
+assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-1"), true);
+assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-2"), false);
+console.log("agent message ownership contracts OK");
 
 const terminalStream = {
   [Symbol.asyncIterator]() {

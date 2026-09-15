@@ -95,3 +95,18 @@ export function codexTerminalStatusFromMarkers(markers: string[]): Extract<Agent
   }
   return undefined;
 }
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** Native transcript projection must never take ownership of a workbench bridge message. */
+export function nativeAgentMessageCanReuse(payload: unknown, agentId: string) {
+  const source = recordOf(payload);
+  if (!source || String(source.agent_id || "") !== agentId) return false;
+  return source.native === true || source.action !== "spawn_agent";
+}
+
+export function isNativeAgentProjection(payload: unknown) {
+  return recordOf(payload)?.native === true;
+}
