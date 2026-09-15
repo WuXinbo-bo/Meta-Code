@@ -97,6 +97,7 @@
     "test:performance-monitor": "node --import tsx scripts/test-performance-monitor.mjs",
     "test:navigation-performance": "node --import tsx scripts/test-navigation-performance.mjs",
     "test:session-navigation": "node --import tsx scripts/test-session-navigation.mjs",
+    "test:session-creation": "npm run build && node scripts/test-session-creation.mjs",
     "test:secret-vault": "node --import tsx scripts/test-secret-vault.mjs",
     "test:path-boundary": "node --import tsx scripts/test-path-boundary.mjs",
     "test:local-api-security": "node --import tsx scripts/test-local-api-security.mjs",

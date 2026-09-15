@@ -77,6 +77,14 @@ import { RequestCoordinator } from "./requestCoordinator";
 import { WorkspaceResourceCache } from "./workspaceResourceCache";
 import { realtimeCoordinator } from "./realtimeCoordinator";
 import { isSessionPayload, matchesSessionNavigation } from "./sessionNavigation";
+import {
+  bindPendingSessionCreation,
+  pendingCreationConfirmed,
+  reconcilePendingSessionCreation,
+  sessionResourceIsKnown,
+  upsertCreatedSession,
+  type PendingSessionCreation
+} from "./sessionCreation";
 import type { MarkdownBodyProps } from "./components/MarkdownBody";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
@@ -330,7 +338,6 @@ type Session = SessionSummary & {
   branchedFromMessageId?: string;
   messageWindow?: MessageWindow;
 };
-type PendingCreatedSession = { id: string; scopeKey: string };
 type MessageWindow = { start: number; end: number; total: number; hasMore: boolean };
 type MessagePage = { messages: Message[]; window: MessageWindow };
 type ActivityMessageGroup = { id: string; role: "activity-group"; messages: Message[] };
@@ -2052,7 +2059,7 @@ export function App() {
   const taskSelectionGenerationRef = useRef(0);
   // A newly-created task must win over restored tabs and background refreshes
   // until its first navigation transaction has fully settled.
-  const pendingCreatedSessionRef = useRef<PendingCreatedSession | null>(null);
+  const pendingCreatedSessionRef = useRef<PendingSessionCreation | null>(null);
   const requestCoordinatorRef = useRef(new RequestCoordinator());
   const sessionNavigationRef = useRef<SessionNavigationState>(sessionNavigation);
   const updateSessionNavigation = useCallback((next: SessionNavigationState) => {
@@ -2235,6 +2242,14 @@ export function App() {
     for (const request of treeRequestsRef.current.values()) request.controller.abort();
     treeRequestsRef.current.clear();
   }, []);
+  const acceptSessionInventory = useCallback((current: readonly SessionSummary[], incoming: readonly SessionSummary[]) => {
+    const pending = pendingCreatedSessionRef.current;
+    const reconciled = reconcilePendingSessionCreation(current, incoming, pending);
+    if (pending && pendingCreatedSessionRef.current?.requestId === pending.requestId) {
+      pendingCreatedSessionRef.current = reconciled.pending;
+    }
+    return reconciled.sessions;
+  }, []);
 
   useEffect(() => {
     saveWorkspaceBrowserTabs(window.localStorage, workspaceBrowser);
@@ -2404,12 +2419,16 @@ export function App() {
   };
 
   const refresh = async () => {
-    return requestCoordinatorRef.current.run("bootstrap", async () => {
+    return requestCoordinatorRef.current.run("bootstrap", async (signal) => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 5; attempt += 1) {
         try {
-          const next = normalizeBootstrap(await api<Bootstrap>("/api/bootstrap"));
-          setData((current) => mergeBootstrapProviderState(current, next));
+          const next = normalizeBootstrap(await api<Bootstrap>("/api/bootstrap", { signal }));
+          if (signal.aborted) throw signal.reason;
+          setData((current) => mergeBootstrapProviderState(current, {
+            ...next,
+            sessions: acceptSessionInventory(current?.sessions || [], next.sessions)
+          }));
           const restoreStandalone = sessionStorage.getItem(ACTIVE_TASK_SCOPE_KEY) === "standalone"
             && next.sessions.some((session) => session.scopeKind === "standalone" && !session.archivedAt);
           if (restoreStandalone) {
@@ -2431,6 +2450,7 @@ export function App() {
           });
           return;
         } catch (error) {
+          if (signal.aborted) throw error;
           lastError = error;
           if (attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, Math.min(500 * 2 ** attempt, 4_000)));
         }
@@ -2439,9 +2459,17 @@ export function App() {
     });
   };
 
-  const refreshNavigation = async () => {
-    const next = await requestCoordinatorRef.current.run("navigation", () => api<NavigationSnapshot>("/api/navigation"));
-    setData((current) => current ? { ...current, ...next } : current);
+  const refreshNavigation = async (force = false) => {
+    const next = await requestCoordinatorRef.current.run(
+      "navigation",
+      (signal) => api<NavigationSnapshot>("/api/navigation", { signal }),
+      { mode: force ? "replace" : "coalesce" }
+    );
+    setData((current) => current ? {
+      ...current,
+      ...next,
+      sessions: acceptSessionInventory(current.sessions, next.sessions)
+    } : current);
     return next;
   };
 
@@ -2801,10 +2829,15 @@ export function App() {
       }
       loading = true;
       try {
-        const sessions = await api<SessionSummary[]>("/api/sessions", { timeoutMs: 20_000 });
+        const sessions = await requestCoordinatorRef.current.run(
+          "sessions-list",
+          (signal) => api<SessionSummary[]>("/api/sessions", { timeoutMs: 20_000, signal })
+        );
         if (!cancelled) setData((current) => {
-          if (!current || sessionSummariesSnapshot(current.sessions) === sessionSummariesSnapshot(sessions)) return current;
-          return { ...current, sessions };
+          if (!current) return current;
+          const nextSessions = acceptSessionInventory(current.sessions, sessions);
+          if (sessionSummariesSnapshot(current.sessions) === sessionSummariesSnapshot(nextSessions)) return current;
+          return { ...current, sessions: nextSessions };
         });
       } catch {
         // Keep the latest known task list during transient connection failures.
@@ -3056,6 +3089,7 @@ export function App() {
 
   useEffect(() => {
     if (!data || !workspaceBrowser.tabs.length) return;
+    const knownSessionIds = new Set(data.sessions.map((item) => item.id));
     const validScopeIds = new Set([
       ...data.workspaces.map((item) => item.id),
       ...data.sessions.filter((item) => item.scopeKind === "standalone").map((item) => item.id)
@@ -3063,7 +3097,7 @@ export function App() {
     const next = reconcileWorkspaceBrowserTabs(workspaceBrowser, {
       maxTabs: pagePreferencesRef.current.maxTabs,
       isResourceValid: (resource) => resource.kind === "conversation"
-        ? data.sessions.some((item) => item.id === resource.conversationId)
+        ? sessionResourceIsKnown(resource.conversationId, knownSessionIds, pendingCreatedSessionRef.current)
         : resource.kind === "workflow"
           ? data.workflows.some((item) => item.id === resource.workflowId)
           : resource.kind === "file"
@@ -3562,18 +3596,17 @@ export function App() {
       return;
     }
     const pendingCreated = pendingCreatedSessionRef.current;
-    if (pendingCreated) {
-      const pendingSummary = data.sessions.find((session) => session.id === pendingCreated.id);
+    if (pendingCreated?.sessionId) {
+      const pendingSummary = data.sessions.find((session) => session.id === pendingCreated.sessionId);
       if (pendingSummary) {
         const pendingResourceKey = workspaceBrowserResourceKey({
           kind: "conversation",
-          conversationId: pendingCreated.id,
+          conversationId: pendingCreated.sessionId,
           ...(pendingSummary.scopeKind === "standalone" ? {} : { workspaceId: pendingSummary.workspaceId })
         });
         // Do not let the normal remembered-session or restored-tab
         // reconciliation steal focus while creation is still settling.
-        if (activeSession?.id !== pendingCreated.id || workspaceBrowser.activeTabId !== pendingResourceKey) return;
-        pendingCreatedSessionRef.current = null;
+        if (activeSession?.id !== pendingCreated.sessionId || workspaceBrowser.activeTabId !== pendingResourceKey) return;
       }
     }
     if (workspaceBrowser.activeTabId !== null) return;
@@ -3683,46 +3716,109 @@ export function App() {
 
   const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone") => {
     if (scopeKind === "workspace" && !activeWorkspaceId) throw new Error("请先选择工作区");
-    await agentConfigSaveRef.current;
     const initialPrompt = pendingNewTaskPrompt.trim();
     const initialSkills = pendingNewTaskSkills;
     const initialAttachments = pendingNewTaskAttachments;
+    const scopeKey = scopeKind === "standalone" ? "__standalone__" : activeWorkspaceId;
+    const creationRequest: PendingSessionCreation = {
+      requestId: `session-create:${crypto.randomUUID()}`,
+      scopeKey,
+      sessionId: null,
+      phase: "requesting"
+    };
+    cancelSessionNavigation();
+    taskSelectionGenerationRef.current += 1;
+    requestCoordinatorRef.current.beginNavigation();
+    for (const key of ["bootstrap", "navigation", "sessions-list"]) {
+      requestCoordinatorRef.current.cancel(key, "New session creation superseded the previous inventory snapshot");
+    }
+    pendingCreatedSessionRef.current = creationRequest;
     setUploadingAttachments(true);
+    let createdSession: Session | null = null;
+    let postCreateError: unknown;
+    const admitCreatedSession = (session: Session) => {
+      const admitted = {
+        ...session,
+        messageCount: session.messageWindow?.total ?? session.messages.length
+      };
+      setData((current) => current ? {
+        ...current,
+        sessions: upsertCreatedSession(current.sessions, admitted)
+      } : current);
+      commitSessionSelection(admitted, "task");
+    };
     try {
-      const session = await api<Session>(`/api/sessions?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
+      await agentConfigSaveRef.current;
+      createdSession = await api<Session>(`/api/sessions?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
         method: "POST",
-        body: JSON.stringify({ workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined, scopeKind, engine, skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined, capabilityProfileId: scopeKind === "standalone" ? activeCapabilityProfileId : undefined, executionMode: "native" })
+        body: JSON.stringify({
+          workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined,
+          scopeKind,
+          engine,
+          skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined,
+          capabilityProfileId: scopeKind === "standalone" ? activeCapabilityProfileId : undefined,
+          executionMode: "native",
+          clientMutationId: creationRequest.requestId
+        })
       });
-      const scopeKey = scopeKind === "standalone" ? "__standalone__" : activeWorkspaceId;
-      rememberSession(scopeKey, session.id);
-      forgetWorkspaceWorkflow(scopeKey);
-      pendingCreatedSessionRef.current = { id: session.id, scopeKey };
-      commitSessionSelection({ ...session, messageCount: 0 }, "task");
-      const preparedAttachments = await uploadDraftFiles(session.id, initialAttachments);
-      if (initialPrompt || preparedAttachments.length) {
-        const attachments = preparedAttachments.map((item) => item.uploaded!).filter(Boolean);
-        const started = await api<Session>(`/api/sessions/${session.id}/run?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
-          method: "POST",
-          body: JSON.stringify({ prompt: initialPrompt, skillNames: initialSkills, attachments })
-        });
-        commitSessionSelection(started, "task");
+      for (const key of ["bootstrap", "navigation", "sessions-list"]) {
+        requestCoordinatorRef.current.cancel(key, "Created session must be admitted before older inventory snapshots");
       }
-      setPendingNewTaskPrompt("");
-      setPendingNewTaskSkills([]);
-      setPendingNewTaskAttachments([]);
-      setDraftAttachments([]);
-      setPrompt("");
+      const admittedCreation = bindPendingSessionCreation(creationRequest, createdSession.id);
+      pendingCreatedSessionRef.current = admittedCreation;
+      rememberSession(scopeKey, createdSession.id);
+      forgetWorkspaceWorkflow(scopeKey);
+      admitCreatedSession(createdSession);
+      try {
+        const preparedAttachments = await uploadDraftFiles(createdSession.id, initialAttachments);
+        if (initialPrompt || preparedAttachments.length) {
+          const attachments = preparedAttachments.map((item) => item.uploaded!).filter(Boolean);
+          const started = await api<Session>(`/api/sessions/${createdSession.id}/run?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
+            method: "POST",
+            body: JSON.stringify({ prompt: initialPrompt, skillNames: initialSkills, attachments })
+          });
+          createdSession = started;
+          admitCreatedSession(started);
+        }
+        setPendingNewTaskPrompt("");
+        setPendingNewTaskSkills([]);
+        setPendingNewTaskAttachments([]);
+        setDraftAttachments([]);
+        setPrompt("");
+      } catch (error) {
+        postCreateError = error;
+        setPrompt(initialPrompt);
+        setDraftAttachments(initialAttachments);
+      }
       setDialog(null);
       setView("chat");
-      await refresh();
+      pendingCreatedSessionRef.current = bindPendingSessionCreation(admittedCreation, createdSession.id, "syncing");
+      try {
+        const snapshot = await refreshNavigation(true);
+        if (!pendingCreationConfirmed(admittedCreation, snapshot.sessions)) {
+          throw new Error("新任务已创建，但会话列表尚未确认该任务");
+        }
+        if (pendingCreatedSessionRef.current?.requestId === creationRequest.requestId) pendingCreatedSessionRef.current = null;
+      } catch (error) {
+        if (!postCreateError) postCreateError = error;
+      }
+      if (postCreateError) {
+        setNotice(`新任务已保留，但首次启动或列表同步未完成：${postCreateError instanceof Error ? postCreateError.message : String(postCreateError)}`, "warning");
+      }
     } catch (error) {
-      pendingCreatedSessionRef.current = null;
-      setPrompt(initialPrompt);
-      setDraftAttachments(initialAttachments);
-      setDialog(null);
-      setView("chat");
-      setNotice(error instanceof Error ? error.message : String(error));
+      if (!createdSession) {
+        setPrompt(initialPrompt);
+        setDraftAttachments(initialAttachments);
+        setDialog(null);
+        setView("chat");
+        setNotice(error instanceof Error ? error.message : String(error));
+      } else {
+        setNotice(`新任务已保留，但后续处理未完成：${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
     } finally {
+      if (!createdSession && pendingCreatedSessionRef.current?.requestId === creationRequest.requestId) {
+        pendingCreatedSessionRef.current = null;
+      }
       setUploadingAttachments(false);
     }
   };
@@ -3744,6 +3840,7 @@ export function App() {
     setDeletingTaskIds((current) => new Set(current).add(key));
     try {
       await api(`/api/sessions/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
+      if (pendingCreatedSessionRef.current?.sessionId === id) pendingCreatedSessionRef.current = null;
       setData((current) => current ? { ...current, sessions: current.sessions.filter((session) => session.id !== id) } : current);
       forgetSession(id);
       const tabId = workspaceBrowserResourceKey({
@@ -4317,7 +4414,7 @@ export function App() {
     if (activeTab.status === "error") return;
     if (resource.kind === "conversation") {
       const pendingCreated = pendingCreatedSessionRef.current;
-      if (pendingCreated && pendingCreated.id !== resource.conversationId) return;
+      if (pendingCreated?.sessionId && pendingCreated.sessionId !== resource.conversationId) return;
       const loadingThisConversation = sessionNavigationRef.current.phase === "loading"
         && sessionNavigationRef.current.sessionId === resource.conversationId;
       if (activeSession?.id === resource.conversationId || loadingThisConversation) return;
@@ -5427,7 +5524,7 @@ function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine,
       setBusy(true); setError("");
       try { if (selected === "workflow") await onSelectWorkflow(); else await onSelect(selected, scopeKind); }
       catch (err) { setError(err instanceof Error ? err.message : String(err)); setBusy(false); }
-    }}>{busy ? <LoaderCircle className="spin" size={16} /> : selected === "workflow" ? <Route size={16} /> : <Check size={16} />}{selected === "workflow" ? "进入画布" : "创建任务"}</button></div>
+    }}>{busy ? <LoaderCircle className="spin" size={16} /> : selected === "workflow" ? <Route size={16} /> : <Check size={16} />}{busy ? selected === "workflow" ? "正在准备画布" : "正在创建并确认任务" : selected === "workflow" ? "进入画布" : "创建任务"}</button></div>
   </Dialog>;
 }
 

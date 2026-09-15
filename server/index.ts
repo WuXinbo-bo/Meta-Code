@@ -240,6 +240,7 @@ type Session = {
   providerConfigOptions?: SessionConfigOption[];
   providerConfigValues?: Record<string, string | boolean>;
   runtimeBinding?: RuntimeExecutionIdentity;
+  creationMutationId?: string;
 };
 
 type McpTransport = "stdio" | "http" | "sse";
@@ -460,6 +461,23 @@ type ActiveRun = {
 };
 
 const activeRuns = new Map<string, ActiveRun>();
+const sessionCreationMutationLocks = new Map<string, Promise<void>>();
+
+async function withSessionCreationMutationLock<T>(key: string, operation: () => Promise<T>) {
+  const previous = sessionCreationMutationLocks.get(key) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.then(() => current);
+  sessionCreationMutationLocks.set(key, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (sessionCreationMutationLocks.get(key) === tail) sessionCreationMutationLocks.delete(key);
+  }
+}
+
 const startupRecoverySessionIds = new Set<string>();
 type TaskUsageSummary = { main: Usage; agents: Usage; total: Usage; agentCount: number; source: "codex" | "claude" | "completed" | "pending" };
 const codexAgentTranscriptIndex = new AgentTranscriptIndex(
@@ -10532,55 +10550,69 @@ app.post("/api/session-management/repair", async (req, res) => {
 
 app.post("/api/sessions", async (req, res) => {
   if (queuePaused && req.authUser!.role === "user") return res.status(503).json({ error: "管理员已暂停接收新任务" });
-  const scopeKind = req.body.scopeKind === "standalone" ? "standalone" : "workspace";
-  const workspace = scopeKind === "workspace" ? workspaceById(String(req.body.workspaceId || ""), req.authUser!.id) : undefined;
-  if (scopeKind === "workspace" && !workspace) return res.status(400).json({ error: "请选择工作区" });
-  const engine: EngineName = normalizeProviderId(req.body.engine || state.settings.defaultEngine);
-  const provider = agentAdapterRegistry.descriptor(engine);
-  if (!provider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(engine)) return res.status(400).json({ error: "主脑 Provider 未注册或不支持创建会话" });
-  const providerControl = await providerControlSnapshotFor(engine, req.authUser!.id);
-  if (!providerControl.operations.setDefault) return res.status(400).json({ error: `主脑「${providerControl.identity.shortName}」尚未安装或连接未验证` });
-  const standaloneProfileId = scopeKind === "standalone" ? String(req.body.capabilityProfileId || "") || null : null;
-  const standaloneProfile = standaloneProfileId ? capabilityProfileById(standaloneProfileId, req.authUser!.id) : undefined;
-  if (standaloneProfileId && !standaloneProfile) return res.status(400).json({ error: "能力方案不存在或无权访问" });
-  const standalonePolicies = scopeKind === "standalone"
-    ? completeSkillPolicies(standaloneProfile?.skillPolicies || req.body.skillPolicies)
-    : undefined;
-  const standaloneExecutionMode = scopeKind === "standalone"
-    // New conversations start natively unless the caller explicitly opts in.
-    // Existing persisted sessions retain their stored mode during migration.
-    ? normalizeExecutionMode(req.body.executionMode, {})
-    : undefined;
-  const now = new Date().toISOString();
-  const connectionProfile = providerConnectionFor(engine, req.authUser!.id);
-  const session: Session = {
-    id: uid("task"),
-    ownerUserId: req.authUser!.id,
-    title: String(req.body.title || "新任务"),
-    scopeKind,
-    workspaceId: workspace?.id || "",
-    codexThreadId: null,
-    engine,
-    engineSessionId: null,
-    createdAt: now,
-    updatedAt: now,
-    usage: emptyUsage(),
-    messages: [],
-    pendingInputs: [],
-    status: "idle",
-    revision: 0,
-    standaloneSkillPolicies: standalonePolicies,
-    standaloneCapabilityProfileId: standaloneProfile?.id || null,
-    standaloneExecutionMode,
-    ...(agentAdapterRegistry.providerSnapshot(engine)?.transport === "acp" && connectionProfile ? {
-      providerConfigOptions: structuredClone(connectionProfile.configOptions || []),
-      providerConfigValues: structuredClone(connectionProfile.configValues || {})
-    } : {})
+  const creationMutationId = String(req.body.clientMutationId || "").trim();
+  if (creationMutationId && !/^[a-zA-Z0-9._:-]{8,128}$/.test(creationMutationId)) {
+    return res.status(400).json({ error: "任务创建请求标识无效" });
+  }
+  const createSession = async () => {
+    if (creationMutationId) {
+      const existing = state.sessions.find((session) => session.ownerUserId === req.authUser!.id && session.creationMutationId === creationMutationId);
+      if (existing) return res.status(200).json(sessionWithMessageWindow(existing, req.query.messageLimit));
+    }
+    const scopeKind = req.body.scopeKind === "standalone" ? "standalone" : "workspace";
+    const workspace = scopeKind === "workspace" ? workspaceById(String(req.body.workspaceId || ""), req.authUser!.id) : undefined;
+    if (scopeKind === "workspace" && !workspace) return res.status(400).json({ error: "请选择工作区" });
+    const engine: EngineName = normalizeProviderId(req.body.engine || state.settings.defaultEngine);
+    const provider = agentAdapterRegistry.descriptor(engine);
+    if (!provider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(engine)) return res.status(400).json({ error: "主脑 Provider 未注册或不支持创建会话" });
+    const providerControl = await providerControlSnapshotFor(engine, req.authUser!.id);
+    if (!providerControl.operations.setDefault) return res.status(400).json({ error: `主脑「${providerControl.identity.shortName}」尚未安装或连接未验证` });
+    const standaloneProfileId = scopeKind === "standalone" ? String(req.body.capabilityProfileId || "") || null : null;
+    const standaloneProfile = standaloneProfileId ? capabilityProfileById(standaloneProfileId, req.authUser!.id) : undefined;
+    if (standaloneProfileId && !standaloneProfile) return res.status(400).json({ error: "能力方案不存在或无权访问" });
+    const standalonePolicies = scopeKind === "standalone"
+      ? completeSkillPolicies(standaloneProfile?.skillPolicies || req.body.skillPolicies)
+      : undefined;
+    const standaloneExecutionMode = scopeKind === "standalone"
+      // New conversations start natively unless the caller explicitly opts in.
+      // Existing persisted sessions retain their stored mode during migration.
+      ? normalizeExecutionMode(req.body.executionMode, {})
+      : undefined;
+    const now = new Date().toISOString();
+    const connectionProfile = providerConnectionFor(engine, req.authUser!.id);
+    const session: Session = {
+      id: uid("task"),
+      ownerUserId: req.authUser!.id,
+      title: String(req.body.title || "新任务"),
+      scopeKind,
+      workspaceId: workspace?.id || "",
+      codexThreadId: null,
+      engine,
+      engineSessionId: null,
+      createdAt: now,
+      updatedAt: now,
+      usage: emptyUsage(),
+      messages: [],
+      pendingInputs: [],
+      status: "idle",
+      revision: 0,
+      standaloneSkillPolicies: standalonePolicies,
+      standaloneCapabilityProfileId: standaloneProfile?.id || null,
+      standaloneExecutionMode,
+      ...(creationMutationId ? { creationMutationId } : {}),
+      ...(agentAdapterRegistry.providerSnapshot(engine)?.transport === "acp" && connectionProfile ? {
+        providerConfigOptions: structuredClone(connectionProfile.configOptions || []),
+        providerConfigValues: structuredClone(connectionProfile.configValues || {})
+      } : {})
+    };
+    if (scopeKind === "standalone") await ensureSessionExecutionRoot(session);
+    state.sessions.unshift(session);
+    await saveState();
+    eventHub.publish("sessions.changed", { sessionId: session.id, action: "created" }, [session.ownerUserId]);
+    return res.status(201).json(sessionWithMessageWindow(session, req.query.messageLimit));
   };
-  if (scopeKind === "standalone") await ensureSessionExecutionRoot(session);
-  state.sessions.unshift(session);
-  await saveState();
-  res.status(201).json(sessionWithMessageWindow(session, req.query.messageLimit));
+  if (!creationMutationId) return createSession();
+  return withSessionCreationMutationLock(`${req.authUser!.id}:${creationMutationId}`, createSession);
 });
 
 app.get("/api/sessions", (req, res) => {

@@ -57,8 +57,13 @@ assert.match(
 );
 assert.match(
   app,
-  /setData\(\(current\) => mergeBootstrapProviderState\(current, next\)\)/,
-  "a core bootstrap refresh must preserve background-loaded third-party providers"
+  /setData\(\(current\) => mergeBootstrapProviderState\(current,\s*\{\s*\.\.\.next,\s*sessions:\s*acceptSessionInventory/,
+  "a core bootstrap refresh must preserve background-loaded providers and reconcile the session inventory"
+);
+assert.match(
+  app,
+  /const acceptSessionInventory[\s\S]*reconcilePendingSessionCreation/,
+  "every full session inventory must honor an admitted session creation transaction"
 );
 
 const treeReconcileStart = app.indexOf("const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile", realtimeEffectEnd);
