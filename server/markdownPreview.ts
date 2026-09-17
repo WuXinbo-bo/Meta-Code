@@ -37,6 +37,17 @@ function closeFence(line: string, marker: string) {
   return !!match && match[1][0] === marker[0] && match[1].length >= marker.length;
 }
 function tableDelimiter(line: string) { return /^\s*\|?\s*:?-+:?\s*\|[\s|:\-]*$/.test(line); }
+function delimiterCount(line: string, marker: string) {
+  let count = 0;
+  for (let index = 0; index < line.length; index++) {
+    if (!line.startsWith(marker, index)) continue;
+    let slashes = 0;
+    for (let previous = index - 1; previous >= 0 && line[previous] === "\\"; previous--) slashes++;
+    if (slashes % 2 === 0) count++;
+    index += marker.length - 1;
+  }
+  return count;
+}
 
 /** Bounded reads with explicit continuation. rawContent concatenates to the exact original bytes. */
 export async function readMarkdownPreviewPage(target: string, _size: number, requestedOffset: number, options: MarkdownPreviewOptions = {}): Promise<MarkdownPreviewPage> {
@@ -69,7 +80,7 @@ export async function readMarkdownPreviewPage(target: string, _size: number, req
     for (let i = 0; i < lines.length;) {
       const start = starts[i];
       const opener = !current ? fence(lines[i]) : null;
-      const math = !current && (/^\s*\$\$\s*$/.test(lines[i]) ? "$$" : /^\s*\\\[\s*$/.test(lines[i]) ? "\\]" : "");
+      const math = !current && (lines[i].trimStart().startsWith("$$") && delimiterCount(lines[i], "$$") % 2 === 1 ? "$$" : lines[i].trimStart().startsWith("\\[") && delimiterCount(lines[i], "\\[") > delimiterCount(lines[i], "\\]") ? "\\]" : "");
       const isTable = !current && i + 1 < lines.length && lines[i].includes("|") && tableDelimiter(lines[i + 1]);
       const state: Continuation | undefined = current || (opener ? { kind: "fence", marker: opener[1], header: lines[i] } : math ? { kind: "math", marker: math } : isTable ? { kind: "table", marker: "", header: lines[i] + lines[i + 1] } : undefined);
       let endLine = i + 1;
@@ -77,7 +88,7 @@ export async function readMarkdownPreviewPage(target: string, _size: number, req
       if (state?.kind === "fence" || state?.kind === "math") {
         const firstContent = current ? i : i + 1;
         endLine = firstContent;
-        while (endLine < lines.length && !(state.kind === "fence" ? closeFence(lines[endLine], state.marker) : lines[endLine].trim() === state.marker)) endLine++;
+        while (endLine < lines.length && !(state.kind === "fence" ? closeFence(lines[endLine], state.marker) : delimiterCount(lines[endLine], state.marker) > 0)) endLine++;
         complete = endLine < lines.length;
         if (complete) endLine++;
       } else if (state?.kind === "table") {

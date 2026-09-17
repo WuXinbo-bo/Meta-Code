@@ -42,6 +42,9 @@ try {
   const math = await verify("math.md", "$$\n" + "x + ".repeat(6000) + "y\n$$\nafter\n", { pageBytes: 128, maxPageBytes: 300 });
   assert.ok(math.pages[0].content.includes("y\n$$"), "a large complete formula stays atomic, beyond old 8K/24K limits");
   assert.equal(math.pages[0].sourcePage, false);
+  const attached = await verify("attached-delimiters.md", "prefix\n\n\\[x^2 +\n" + "y + ".repeat(500) + "z\\]\n\n$$a +\n" + "b + ".repeat(500) + "c$$\n", { pageBytes: 128, maxPageBytes: 300 });
+  assert.ok(attached.pages.some(p => p.content.includes("\\[x^2") && p.content.includes("z\\]")));
+  assert.ok(attached.pages.some(p => p.content.includes("$$a") && p.content.includes("c$$")));
   await verify("long-line.md", "😀中文".repeat(50000) + "\nend\n");
   await verify("long-code-line.md", "```text\n" + "😀中文".repeat(50000) + "\n```\nend\n");
   const extreme = await verify("extreme-math.md", "$$\n" + "x+".repeat(1100000) + "y\n$$\nend\n");
