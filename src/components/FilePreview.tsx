@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { ContinuousFilePreview } from "./ContinuousFilePreview";
 import { Activity, Binary, FolderOpen, LoaderCircle, RefreshCw, X } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import pythonLanguage from "highlight.js/lib/languages/python";
@@ -12,7 +13,7 @@ import cssLanguage from "highlight.js/lib/languages/css";
 import sqlLanguage from "highlight.js/lib/languages/sql";
 import powershellLanguage from "highlight.js/lib/languages/powershell";
 import { SafeFileMarkdownBody } from "./SafeFileMarkdownBody";
-import { isPreviewFileKind, type PreviewFile } from "../files/fileTypes";
+import { type PreviewFile } from "../files/fileTypes";
 
 hljs.registerLanguage("python", pythonLanguage);
 hljs.registerLanguage("shell", shellLanguage);
@@ -24,8 +25,6 @@ hljs.registerLanguage("typescript", typescriptLanguage);
 hljs.registerLanguage("css", cssLanguage);
 hljs.registerLanguage("sql", sqlLanguage);
 hljs.registerLanguage("powershell", powershellLanguage);
-
-const PREVIEW_PAGE_HISTORY_LIMIT = 12;
 
 export type FilePreviewProps = {
   file: PreviewFile;
@@ -48,22 +47,6 @@ function PreviewIconButton({ label, children, onClick }: { label: string; childr
   return <button className="icon-button" title={label} aria-label={label} onClick={onClick}>{children}</button>;
 }
 
-async function fetchPreviewPage(url: string, signal: AbortSignal) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    cache: "no-store",
-    signal,
-    headers: { "Content-Type": "application/json" }
-  });
-  const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
-  return data as Partial<PreviewFile>;
-}
-
-function resolvedPreviewKind(value: unknown, fallback: PreviewFile["kind"]) {
-  return isPreviewFileKind(value) ? value : fallback;
-}
-
 export function FilePreview({ file, workspaceId, workspaceRoot, presentation = "modal", onOpenLocalFile, onReveal, onReload, onClose }: FilePreviewProps) {
   const [activeSheet, setActiveSheet] = useState(0);
   const [pdfObjectUrl, setPdfObjectUrl] = useState("");
@@ -72,24 +55,9 @@ export function FilePreview({ file, workspaceId, workspaceRoot, presentation = "
   const [imageObjectUrl, setImageObjectUrl] = useState("");
   const [imageError, setImageError] = useState("");
   const [imageLoading, setImageLoading] = useState(false);
-  const [page, setPage] = useState(file);
-  const [pageHistory, setPageHistory] = useState<PreviewFile[]>([]);
-  const [pageLoading, setPageLoading] = useState(false);
-  const [pageError, setPageError] = useState("");
-  const pageRequestRef = useRef<AbortController | null>(null);
-  const pageRequestVersionRef = useRef(0);
-  const previewKey = `${workspaceId}:${file.path}:${file.modifiedAt || ""}`;
+  const page = file;
+  const previewKey = `${workspaceId}:${file.path}:${file.version || file.modifiedAt || ""}`;
   useEffect(() => setActiveSheet(0), [file.path]);
-  useEffect(() => {
-    pageRequestVersionRef.current += 1;
-    pageRequestRef.current?.abort();
-    pageRequestRef.current = null;
-    setPage(file);
-    setPageHistory([]);
-    setPageError("");
-    setPageLoading(false);
-  }, [file, previewKey]);
-  useEffect(() => () => pageRequestRef.current?.abort(), []);
   useEffect(() => {
     if (file.kind !== "pdf" || !file.url) {
       setPdfObjectUrl("");
@@ -181,43 +149,6 @@ export function FilePreview({ file, workspaceId, workspaceRoot, presentation = "
     }
   }, [page.content, page.kind, page.language, page.previewMode]);
   const sheet = file.sheets?.[activeSheet];
-  const loadPreviewPage = async (offset: number) => {
-    if (pageLoading) return;
-    const requestVersion = ++pageRequestVersionRef.current;
-    pageRequestRef.current?.abort();
-    const controller = new AbortController();
-    pageRequestRef.current = controller;
-    let timedOut = false;
-    const timeout = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, 20_000);
-    setPageLoading(true);
-    setPageError("");
-    try {
-      const result = await fetchPreviewPage(`/api/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(file.path)}&offset=${offset}`, controller.signal);
-      if (requestVersion !== pageRequestVersionRef.current) return;
-      setPageHistory((current) => [...current.slice(-(PREVIEW_PAGE_HISTORY_LIMIT - 1)), page]);
-      setPage({ ...file, ...result, kind: resolvedPreviewKind(result.kind, file.kind) });
-    } catch (error) {
-      if (requestVersion === pageRequestVersionRef.current && (!controller.signal.aborted || timedOut)) {
-        setPageError(timedOut ? "分段内容读取超时，请重试" : error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      window.clearTimeout(timeout);
-      if (requestVersion === pageRequestVersionRef.current) {
-        pageRequestRef.current = null;
-        setPageLoading(false);
-      }
-    }
-  };
-  const previousPreviewPage = () => {
-    const previous = pageHistory.at(-1);
-    if (!previous) return;
-    setPage(previous);
-    setPageHistory((current) => current.slice(0, -1));
-    setPageError("");
-  };
   const paged = page.previewMode === "plain-paged" || page.previewMode === "markdown-paged";
   const richMarkdownPage = page.previewMode === "markdown-paged";
   const fullRichPreview = page.previewMode === undefined || page.previewMode === "full";
@@ -235,10 +166,12 @@ export function FilePreview({ file, workspaceId, workspaceRoot, presentation = "
           </span>
         </header>
         <div className={`preview-content ${file.kind}`}>
-          {file.kind === "markdown" && (fullRichPreview || richMarkdownPage) && (
-            <SafeFileMarkdownBody text={page.content || ""} markdownPath={file.path} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} />
+          {paged && <ContinuousFilePreview key={previewKey} file={file} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} onReload={onReload} />}
+          {!paged && file.kind === "markdown" && !page.sourcePage && (fullRichPreview || richMarkdownPage) && (
+            <SafeFileMarkdownBody key={page.offset || 0} text={page.content || ""} markdownPath={file.path} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} />
           )}
-          {file.kind === "markdown" && !fullRichPreview && !richMarkdownPage && <div className="paged-text-preview"><p>当前内容无法安全进行富文本渲染，已使用分段纯文本预览。</p><pre>{page.content || ""}</pre></div>}
+          {!paged && file.kind === "markdown" && page.sourcePage && <div className="paged-text-preview"><p>该单一结构较大，正在连续分段显示源码；可继续翻页查看全部内容。</p><pre>{page.content}</pre></div>}
+          {!paged && file.kind === "markdown" && !fullRichPreview && !richMarkdownPage && <div className="paged-text-preview"><p>当前内容无法安全进行富文本渲染，已使用分段纯文本预览。</p><pre>{page.content || ""}</pre></div>}
           {file.kind === "document" && <article className="docx-preview">
             {file.warnings?.length ? <details className="docx-preview-warnings"><summary>部分 Word 格式未完整还原</summary><ul>{file.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></details> : null}
             <div className="docx-document" dangerouslySetInnerHTML={{ __html: file.html || "" }} />
@@ -256,11 +189,10 @@ export function FilePreview({ file, workspaceId, workspaceRoot, presentation = "
               {(sheet?.truncated || file.truncatedSheets) && <p className="preview-limit">为保持流畅，仅显示部分工作表、行或列。原文件不会被修改。</p>}
             </div>
           )}
-          {file.kind === "code" && page.previewMode === "full" && <pre className="source-preview"><code className={`hljs language-${page.language || "text"}`} dangerouslySetInnerHTML={{ __html: highlightedCode }} /></pre>}
-          {file.kind === "code" && page.previewMode !== "full" && <div className="paged-text-preview"><p>代码文件超过高亮预算，已使用纯文本模式。</p><pre>{page.content || ""}</pre></div>}
-          {file.kind === "text" && <pre className="source-preview plain-text"><code>{page.content || ""}</code></pre>}
+          {!paged && file.kind === "code" && page.previewMode === "full" && <pre className="source-preview"><code className={`hljs language-${page.language || "text"}`} dangerouslySetInnerHTML={{ __html: highlightedCode }} /></pre>}
+          {!paged && file.kind === "code" && page.previewMode !== "full" && <div className="paged-text-preview"><p>代码文件超过高亮预算，已使用纯文本模式。</p><pre>{page.content || ""}</pre></div>}
+          {!paged && file.kind === "text" && <pre className="source-preview plain-text"><code>{page.content || ""}</code></pre>}
           {file.kind === "binary" && <div className="binary-preview"><Binary size={34} /><strong>{file.extension?.replace(".", "").toUpperCase() || "二进制文件"}</strong><p>该文件不能作为文本安全展示，已提供轻量文件信息。可由对应的 Python 运行环境或字体工具打开。</p><dl><div><dt>大小</dt><dd>{formatBytes(file.size)}</dd></div><div><dt>路径</dt><dd>{file.path}</dd></div></dl></div>}
-          {paged && <div className="preview-page-controls"><span>{formatBytes(page.offset || 0)} - {formatBytes((page.offset || 0) + new Blob([page.content || ""]).size)} / {formatBytes(page.size)}</span><div><button type="button" disabled={!pageHistory.length || pageLoading} onClick={previousPreviewPage}>上一段</button><button type="button" disabled={page.nextOffset == null || pageLoading} onClick={() => void loadPreviewPage(page.nextOffset || 0)}>{pageLoading ? "读取中" : "下一段"}</button></div>{pageError && <small>{pageError}</small>}</div>}
         </div>
       </section>
   );

@@ -88,6 +88,34 @@ try {
   assert.equal(markdown.kind, "markdown");
   assert.match(markdown.content, /mermaid/);
   assert.match(markdown.content, /x\^2/);
+  assert.equal(typeof markdown.version, "string");
+  const largeMarkdownSource = "```ts\n" + Array.from({ length: 10000 }, (_, i) => `const item${i} = '中文内容';\n`).join("") + "```\n\n$$\nx^2\n$$\n";
+  await fsp.writeFile(path.join(workspaceRoot, "large.md"), largeMarkdownSource);
+  let mdPage = await preview("large.md");
+  const firstPage = mdPage;
+  let joined = mdPage.rawContent;
+  for (let i = 0; mdPage.nextOffset != null && i < 100; i++) {
+    mdPage = await json(`/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=large.md&offset=${mdPage.nextOffset}&continuation=${encodeURIComponent(mdPage.nextContinuation || "")}&version=${encodeURIComponent(firstPage.version)}`);
+    joined += mdPage.rawContent;
+  }
+  assert.equal(mdPage.nextOffset, null);
+  assert.equal(joined, largeMarkdownSource, "HTTP pagination retains every source byte");
+  await fsp.appendFile(path.join(workspaceRoot, "large.md"), "changed");
+  const conflict = await json(`/api/workspaces/${encodeURIComponent(workspace.id)}/file?path=large.md&offset=${firstPage.nextOffset}&version=${encodeURIComponent(firstPage.version)}`, 400);
+  assert.match(conflict.error, /文件已发生变化/);
+  const narrative = "完整数学正文 $x^2$。\n\n".repeat(22000) + "正文尾部验证点";
+  const reasoning = "推理公式 $y^2$。\n\n".repeat(8000) + "推理尾部验证点";
+  const imported = await json("/api/session-management/import", 201, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schemaVersion: 1, kind: "metacode-session", session: { title: "Long Markdown integrity", engine: "codex", workspaceId: workspace.id, messages: [
+      { role: "user", text: narrative }, { role: "assistant", text: narrative }, { role: "event", eventType: "reasoning", text: reasoning }
+    ] } })
+  });
+  assert.equal(imported.session.messages[1].text, narrative, "import/persistence path retains long assistant text");
+  const history = await json(`/api/sessions/${imported.session.id}/messages?limit=10`);
+  assert.equal(history.messages[0].text, narrative);
+  assert.equal(history.messages[1].text, narrative);
+  assert.equal(history.messages[2].text, reasoning, "reasoning uses the same lossless renderer contract");
   assert.equal((await preview("app.ts")).kind, "code");
   assert.equal((await preview("settings.yaml")).kind, "text");
   assert.equal((await preview("LICENSE")).kind, "text");

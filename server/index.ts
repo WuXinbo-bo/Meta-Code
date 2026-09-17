@@ -35,6 +35,7 @@ import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
 import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, isNativeAgentProjection, mergeAgentRuntimeStatus, nativeAgentMessageCanReuse, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
 import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
+import { isNarrativeMessage, normalizedEventTextLimit } from "./messageTextPolicy.js";
 import { WorkbenchEventHub } from "./eventHub.js";
 import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
 import { WorkbenchDataOwnerLease } from "./dataOwnerLease.js";
@@ -1025,7 +1026,7 @@ function compactStoredMessage(message: Message) {
     message.text = "";
     changed = true;
   }
-  if (message.text.length > 240_000) {
+  if (!isNarrativeMessage(message) && message.text.length > 240_000) {
     message.text = `${message.text.slice(0, 240_000)}\n\n[单条历史消息过长，已截断；工作区文件不受影响]`;
     changed = true;
   }
@@ -2957,7 +2958,7 @@ async function upsertNormalizedMessage(session: Session, event: NormalizedEngine
     id: sourceId
   });
   const activityRecord = artifactRefs.length ? { ...baseActivityRecord, artifactRefs } : baseActivityRecord;
-  const textLimit = event.type === "assistant" ? 240_000 : event.type === "tool.completed" ? 100_000 : 80_000;
+  const textLimit = normalizedEventTextLimit(event.type);
   const persistedText = event.text.length > textLimit ? `${event.text.slice(0, textLimit)}\n\n[流式输出过长，已截断；工作区文件不受影响]` : event.text;
   const rawPayload = recordOf(event.payload);
   const questionToolEvent = ["tool.started", "tool.completed"].includes(event.type) && isClaudeQuestionTool(event.toolName);
@@ -3034,7 +3035,7 @@ async function upsertProviderNormalizedMessage(session: Session, event: Normaliz
     scope: { sessionId: session.id, threadId: session.engineSessionId || undefined },
     id: sourceId
   });
-  const textLimit = event.type === "assistant" ? 240_000 : event.type === "tool.completed" ? 100_000 : 80_000;
+  const textLimit = normalizedEventTextLimit(event.type);
   const text = event.text.length > textLimit ? `${event.text.slice(0, textLimit)}\n\n[流式输出过长，已截断；工作区文件不受影响]` : event.text;
   const payload = event.type === "assistant" || event.type === "reasoning"
     ? undefined
@@ -4584,7 +4585,6 @@ async function listSkills() {
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-const PREVIEW_MARKDOWN_RICH_BYTES = 120 * 1024;
 const PREVIEW_CODE_HIGHLIGHT_BYTES = 256 * 1024;
 const PREVIEW_TEXT_FULL_BYTES = 512 * 1024;
 const PREVIEW_PAGE_BYTES = 160 * 1024;
@@ -9520,10 +9520,12 @@ app.get("/api/workspaces/:id/file", async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
 
     if ([".md", ".markdown", ".mdown"].includes(extension)) {
-      const full = stat.size <= PREVIEW_MARKDOWN_RICH_BYTES;
-      const page = full
-        ? { content: await fsp.readFile(target, "utf8"), offset: 0, nextOffset: null, truncated: false }
-        : await readMarkdownPreviewPage(target, stat.size, requestedOffset, { pageBytes: DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES });
+      const page = await readMarkdownPreviewPage(target, stat.size, requestedOffset, {
+        pageBytes: DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES,
+        continuation: String(req.query.continuation || ""),
+        version: String(req.query.version || "")
+      });
+      const full = page.offset === 0 && page.nextOffset === null;
       return res.json({
         kind: "markdown",
         name: path.basename(target),
@@ -9862,7 +9864,7 @@ function importedSessionMessage(value: Record<string, unknown>, index: number, i
   const result: Message = {
     id: uid("msg"),
     role,
-    text: safeMessageText(value.text).slice(0, role === "event" || role === "error" ? 80_000 : 240_000),
+    text: isNarrativeMessage({ ...value, role }) ? safeMessageText(value.text) : safeMessageText(value.text).slice(0, 80_000),
     createdAt
   };
   if (typeof value.eventType === "string") result.eventType = value.eventType.slice(0, 120);
@@ -10757,7 +10759,7 @@ function messageForResponse(source: Message | null | undefined, index = 0): Mess
     createdAt: safeMessageText(candidate.createdAt) || new Date(0).toISOString()
   };
   const textLimit = role === "event" || role === "error" ? 80_000 : 240_000;
-  if (message.text.length > textLimit) {
+  if (!isNarrativeMessage(message) && message.text.length > textLimit) {
     message.text = `${message.text.slice(0, textLimit)}\n\n[当前消息预览过长，已截断；原始记录不受影响]`;
   }
   const detail = recordOf(candidate.activityDetail);

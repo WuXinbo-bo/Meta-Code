@@ -2,180 +2,54 @@ import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { markdownRenderPlan } from "../src/markdown/markdownPlan.ts";
 import { readMarkdownPreviewPage } from "../server/markdownPreview.ts";
 
-const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "workbench-markdown-pages-"));
-
-async function writeFixture(name, content) {
-  const target = path.join(temporaryRoot, name);
-  await fsp.writeFile(target, content, "utf8");
-  return { target, size: (await fsp.stat(target)).size };
-}
-
-async function readAllPages(fixture, options) {
+const root = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-markdown-lossless-"));
+async function verify(name, source, options = {}) {
+  const target = path.join(root, name);
+  await fsp.writeFile(target, source);
+  const size = Buffer.byteLength(source);
+  let offset = 0, continuation, version;
   const pages = [];
-  let offset = 0;
-  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
-    const page = await readMarkdownPreviewPage(fixture.target, fixture.size, offset, options);
+  for (let i = 0; i < 10000; i++) {
+    const page = await readMarkdownPreviewPage(target, size, offset, { ...options, continuation, version });
+    assert.equal(page.offset, offset);
+    assert.equal(page.endOffset, offset + Buffer.byteLength(page.rawContent));
+    assert.equal(page.rawContent, Buffer.from(source).subarray(offset, page.endOffset).toString(), "source bytes are never dropped or duplicated");
+    assert.ok(!page.rawContent.includes("\ufffd"), "UTF-8 remains intact");
     pages.push(page);
-    if (page.nextOffset == null) return pages;
-    assert.ok(page.nextOffset > offset, "Markdown pagination must always make byte progress");
-    offset = page.nextOffset;
+    if (page.nextOffset === null) break;
+    assert.ok(page.nextOffset > offset);
+    offset = page.nextOffset; continuation = page.nextContinuation; version = page.version;
   }
-  throw new Error("Markdown pagination exceeded the test page limit");
+  assert.equal(pages.at(-1).nextOffset, null);
+  assert.equal(pages.map(p => p.rawContent).join(""), source);
+  return { pages, target, size };
 }
-
 try {
-  const completeSource = [
-    "# 大型文档",
-    "",
-    "开场段落：" + "甲乙丙丁".repeat(18),
-    "",
-    "```ts",
-    "const message = '代码围栏必须留在同一页';",
-    "const values = [1, 2, 3, 4, 5];",
-    "```",
-    "",
-    "~~~python",
-    "print('波浪线围栏也必须保持完整')",
-    "~~~",
-    "",
-    "过渡段落：" + "workbench ".repeat(12),
-    "",
-    "$$",
-    "E = mc^2 + \\sum_{i=1}^{n} i",
-    "$$",
-    "",
-    "\\[",
-    "a^2 + b^2 = c^2",
-    "\\]",
-    "",
-    "| 名称 | 状态 | 说明 |",
-    "| --- | :---: | ---: |",
-    "| Codex | ready | 结构安全分页 |",
-    "| Claude | ready | 表格不可拆分 |",
-    "| 中文 | 正常 | UTF-8 字节偏移准确 |",
-    "",
-    "结尾段落：" + "完成 ".repeat(25),
-    ""
-  ].join("\n");
-  const completeFixture = await writeFixture("complete.md", completeSource);
-  const completePages = await readAllPages(completeFixture, {
-    pageBytes: 180,
-    maxPageBytes: 1_024,
-    maxLines: 100,
-    maxPipeLines: 50,
-    maxTableRows: 20,
-    readChunkBytes: 37
-  });
-
-  assert.ok(completePages.length >= 3);
-  assert.equal(completePages.map((page) => page.content).join(""), completeSource);
-  assert.equal(completePages.at(-1).nextOffset, null);
-  assert.equal(completePages.at(-1).truncated, true);
-  assert.equal(completePages[0].offset, 0);
-  for (const page of completePages) {
-    assert.equal(markdownRenderPlan(page.content).mode, "rich", "each Markdown page must remain richly renderable");
-  }
-
-  const fencedPage = completePages.find((page) => page.content.includes("```ts"));
-  assert.ok(fencedPage?.content.includes("\n```\n"), "a fenced block must include its closing fence on the same page");
-  assert.equal(completePages.filter((page) => page.content.includes("代码围栏必须留在同一页")).length, 1);
-  const tildeFencePage = completePages.find((page) => page.content.includes("~~~python"));
-  assert.ok(tildeFencePage?.content.includes("\n~~~\n"), "tilde fences must use the same atomic paging rule");
-
-  const mathPage = completePages.find((page) => page.content.includes("E = mc^2"));
-  assert.equal(mathPage?.content.match(/^\$\$$/gm)?.length, 2, "a display-math block must not cross pages");
-  const bracketMathPage = completePages.find((page) => page.content.includes("a^2 + b^2"));
-  assert.ok(bracketMathPage?.content.includes("\\[") && bracketMathPage.content.includes("\\]"));
-
-  const tablePage = completePages.find((page) => page.content.includes("| 名称 | 状态 | 说明 |"));
-  assert.ok(tablePage?.content.includes("| 中文 | 正常 | UTF-8 字节偏移准确 |"), "a GFM table must stay together");
-  assert.equal(completePages.filter((page) => page.content.includes("| Codex | ready |")).length, 1);
-
-  let sourceByteOffset = 0;
-  for (const page of completePages) {
-    assert.equal(page.offset, sourceByteOffset);
-    sourceByteOffset = page.nextOffset ?? completeFixture.size;
-  }
-  assert.equal(sourceByteOffset, Buffer.byteLength(completeSource));
-
-  const oversizedFenceSource = [
-    "引言",
-    "",
-    "```javascript",
-    ...Array.from({ length: 80 }, (_, index) => `const value${index} = '${"x".repeat(28)}';`),
-    "```",
-    "",
-    "收尾",
-    ""
-  ].join("\n");
-  const oversizedFenceFixture = await writeFixture("oversized-fence.md", oversizedFenceSource);
-  const oversizedFencePages = await readAllPages(oversizedFenceFixture, {
-    pageBytes: 96,
-    maxPageBytes: 320,
-    maxLines: 40,
-    maxPipeLines: 20,
-    maxTableRows: 12,
-    readChunkBytes: 41
-  });
-  const fenceSummaryPage = oversizedFencePages.find((page) => page.omittedStructures?.some((item) => item.kind === "fence"));
-  assert.ok(fenceSummaryPage);
-  assert.match(fenceSummaryPage.content, /大型代码块已折叠/);
-  assert.equal(markdownRenderPlan(fenceSummaryPage.content).mode, "rich");
-  assert.doesNotMatch(fenceSummaryPage.content, /const value40/);
-  assert.equal(fenceSummaryPage.content.match(/```/g)?.length, 2, "the fence summary itself must be valid Markdown");
-  assert.equal(oversizedFencePages.at(-1).content, "\n收尾\n");
-
-  const oversizedMathSource = ["$$", ...Array.from({ length: 60 }, () => "x_1 + x_2 + x_3 + x_4"), "$$", "after", ""].join("\n");
-  const oversizedMathFixture = await writeFixture("oversized-math.md", oversizedMathSource);
-  const oversizedMathPages = await readAllPages(oversizedMathFixture, {
-    pageBytes: 128,
-    maxPageBytes: 300,
-    maxLines: 35,
-    maxPipeLines: 20,
-    maxTableRows: 12
-  });
-  assert.match(oversizedMathPages[0].content, /大型数学公式块已折叠/);
-  assert.equal(oversizedMathPages[0].omittedStructures?.[0].kind, "math");
-  assert.equal(markdownRenderPlan(oversizedMathPages[0].content).mode, "rich");
-
-  const oversizedTableSource = [
-    "| index | value |",
-    "| ---: | --- |",
-    ...Array.from({ length: 30 }, (_, index) => `| ${index} | row-${index} |`),
-    "",
-    "after",
-    ""
-  ].join("\n");
-  const oversizedTableFixture = await writeFixture("oversized-table.md", oversizedTableSource);
-  const oversizedTablePages = await readAllPages(oversizedTableFixture, {
-    pageBytes: 256,
-    maxPageBytes: 2_048,
-    maxLines: 100,
-    maxPipeLines: 50,
-    maxTableRows: 10
-  });
-  assert.match(oversizedTablePages[0].content, /大型表格已折叠/);
-  assert.equal(oversizedTablePages[0].omittedStructures?.[0].reason, "table-row-budget");
-  assert.doesNotMatch(oversizedTablePages[0].content, /row-15/);
-  assert.equal(markdownRenderPlan(oversizedTablePages[0].content).mode, "rich");
-
-  const productionBudgetFence = await writeFixture("production-budget-fence.md", `\`\`\`text\n${"x".repeat(130 * 1024)}\n\`\`\`\n`);
-  const productionBudgetPage = await readMarkdownPreviewPage(productionBudgetFence.target, productionBudgetFence.size, 0);
-  assert.match(productionBudgetPage.content, /大型代码块已折叠/);
-  assert.ok(Buffer.byteLength(productionBudgetPage.content) < 120_000);
-  assert.equal(markdownRenderPlan(productionBudgetPage.content).mode, "rich");
-  assert.equal(productionBudgetPage.nextOffset, null);
-
-  const arbitraryOffsetSource = "first line\nsecond line\nthird line\n";
-  const arbitraryFixture = await writeFixture("arbitrary-offset.md", arbitraryOffsetSource);
-  const arbitraryPage = await readMarkdownPreviewPage(arbitraryFixture.target, arbitraryFixture.size, 3, { pageBytes: 64 });
-  assert.equal(arbitraryPage.offset, Buffer.byteLength("first line\n"));
-  assert.equal(arbitraryPage.content, "second line\nthird line\n");
-
-  console.log("Markdown preview pages preserve fenced code, display math, GFM tables and rich-render budgets");
-} finally {
-  await fsp.rm(temporaryRoot, { recursive: true, force: true });
-}
+  const small = { pageBytes: 180, maxPageBytes: 1024, maxLines: 100 };
+  const ordinary = await verify("ordinary.md", "# 标题\n\n" + "段落内容😀。\n\n".repeat(30) + "```ts\nconst x = 1;\n```\n\n$$\nx^2\n$$\n\n\\[\na^2+b^2=c^2\n\\]\n", small);
+  assert.ok(ordinary.pages.length > 2);
+  const formulaPage = ordinary.pages.find(p => p.content.includes("x^2"));
+  assert.equal(formulaPage.content.match(/^\$\$$/gm).length, 2);
+  const code = await verify("code.md", "前言\n```ts\n" + Array.from({ length: 300 }, (_, i) => `const value${i} = '中文';\n`).join("") + "```\n尾声\n", { pageBytes: 256, maxPageBytes: 512 });
+  assert.ok(code.pages.length > 12);
+  assert.ok(code.pages.some(p => p.nextContinuation));
+  for (const page of code.pages.filter(p => p.content.includes("const value"))) assert.equal(page.content.match(/^```/gm).length, 2, "continued code is syntactically fenced");
+  const table = await verify("table.md", "| index | value |\n| --- | --- |\n" + Array.from({ length: 550 }, (_, i) => `| ${i} | row-${i} |\n`).join("") + "\n尾声\n", { maxTableRows: 50 });
+  assert.ok(table.pages.length >= 11);
+  for (const page of table.pages.filter(p => p.content.includes("row-"))) assert.match(page.content, /^\| index \| value \|\n\| --- \| --- \|/);
+  const math = await verify("math.md", "$$\n" + "x + ".repeat(6000) + "y\n$$\nafter\n", { pageBytes: 128, maxPageBytes: 300 });
+  assert.ok(math.pages[0].content.includes("y\n$$"), "a large complete formula stays atomic, beyond old 8K/24K limits");
+  assert.equal(math.pages[0].sourcePage, false);
+  await verify("long-line.md", "😀中文".repeat(50000) + "\nend\n");
+  await verify("long-code-line.md", "```text\n" + "😀中文".repeat(50000) + "\n```\nend\n");
+  const extreme = await verify("extreme-math.md", "$$\n" + "x+".repeat(1100000) + "y\n$$\nend\n");
+  assert.equal(extreme.pages[0].sourcePage, true, "pathological single expression has complete paged source access");
+  assert.ok(extreme.pages.every(p => Buffer.byteLength(p.content) <= 120000));
+  const saved = code.pages[0];
+  await fsp.appendFile(code.target, "changed");
+  await assert.rejects(readMarkdownPreviewPage(code.target, code.size, saved.nextOffset, { continuation: saved.nextContinuation, version: saved.version }), /文件已发生变化/);
+  await assert.rejects(readMarkdownPreviewPage(code.target, code.size, 0, { continuation: "bad" }));
+  console.log("Lossless pages: Unicode, 300-line code, 550-row table, 24K+ formula, 2MB+ source, cursor continuity and changed-file rejection passed");
+} finally { await fsp.rm(root, { recursive: true, force: true }); }

@@ -30,6 +30,10 @@ export type PreviewFile = WorkspaceFileNode & {
   previewMode?: "full" | "plain" | "plain-paged" | "markdown-paged" | "bounded-table" | "document-html";
   offset?: number;
   nextOffset?: number | null;
+  endOffset?: number;
+  nextContinuation?: string;
+  sourcePage?: boolean;
+  version?: string;
   truncated?: boolean;
 };
 
