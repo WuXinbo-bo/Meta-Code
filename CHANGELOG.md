@@ -14,6 +14,7 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ### Fixed
 
+- Native CLI selection and installation invalidate old detection snapshots; late probes cannot restore a previous runtime or falsely report an installed CLI as missing.
 - Newly created conversations remain selected while navigation data catches up.
 - Delegated Agent logs update during execution rather than only after pause or completion.
 - Supported math delimiters render consistently across replies, reasoning, drawers, and file previews without arbitrary formula-count truncation.

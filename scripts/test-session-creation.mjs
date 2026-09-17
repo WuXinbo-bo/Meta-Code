@@ -104,6 +104,14 @@ try {
   assert.equal(workspaceResponse.status, 201);
   const workspace = await workspaceResponse.json();
 
+  // Prime a genuine "not installed" snapshot, even on a developer machine.
+  const emptySelection = await request(port, "/api/runtime/codex/selection", {
+    method: "PATCH", body: JSON.stringify({ mode: "managed", customPath: "", systemPath: "" })
+  });
+  assert.equal(emptySelection.status, 200);
+  const missingRuntime = await (await request(port, "/api/runtime/codex")).json();
+  assert.equal(missingRuntime.available, false);
+
   // Use the platform CLI already pinned by our SDK dependency. Session creation
   // must not depend on a global Codex installation or the developer's account.
   const bundledCodex = CLI_REGISTRY.codex.executableCandidates(projectRoot).find(existsSync);

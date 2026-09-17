@@ -84,6 +84,7 @@
     "test:cli-clean-desktop": "npm run build && node scripts/test-cli-clean-desktop.mjs",
     "test:runtime-download": "node --import tsx scripts/test-runtime-download.mjs",
     "test:runtime-progress": "node --import tsx scripts/test-runtime-progress.mjs",
+    "test:runtime-detection": "node --import tsx scripts/test-runtime-detection-cache.mjs",
     "test:page-preferences": "node --import tsx scripts/test-page-preferences.mjs",
     "test:help": "node --import tsx scripts/test-help-system.mjs",
     "test:ux-foundations": "node scripts/test-ux-foundations.mjs",

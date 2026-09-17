@@ -43,6 +43,7 @@ import { AppUpdateService } from "./appUpdate/service.js";
 import { CliRuntimeManager } from "./runtime/manager.js";
 import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
 import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
+import { RuntimeDetectionCache } from "./runtime/detectionCache.js";
 import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
 import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
 import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
@@ -546,12 +547,6 @@ function publishSessionChanged(session: Session) {
 const cliRuntimeManager = new CliRuntimeManager(ROOT, APP_PATHS.runtimesDir, (event) => eventHub.publish("runtime.install", event));
 const agentMarketStore = new AgentMarketStore(path.join(APP_PATHS.dataDir, "agent-market"));
 const secretVault = new SecretVault(APP_PATHS.secretsFile);
-let detectedCodexRuntime: CodexRuntimeStatus | null = null;
-let detectedCodexRuntimeAt = 0;
-let codexRuntimeDetectionPromise: Promise<CodexRuntimeStatus> | null = null;
-let detectedClaudeRuntime: EngineRuntimeStatus | null = null;
-let detectedClaudeRuntimeAt = 0;
-let claudeRuntimeDetectionPromise: Promise<EngineRuntimeStatus> | null = null;
 const claudeModelValidationCache = new Map<string, number>();
 const codexModelValidationCache = new Map<string, number>();
 const stateSaveCoordinator = new GenerationSaveCoordinator(persistStateOnce);
@@ -559,6 +554,14 @@ let deferredStateSaveTimer: NodeJS.Timeout | undefined;
 type PlainSkillRuntime = { root: string; instructions: string; cleanup: () => void };
 let bundledSkill: PlainSkillRuntime;
 const RUNTIME_DETECTION_TTL_MS = 60_000;
+const codexRuntimeDetection = new RuntimeDetectionCache<CodexRuntimeStatus>(
+  () => cliRuntimeManager.detect("codex", state.settings.codexPath), RUNTIME_DETECTION_TTL_MS,
+  (error) => console.error("Codex runtime background refresh failed", error)
+);
+const claudeRuntimeDetection = new RuntimeDetectionCache<EngineRuntimeStatus>(
+  () => cliRuntimeManager.detect("claude", state.settings.claude.claudePath), RUNTIME_DETECTION_TTL_MS,
+  (error) => console.error("Claude runtime background refresh failed", error)
+);
 
 function anthropicApiRoot(baseUrl: string) {
   let normalized = baseUrl.trim().replace(/\/+$/, "").replace(/\/(?:messages|models)$/i, "");
@@ -842,47 +845,17 @@ function usageTotal(usage: Usage) {
   return usage.input_tokens + usage.output_tokens;
 }
 
-async function probeCodexRuntime(): Promise<CodexRuntimeStatus> {
-  detectedCodexRuntime = await cliRuntimeManager.detect("codex", state.settings.codexPath);
-  return detectedCodexRuntime;
-}
-
 async function detectCodexRuntime(force = false, allowStale = false): Promise<CodexRuntimeStatus> {
-  if (!force && detectedCodexRuntime && Date.now() - detectedCodexRuntimeAt < RUNTIME_DETECTION_TTL_MS) return detectedCodexRuntime;
-  if (!force && allowStale && detectedCodexRuntime) {
-    if (!codexRuntimeDetectionPromise) void detectCodexRuntime().catch((error) => console.error("Codex runtime background refresh failed", error));
-    return detectedCodexRuntime;
-  }
-  if (codexRuntimeDetectionPromise) return codexRuntimeDetectionPromise;
-  codexRuntimeDetectionPromise = probeCodexRuntime()
-    .then((status) => {
-      detectedCodexRuntimeAt = Date.now();
-      return status;
-    })
-    .finally(() => { codexRuntimeDetectionPromise = null; });
-  return codexRuntimeDetectionPromise;
+  return codexRuntimeDetection.get(force, allowStale);
 }
 
 function invalidateRuntimeDetection() {
-  detectedCodexRuntimeAt = 0;
-  detectedClaudeRuntimeAt = 0;
+  codexRuntimeDetection.invalidate();
+  claudeRuntimeDetection.invalidate();
 }
 
 async function getClaudeRuntime(force = false, allowStale = false) {
-  if (!force && detectedClaudeRuntime && Date.now() - detectedClaudeRuntimeAt < RUNTIME_DETECTION_TTL_MS) return detectedClaudeRuntime;
-  if (!force && allowStale && detectedClaudeRuntime) {
-    if (!claudeRuntimeDetectionPromise) void getClaudeRuntime().catch((error) => console.error("Claude runtime background refresh failed", error));
-    return detectedClaudeRuntime;
-  }
-  if (claudeRuntimeDetectionPromise) return claudeRuntimeDetectionPromise;
-  claudeRuntimeDetectionPromise = cliRuntimeManager.detect("claude", state.settings.claude.claudePath)
-    .then((status) => {
-      detectedClaudeRuntime = status;
-      detectedClaudeRuntimeAt = Date.now();
-      return status;
-    })
-    .finally(() => { claudeRuntimeDetectionPromise = null; });
-  return claudeRuntimeDetectionPromise;
+  return claudeRuntimeDetection.get(force, allowStale);
 }
 
 function runtimeProviderIds(runtimeId: string) {
@@ -2095,7 +2068,7 @@ function buildCodex(settings: Settings, parentSession?: Session, disableNativeAg
     ...workspaceMcp.config
   };
   return new Codex({
-    ...(detectedCodexRuntime?.available ? { codexPathOverride: detectedCodexRuntime.path } : {}),
+    ...(codexRuntimeDetection.peek()?.available ? { codexPathOverride: codexRuntimeDetection.peek()!.path } : {}),
     ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
     ...(Object.keys(codexConfig).length ? { config: codexConfig } : {}),
     env: { ...envForCodex(settings, parentSession, disableNativeAgents, codexHomeOverride || CODEX_HOME), ...workspaceMcp.env }
