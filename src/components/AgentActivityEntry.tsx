@@ -1,12 +1,11 @@
 import { Activity, Brain, Check, ChevronRight, Eye, FileCode2, PlugZap, Search, TerminalSquare, Wrench, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkBreaks from "remark-breaks";
-import remarkGfm from "remark-gfm";
+import { AssistantReply } from "./AssistantReply";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { activityVisualTier, type SharedAgentLog } from "./activityModel";
 
 export type { SharedAgentLog } from "./activityModel";
+export { AgentReplyContent } from "./AssistantReply";
 
 type FileDiffPreview = { path: string; available: boolean; reason: string; additions: number; deletions: number; lines: string[]; truncated: boolean; binary: boolean; scope?: "event" | "turn" | "workspace"; artifactId?: string };
 type CommandPreviewData = { command: string; cwd: string; output: string; exitCode: number | null; durationMs: number | null; status: string };
@@ -144,14 +143,6 @@ function FileChangePreview({ workspaceId, paths, eventDiffs }: { workspaceId: st
   </div>;
 }
 
-export function AgentReplyContent({ text, renderMessage }: { text: unknown; renderMessage?: (text: string) => ReactNode }) {
-  const messageText = typeof text === "string" && text ? text : "已更新任务进度";
-  if (renderMessage) return <>{renderMessage(messageText)}</>;
-  return messageText.length > 120_000
-    ? <div className="agent-markdown-message safe-plain"><p>回复内容较大，已切换为纯文本安全预览。</p><pre>{messageText.slice(0, 180_000)}</pre></div>
-    : <div className="agent-markdown-message"><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{messageText}</ReactMarkdown></div>;
-}
-
 export function AgentActivityEntry({
   log,
   status,
@@ -162,6 +153,7 @@ export function AgentActivityEntry({
   messageLabel,
   renderMessage,
   workspaceId,
+  showProvider = true,
   expanded = false
 }: {
   log: SharedAgentLog;
@@ -173,6 +165,7 @@ export function AgentActivityEntry({
   messageLabel?: string;
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
+  showProvider?: boolean;
   expanded?: boolean;
 }) {
   const [open, setOpen] = useState(expanded);
@@ -188,13 +181,10 @@ export function AgentActivityEntry({
     return <div className="agent-thinking-line settled"><Brain size={13} /><span>思考</span></div>;
   }
   if (log.kind === "message") {
-    return <article className="agent-chat-message">
-      <span className={`agent-chat-avatar ${provider}`}><ProviderIcon provider={provider} icon={providerIcon} accent={providerAccent} size={18} /></span>
-      <div>
-        <header><strong>{log.title === "最终回复" ? "最终回复" : messageLabel || log.title || "Agent"}<em className={`agent-provider-badge ${provider}`}>{providerLabel || provider}</em></strong><time>{time}</time></header>
-        <AgentReplyContent text={log.text} renderMessage={renderMessage} />
-      </div>
-    </article>;
+    return <AssistantReply text={log.text} renderMessage={renderMessage}
+      avatar={<ProviderIcon provider={provider} icon={providerIcon} accent={providerAccent} size={18} />}
+      heading={showProvider ? <><strong>{messageLabel || providerLabel || provider}</strong><time>{time}</time></> : undefined}
+    />;
   }
   const isError = log.kind === "error";
   const isStatus = log.kind === "status";

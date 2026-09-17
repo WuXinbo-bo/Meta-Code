@@ -1,5 +1,5 @@
 import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { commandActivitySummary } from "./AgentActivityEntry";
 import { ActivityRenderer } from "./ActivityRenderer";
@@ -82,12 +82,11 @@ function isLiveTimeline(status: string) {
 }
 
 function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
-  const summaries = new Map<ActivityViewLog["category"], Extract<ActivityItem, { type: "summary" }>>();
   const retained: ActivityItem[] = [];
   for (const log of logs) {
     if (SUMMARY_CATEGORIES.has(log.category)) {
-      const current = summaries.get(log.category);
-      if (current) {
+      const current = retained.at(-1);
+      if (current?.type === "summary" && current.category === log.category) {
         current.logs.push(log);
       } else {
         const summary: Extract<ActivityItem, { type: "summary" }> = {
@@ -96,12 +95,11 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
           category: log.category,
           logs: [log]
         };
-        summaries.set(log.category, summary);
         retained.push(summary);
       }
       continue;
     }
-    if (log.category === "error" || log.kind === "error" || log.category === "message" || log.category === "result") {
+    if (log.category !== "reasoning" && !isRoutineActivityStatus(log)) {
       retained.push({ type: "log", log });
     }
   }
@@ -109,13 +107,18 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
 }
 
 function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityItem[] {
-  const latestOperational = [...logs].reverse().find((log) => !["message", "result", "error"].includes(log.category));
-  const retained = logs.filter((log) => log.category === "message" || log.category === "result" || log.category === "error" || log.kind === "error");
+  // Only the open activity segment rotates. Earlier replies and their tool
+  // summaries remain in chronological order while a later segment streams.
+  const boundary = logs.findLastIndex((log) => log.category === "message" || log.category === "result");
+  const history = settledActivityItems(logs.slice(0, boundary + 1));
+  const currentLogs = logs.slice(boundary + 1);
+  const latestOperational = [...currentLogs].reverse().find((log) => !["message", "result", "error"].includes(log.category));
+  const retained = currentLogs.filter((log) => log.category === "error" || log.kind === "error");
   if (latestOperational && !retained.some((log) => log.id === latestOperational.id)) retained.push(latestOperational);
   retained.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  return planAwareActivities(retained, provider).map((item) => item.type === "log" && item.log.id === latestOperational?.id
+  return [...history, ...planAwareActivities(retained, provider).map((item): ActivityItem => item.type === "log" && item.log.id === latestOperational?.id
     ? { type: "current", log: item.log }
-    : item);
+    : item)];
 }
 
 function CompletedActivitySummary({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
@@ -190,7 +193,7 @@ function minimalActivities(logs: readonly unknown[], provider: string, status: s
   return isLiveTimeline(status) ? liveActivityItems(visible, provider) : settledActivityItems(visible);
 }
 
-export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
+export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, scrollRef: externalScrollRef }: {
   logs: readonly unknown[];
   status: string;
   provider: string;
@@ -201,16 +204,44 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   showProvider?: boolean;
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const localScrollRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const items = useMemo(() => minimalActivities(logs, provider, status), [logs, provider, status]);
   const virtualized = items.length > 80;
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const [externalScrollElement, setExternalScrollElement] = useState<HTMLDivElement | null>(null);
+  // Parent refs are attached after child layout effects. Resolve an external
+  // viewport after commit so an initially virtualized drawer cannot stay blank.
+  useEffect(() => {
+    if (!externalScrollRef) return;
+    const container = externalScrollRef.current;
+    const list = listRef.current;
+    if (!container || !list) return;
+    setExternalScrollElement(container);
+    const measure = () => setScrollMargin(list.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    if (container.firstElementChild) observer.observe(container.firstElementChild);
+    return () => observer.disconnect();
+  }, [externalScrollRef, virtualized]);
   const virtualizer = useVirtualizer({
     count: items.length,
-    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => {
+      const item = items[index];
+      return item.type === "log" || item.type === "current" ? `${item.type}-${item.log.id}` : item.id;
+    },
+    getScrollElement: () => externalScrollRef ? externalScrollElement : localScrollRef.current,
     estimateSize: () => 32,
     overscan: 10,
-    enabled: virtualized
+    // Dynamic Markdown is measured during React commits and ResizeObserver
+    // callbacks. Let React batch these updates instead of nesting flushSync.
+    useFlushSync: false,
+    useAnimationFrameWithResizeObserver: true,
+    enabled: virtualized,
+    scrollMargin
   });
 
   const renderItem = (item: ActivityItem) => item.type === "group"
@@ -218,17 +249,17 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
     : item.type === "summary"
       ? <CompletedActivitySummary key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
     : item.type === "current"
-      ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} /></div>
+      ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} /></div>
     : item.type === "plan"
       ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
-    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />;
+    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} />;
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
   return <div className="activity-timeline single-layer">
-    <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""}`} ref={scrollRef}>
+    <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""} ${externalScrollRef ? "external-scroll" : ""}`} ref={externalScrollRef ? listRef : localScrollRef}>
       {virtualized
         ? <div className="activity-virtual-content" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-          {rows.map((row) => <div className="activity-virtual-row" data-index={row.index} ref={virtualizer.measureElement} key={row.key} style={{ transform: `translateY(${row.start}px)` }}>{renderItem(items[row.index])}</div>)}
+          {rows.map((row) => <div className="activity-virtual-row" data-index={row.index} ref={virtualizer.measureElement} key={row.key} style={{ transform: `translateY(${row.start - scrollMargin}px)` }}>{renderItem(items[row.index])}</div>)}
         </div>
         : items.map(renderItem)}
     </div>

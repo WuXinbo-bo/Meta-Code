@@ -36,6 +36,7 @@
     "test:event-stream": "npm run build && node scripts/test-event-stream.mjs",
     "test:realtime-client": "node --import tsx scripts/test-realtime-coordinator.mjs",
     "test:agent-stream": "node --import tsx scripts/test-agent-stream-rendering.mjs",
+    "test:agent-conversation": "node --import tsx scripts/test-agent-conversation-layout.mjs",
     "test:agent-realtime": "node --import tsx scripts/test-agent-realtime-contract.mjs",
     "test:activity": "node --import tsx scripts/test-activity-contract.mjs",
     "test:activity-lifecycle": "node --import tsx scripts/test-activity-lifecycle.mjs",

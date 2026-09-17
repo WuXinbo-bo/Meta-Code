@@ -16,12 +16,16 @@ type Props = {
   showProvider?: boolean;
   emptyText?: string;
   className?: string;
+  loading?: boolean;
+  error?: string;
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
 };
 
 export function useAgentOutputFollow(version: string, identity = "") {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
+  const scrollIntentRef = useRef(0);
   const scrollToBottom = useCallback(() => {
     const container = containerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
@@ -35,9 +39,34 @@ export function useAgentOutputFollow(version: string, identity = "") {
 
   useEffect(() => {
     followingRef.current = true;
+    scrollIntentRef.current = 0;
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
   }, [identity, scrollToBottom]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const markIntent = () => { scrollIntentRef.current = performance.now(); };
+    const onWheel = (event: WheelEvent) => { markIntent(); if (event.deltaY < 0) followingRef.current = false; };
+    const onPointer = (event: PointerEvent) => {
+      if (event.target === container || event.pointerType === "touch") markIntent();
+      // Expanding details is reading history, not a request to jump to the end.
+      if ((event.target as Element).closest?.("summary")) followingRef.current = false;
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (["Enter", " "].includes(event.key) && (event.target as Element).closest?.("summary")) followingRef.current = false;
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) markIntent();
+    };
+    container.addEventListener("wheel", onWheel, { passive: true });
+    container.addEventListener("pointerdown", onPointer);
+    container.addEventListener("keydown", onKey);
+    return () => {
+      container.removeEventListener("wheel", onWheel);
+      container.removeEventListener("pointerdown", onPointer);
+      container.removeEventListener("keydown", onKey);
+    };
+  }, []);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -56,6 +85,9 @@ export function useAgentOutputFollow(version: string, identity = "") {
   }, [scrollToBottom]);
 
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    // Virtual measurement, tab changes and viewport resize also emit scroll.
+    // Only user navigation may disable following; layout must not do so.
+    if (!scrollIntentRef.current || performance.now() - scrollIntentRef.current > 1_500) return;
     const target = event.currentTarget;
     followingRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
   }, []);
@@ -83,14 +115,15 @@ class AgentConversationBoundary extends Component<{ resetKey: string; children: 
   }
 }
 
-export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, emptyText = "尚无活动日志", className = "" }: Props) {
+export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, emptyText = "尚无活动日志", className = "", loading = false, error = "", scrollRef }: Props) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   const version = agentStreamVersion(safeLogs);
   return <div className={`agent-conversation-stream ${className}`.trim()}>
+    {error && <p className="agent-conversation-notice" role="status">{error}，正在自动重试。{safeLogs.length > 0 ? "已有日志仍可查看。" : ""}</p>}
     <AgentConversationBoundary resetKey={version}>
       {safeLogs.length
-        ? <ActivityTimeline logs={safeLogs} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} />
-        : <p className="agent-conversation-empty">{emptyText}</p>}
+        ? <ActivityTimeline logs={safeLogs} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} scrollRef={scrollRef} />
+        : !error && <p className="agent-conversation-empty" role="status">{loading ? "正在读取活动日志…" : emptyText}</p>}
     </AgentConversationBoundary>
   </div>;
 }

@@ -14,6 +14,7 @@ export type ActivityRendererProps = {
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   expanded?: boolean;
+  showProvider?: boolean;
 };
 
 function GenericActivityRenderer({ log, expanded = false }: ActivityRendererProps) {

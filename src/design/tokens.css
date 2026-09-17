@@ -30,6 +30,10 @@
   --mc-r-md: 6px;
   --mc-r-lg: 8px;
   --mc-space-1: 4px;
+  --mc-reply-font-size: 15px;
+  --mc-reply-line-height: 1.7;
+  --mc-reply-paragraph-gap: 14px;
+  --mc-reply-row-gap: 5px;
   --mc-space-2: 8px;
   --mc-space-3: 12px;
   --mc-space-4: 16px;

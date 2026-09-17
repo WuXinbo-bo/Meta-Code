@@ -69,8 +69,9 @@ import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase"
 import { ThemeToggle } from "./branding/ThemeToggle";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
+import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
 import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
-import { AgentReplyContent } from "./components/AgentActivityEntry";
+import { AssistantReply } from "./components/AssistantReply";
 import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
 import type { CodexLinkBinding } from "./codex-link/model";
 import { RequestCoordinator } from "./requestCoordinator";
@@ -1489,6 +1490,8 @@ function SubagentDrawer({
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedAgentDetail, setSelectedAgentDetail] = useState<AgentThread | null>(null);
   const [agentDetailLoading, setAgentDetailLoading] = useState(false);
+  const [agentDetailError, setAgentDetailError] = useState("");
+  const [agentListError, setAgentListError] = useState("");
   const agentLoadedRef = useRef(false);
   const agentSnapshotRef = useRef("");
   useEffect(() => {
@@ -1524,6 +1527,7 @@ function SubagentDrawer({
       try {
         const agents = normalizeAgentThreads(await api<unknown>(`/api/sessions/${sessionId}/agents`, { signal: controller.signal }));
         if (stopped) return;
+        setAgentListError("");
         failures = 0;
         emptyRetries = agents.length ? 3 : emptyRetries + 1;
         const snapshot = agentThreadsSnapshot(agents);
@@ -1544,6 +1548,7 @@ function SubagentDrawer({
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
         setAgentThreads((current) => current ?? []);
+        setAgentListError("子 Agent 列表暂时无法同步");
         nextDelay = Math.min(8_000, 1_200 * (2 ** Math.min(failures, 3)));
       } finally {
         loading = false;
@@ -1598,6 +1603,7 @@ function SubagentDrawer({
     const cacheKey = `${sessionId}:${agentId}`;
     const cached = agentThreadDetailCache.get(cacheKey);
     setSelectedAgentDetail(cached || null);
+    setAgentDetailError("");
     setAgentDetailLoading(!cached);
     let stopped = false;
     let loading = false;
@@ -1633,15 +1639,18 @@ function SubagentDrawer({
       try {
         const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, { signal: controller.signal });
         const agent = normalizeAgentThreads([value])[0];
-        if (!agent || stopped) return;
+        if (stopped) return;
+        if (!agent || agent.id !== agentId) throw new Error("子 Agent 详情不匹配");
         failures = 0;
         agentThreadDetailCache.set(cacheKey, agent);
         setSelectedAgentDetail(agent);
+        setAgentDetailError("");
         if (sessionRunning || agent.status === "running") nextDelay = 1_000;
       } catch (error) {
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
         nextDelay = Math.min(8_000, 1_000 * (2 ** Math.min(failures, 3)));
+        setAgentDetailError("活动日志暂时无法同步");
       } finally {
         loading = false;
         if (stopped) return;
@@ -1669,8 +1678,10 @@ function SubagentDrawer({
       unsubscribeReconcile();
     };
   }, [sessionId, selectedAgentSummary?.id, sessionRunning]);
-  const selectedAgent = selectedAgentDetail || selectedAgentSummary;
-  const selectedAgentLogs = useMemo(() => (selectedAgentDetail?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => left.createdAt.localeCompare(right.createdAt)), [selectedAgentDetail?.logs]);
+  // A tab switch renders before its detail effect runs; never show the previous Agent's logs.
+  const currentAgentDetail = selectedAgentDetail?.id === selectedAgentSummary?.id ? selectedAgentDetail : null;
+  const selectedAgent = currentAgentDetail || selectedAgentSummary;
+  const selectedAgentLogs = useMemo(() => (currentAgentDetail?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => left.createdAt.localeCompare(right.createdAt)), [currentAgentDetail?.logs]);
   const related = useMemo(() => messages.filter((candidate) => {
     const candidateInfo = subagentInfo(candidate);
     if (!candidateInfo.isSubagent) return false;
@@ -1683,63 +1694,49 @@ function SubagentDrawer({
   );
   const title = selectedAgent?.nickname || info.nickname || info.agentType || "子 Agent";
   const drawerStatus = selectedAgent?.status || info.status;
-  const drawerLogCount = selectedAgent?.logs.length ?? logs.length;
+  const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, selectedAgent ? selectedAgentLogs.length : logs.length);
   const drawerProvider = selectedAgent?.provider || info.provider;
   const drawerProviderControl = providerControls.find((control) => control.providerId === drawerProvider);
   const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(selectedAgent ? selectedAgentLogs : logs)}`;
   const followOutput = useAgentOutputFollow(drawerLogVersion, selectedAgentId);
   return (
-    <div className="agent-drawer-backdrop" onMouseDown={onClose}>
-      <aside className="agent-drawer" onMouseDown={(event) => event.stopPropagation()}>
-        <header>
+    <AgentDrawer title={title} onClose={onClose} followOutput={followOutput} header={<header>
           <div className="agent-drawer-title">
             <span className={`subagent-mark ${drawerProvider || "agent"}`}>{drawerProvider ? <ProviderIcon provider={drawerProvider} icon={drawerProviderControl?.identity.icon} accent={drawerProviderControl?.identity.accent} size={18} /> : <Bot size={18} />}</span>
             <span>
               <strong>{title}<em className={`agent-provider-badge ${drawerProvider || "agent"}`}>{agentProviderLabel(drawerProvider)}</em></strong>
-              <small>按执行顺序显示 · {subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条</small>
+              <small>{subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条活动{selectedAgent ? ` · ${formatTokens(usageTotal(selectedAgent.usage))} tokens` : ""}</small>
             </span>
           </div>
           <IconButton label="关闭子 Agent 日志" onClick={onClose}><X size={18} /></IconButton>
-        </header>
-        <div
-          className="agent-drawer-body"
-          ref={followOutput.containerRef}
-          onScroll={followOutput.onScroll}
-        >
-          <div className="agent-drawer-content" ref={followOutput.contentRef}>
-          {agentThreads === null && <div className="agent-loading"><LoaderCircle className="spin" size={15} />正在读取子 Agent 线程</div>}
-          {agentThreads && orderedAgentThreads.length > 0 && (
-            <nav className="agent-thread-tabs">
+        </header>} navigation={agentThreads && orderedAgentThreads.length > 1 && (
+            <nav className="agent-thread-tabs" aria-label="切换子 Agent">
               {orderedAgentThreads.map((agent) => (
                 <button
                   className={agent.id === selectedAgentId ? "active" : ""}
                   key={agent.id}
+                  aria-pressed={agent.id === selectedAgentId}
                   onClick={() => setSelectedAgentId(agent.id)}
                 >
                   <span className={`agent-status-dot ${agent.status}`} />
                   <span>
                     <strong>{agent.nickname}</strong>
-                    <small><em className={`agent-provider-badge ${agent.provider || "agent"}`}>{agentProviderLabel(agent.provider)}</em>{agentModeLabel(agent.mode)} · {formatTokens(usageTotal(agent.usage))} tokens · {agent.logCount ?? agent.logs.length} 条</small>
+                    <small>{agentProviderLabel(agent.provider)} · {agentModeLabel(agent.mode)}</small>
                   </span>
                 </button>
               ))}
             </nav>
-          )}
-          <section className="agent-summary-line">
-            <span className={`agent-status-dot ${drawerStatus}`} />
-            <strong>{subagentStatusLabel(drawerStatus)}</strong>
-            {selectedAgent && <span>{formatTokens(usageTotal(selectedAgent.usage))} tokens</span>}
-            <span>{drawerLogCount} 条活动</span>
-          </section>
+          )}>
           {(selectedAgent?.task || info.task) && (
-            <section className="agent-task">
-              <span>委派任务</span>
-              <p>{selectedAgent?.task || info.task}</p>
-            </section>
+            <AgentTaskDescription key={selectedAgentId} title="委派任务" text={selectedAgent?.task || info.task || ""} />
           )}
           <section className="agent-log-section">
             <div className="agent-conversation">
               <AgentConversation
+                key={selectedAgentId}
+                scrollRef={followOutput.containerRef}
+                loading={agentThreads === null || agentDetailLoading || (!!selectedAgent && !currentAgentDetail)}
+                error={agentListError || agentDetailError}
                 logs={selectedAgent ? selectedAgentLogs : logs.map(eventActivityLog)}
                 status={selectedAgent?.status || drawerStatus}
                 provider={selectedAgent?.provider || drawerProvider || "agent"}
@@ -1751,13 +1748,9 @@ function SubagentDrawer({
                 showProvider={false}
                 renderMessage={(text: string) => <MarkdownBody text={text} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} />}
               />
-              {selectedAgent && selectedAgentLogs.length === 0 && <p className="empty-note">该子 Agent 暂无可显示日志</p>}
             </div>
           </section>
-          </div>
-        </div>
-      </aside>
-    </div>
+    </AgentDrawer>
   );
 }
 
@@ -5104,16 +5097,24 @@ export function App() {
                         onAnswerQuestion={answerClaudeQuestion}
                       />
                     ) : (() => {
-                      const editing = message.role === "user" && editingMessageId === message.id;
-                      return <article
-                        className={`message ${message.role}${touchActionMessageId === message.id ? " touch-actions-open" : ""}`}
+                      if (message.role === "assistant") return <AssistantReply
+                        text={message.text}
+                        avatar={<Bot size={17} />}
+                        className={touchActionMessageId === message.id ? "touch-actions-open" : ""}
                         data-message-id={message.id}
                         onPointerUp={(event) => {
-                          if (message.role !== "assistant" || event.pointerType === "mouse") return;
+                          if (event.pointerType === "mouse") return;
                           const target = event.target instanceof Element ? event.target : null;
                           if (target?.closest("button, a, input, textarea, summary")) return;
                           setTouchActionMessageId((current) => current === message.id ? "" : message.id);
                         }}
+                        renderMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
+                        actions={<AssistantMessageActions text={message.text} branching={branching} onBranch={() => void branchFromAssistantMessage(message.id)} onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)} />}
+                      ><AttachmentList attachments={message.attachments} onOpen={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} /></AssistantReply>;
+                      const editing = message.role === "user" && editingMessageId === message.id;
+                      return <article
+                        className={`message ${message.role}`}
+                        data-message-id={message.id}
                       >
                         {message.role !== "user" && <div className="avatar"><Bot size={17} /></div>}
                         <div className="message-body">
@@ -5130,21 +5131,8 @@ export function App() {
                                 </button>
                               </div>
                             </div>
-                          ) : message.role === "assistant" ? (
-                            <AgentReplyContent text={message.text} renderMessage={(text) => <MarkdownBody
-                              text={text}
-                              workspaceId={activeFileScopeId}
-                              workspaceRoot={workspace?.root || ""}
-                              onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))}
-                            />} />
                           ) : <p>{message.text}</p>}
                           {!editing && <AttachmentList attachments={message.attachments} onOpen={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
-                          {!editing && message.role === "assistant" && <AssistantMessageActions
-                            text={message.text}
-                            branching={branching}
-                            onBranch={() => void branchFromAssistantMessage(message.id)}
-                            onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)}
-                          />}
                         </div>
                         {message.role === "user" && !editing && (
                           <button

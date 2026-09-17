@@ -94,7 +94,7 @@ assert.match(app, /document\.addEventListener\("pointerdown", dismissTouchAction
 assert.match(conversationStyles, /\.message\.touch-actions-open \.message-actions/);
 assert.match(conversationStyles, /margin-bottom: 0/);
 assert.match(conversationStyles, /\.message-actions \{[\s\S]*min-height: 20px;[\s\S]*margin: 0;/);
-assert.match(conversationStyles, /\.message-virtual-row-assistant \{ padding-bottom: 5px; \}/);
+assert.match(conversationStyles, /\.message-virtual-row-assistant \{ padding-bottom: var\(--mc-reply-row-gap\); \}/);
 assert.doesNotMatch(conversationStyles, /\.message-actions \{[\s\S]{0,180}position: absolute;/);
 assert.match(capabilityControl, /activeLabel/);
 assert.doesNotMatch(capabilityControl, /Skill \$\{/);
@@ -154,13 +154,13 @@ assert.match(timeline, /isLiveTimeline\(status\) \? liveActivityItems\(visible, 
 assert.match(timeline, /type: "summary"/);
 assert.match(timeline, /<CompletedActivitySummary/);
 assert.match(timeline, /open && <div className="activity-summary-details">/);
-assert.match(timeline, /const latestOperational = \[\.\.\.logs\]\.reverse\(\)\.find/);
+assert.match(timeline, /const latestOperational = \[\.\.\.currentLogs\]\.reverse\(\)\.find/);
 assert.match(timeline, /className="activity-live-current"/);
 assert.match(timeline, /className="activity-timeline single-layer"/);
 assert.match(timeline, /title: "思考", text: "", detail: undefined/);
 assert.match(entry, /agent-thinking-line settled/);
 assert.doesNotMatch(entry, /agent-reasoning-content/);
-assert.match(styles, /\.agent-chat-message \{[^}]*border: 0;[^}]*background: transparent;/);
+assert.doesNotMatch(styles, /\.agent-chat-message/);
 assert.match(conversationStyles, /\.activity-timeline\.single-layer/);
 assert.match(conversationStyles, /\.activity-summary-group/);
 assert.match(conversationStyles, /\.activity-summary-details/);

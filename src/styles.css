@@ -394,7 +394,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .subagent-row > button span i.waiting { background: #f3ecd6; color: #796832; }
 .subagent-row > button span i.interrupted { background: #ecece8; color: #6f746e; }
 .subagent-mark { display: grid !important; place-items: center; width: 28px; height: 28px; overflow: visible !important; border: 1px solid #9eb1a5; border-radius: 7px; background: #e8f0eb; color: #35634d; }
-.subagent-mark.codex, .agent-chat-avatar.codex { border-color: #aab7ce; background: #edf1f8; color: #526b99; }
+.subagent-mark.codex { border-color: #aab7ce; background: #edf1f8; color: #526b99; }
 .subagent-row .subagent-mark { width: 28px; height: 28px; margin-left: -2px; }
 .agent-provider-badge { display: inline-flex !important; align-items: center; flex: 0 0 auto; min-height: 17px; margin: 0 5px 0 0; padding: 0 5px; border: 1px solid #c3d0c7; border-radius: 4px; background: #edf4ef; color: #416b54; font: normal 8px/15px "Segoe UI", sans-serif !important; letter-spacing: .02em; vertical-align: middle; }
 .agent-provider-badge.codex { border-color: #c3cbdb; background: #eef1f7; color: #536b98; }
@@ -801,15 +801,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-status-dot.completed { background: #6e7d73; }
 .agent-status-dot.failed { background: #b2513d; }
 .agent-status-dot.waiting { background: #b09239; }
-.agent-chat-message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; margin: 16px 0 22px; padding: 0; border: 0; background: transparent; }
-.agent-chat-avatar { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #cbd5ce; border-radius: 6px; background: #edf3ef; color: #426b56; }
-.agent-chat-message > div { min-width: 0; padding-top: 2px; }
-.agent-chat-message header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.agent-chat-message header strong { display: flex; align-items: center; font-size: 11px; }
-.agent-chat-message header strong .agent-provider-badge { order: -1; }
-.agent-chat-message header time { color: #9a9e99; font: 9px Consolas, monospace; }
-.agent-chat-message .markdown-body { color: #303531; font-size: 12.5px; line-height: 1.68; }
-.agent-chat-message .markdown-body p { margin-bottom: 8px; }
 .agent-markdown-message { min-width: 0; color: var(--text); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .agent-markdown-message > :first-child { margin-top: 0; }
 .agent-markdown-message > :last-child { margin-bottom: 0; }
@@ -1725,9 +1716,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .activity-cluster > summary strong { color: #c2c2c2; }
 :root[data-theme="dark"] .activity-cluster > summary small, :root[data-theme="dark"] .activity-cluster > summary time { color: #858585; }
 :root[data-theme="dark"] .activity-cluster > div { border-color: #424642; }
-:root[data-theme="dark"] .agent-chat-message { border-color: transparent; background: transparent; }
-:root[data-theme="dark"] .agent-chat-message .markdown-body,
-:root[data-theme="dark"] .agent-chat-message .agent-markdown-message { color: #d3d7d4; }
 :root[data-theme="dark"] .status-chip:hover,
 :root[data-theme="dark"] .token-status:hover,
 :root[data-theme="dark"] .new-task:hover,
@@ -2028,9 +2016,7 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .subagent-card-title b { color: #d0d2cf !important; }
 :root[data-theme="dark"] .subagent-card-copy > small { color: #898d89; }
 :root[data-theme="dark"] .subagent-mark,
-:root[data-theme="dark"] .agent-chat-avatar { background: #383838; border-color: #555; color: #c5c5c5; }
 :root[data-theme="dark"] .subagent-mark.codex,
-:root[data-theme="dark"] .agent-chat-avatar.codex { background: #363944; border-color: #59647a; color: #b8c3dc; }
 :root[data-theme="dark"] .agent-provider-badge { border-color: #4e5c53; background: #354039; color: #b8cbbf; }
 :root[data-theme="dark"] .agent-provider-badge.codex { border-color: #515b70; background: #373b46; color: #bac5dd; }
 :root[data-theme="dark"] .agent-provider-badge.agent { border-color: #505050; background: #393939; color: #b3b3b3; }
