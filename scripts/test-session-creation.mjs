@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";
+import { existsSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CLI_REGISTRY } from "../dist-server/runtime/registry.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-session-creation-"));
@@ -102,12 +104,25 @@ try {
   assert.equal(workspaceResponse.status, 201);
   const workspace = await workspaceResponse.json();
 
+  // Use the platform CLI already pinned by our SDK dependency. Session creation
+  // must not depend on a global Codex installation or the developer's account.
+  const bundledCodex = CLI_REGISTRY.codex.executableCandidates(projectRoot).find(existsSync);
+  assert.ok(bundledCodex, "the locked SDK platform dependency must provide Codex");
+  const selectionResponse = await request(port, "/api/runtime/codex/selection", {
+    method: "PATCH",
+    body: JSON.stringify({ mode: "custom", customPath: bundledCodex, systemPath: "" })
+  });
+  const selection = await selectionResponse.json();
+  assert.equal(selectionResponse.status, 200, JSON.stringify(selection));
+  assert.equal(selection.status.available, true);
+  assert.equal(path.resolve(selection.status.path), path.resolve(bundledCodex));
+
   const profileResponse = await request(port, "/api/agent-market/codex/profiles", {
     method: "POST",
     body: JSON.stringify({
       name: "Session creation test",
-      authMode: "system-profile",
-      authMethodId: "system-account",
+      authMode: "native-account",
+      authMethodId: "workbench-account",
       isDefault: true
     })
   });
