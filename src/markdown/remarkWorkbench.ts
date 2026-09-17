@@ -1,6 +1,5 @@
 type MarkdownNodeData = {
   hProperties?: Record<string, unknown>;
-  [key: string]: unknown;
 };
 
 export type MarkdownAstNode = {
@@ -51,8 +50,7 @@ export function githubHeadingSlug(value: string): string {
   return slug || "section";
 }
 
-export function addWorkbenchMarkdownMetadata(tree: MarkdownAstNode) {
-  const headingIds = new Set<string>();
+export function addWorkbenchMarkdownMetadata(tree: MarkdownAstNode, headingIds = new Set<string>()) {
   visitMarkdownNodes(tree, (node) => {
     if (/^heading$/.test(node.type)) {
       const base = githubHeadingSlug(markdownNodeText(node));
@@ -87,6 +85,12 @@ export function addWorkbenchMarkdownMetadata(tree: MarkdownAstNode) {
   });
 }
 
-export function remarkWorkbench() {
-  return (tree: MarkdownAstNode) => addWorkbenchMarkdownMetadata(tree);
+export function remarkWorkbench(options?: { headingIds?: string[] }) {
+  return (tree: MarkdownAstNode) => {
+    addWorkbenchMarkdownMetadata(tree);
+    let index = 0;
+    if (options?.headingIds) visitMarkdownNodes(tree, node => {
+      if (node.type === "heading" && node.data?.hProperties) node.data.hProperties.id = options.headingIds![index++] || node.data.hProperties.id;
+    });
+  };
 }

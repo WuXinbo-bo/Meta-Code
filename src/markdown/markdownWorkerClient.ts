@@ -1,4 +1,4 @@
-import { MARKDOWN_RICH_CHAR_BUDGET, markdownRenderPlan, type MarkdownRenderPlan } from "./markdownPlan";
+import { markdownRenderPlan, type MarkdownRenderPlan } from "./markdownPlan";
 import { isMarkdownWorkerResponse, type MarkdownWorkerRequest } from "./markdownWorkerProtocol";
 
 export type MarkdownPlanOptions = {
@@ -44,6 +44,8 @@ export class MarkdownWorkerClient {
   private readonly fallback: (source: string) => MarkdownRenderPlan;
   private readonly pendingById = new Map<number, PendingPlan>();
   private readonly pendingBySource = new Map<string, PendingPlan>();
+  private readonly completed = new Map<string, MarkdownRenderPlan>();
+  private completedSize = 0;
   private worker: Worker | null = null;
   private workerUnavailable = false;
   private disposed = false;
@@ -58,13 +60,8 @@ export class MarkdownWorkerClient {
   plan(source: string, options: MarkdownPlanOptions = {}): Promise<MarkdownRenderPlan> {
     if (this.disposed) return Promise.reject(new Error("Markdown worker client has been disposed"));
     if (options.signal?.aborted) return Promise.reject(createAbortError());
-    if (source.length > MARKDOWN_RICH_CHAR_BUDGET) {
-      try {
-        return Promise.resolve(this.fallback(source));
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    }
+    const cached = this.completed.get(source);
+    if (cached) { this.completed.delete(source); this.completed.set(source, cached); return Promise.resolve(cached); }
 
     let pending = this.pendingBySource.get(source);
     let shouldDispatch = false;
@@ -99,6 +96,7 @@ export class MarkdownWorkerClient {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.completed.clear(); this.completedSize = 0;
     const error = new Error("Markdown worker client has been disposed");
     for (const pending of [...this.pendingById.values()]) this.rejectPending(pending, error);
     this.detachWorker();
@@ -196,6 +194,15 @@ export class MarkdownWorkerClient {
 
   private resolvePending(pending: PendingPlan, plan: MarkdownRenderPlan) {
     if (!this.isPending(pending)) return;
+    const size = pending.source.length + plan.text.length + (plan.pages?.join("").length || 0);
+    if (size <= 1_000_000) {
+      this.completed.set(pending.source, plan); this.completedSize += size;
+      while (this.completed.size > 16 || this.completedSize > 2_000_000) {
+        const [key, value] = this.completed.entries().next().value!;
+        this.completedSize -= key.length + value.text.length + (value.pages?.join("").length || 0);
+        this.completed.delete(key);
+      }
+    }
     this.removePending(pending);
     for (const subscriber of pending.subscribers.values()) {
       this.cleanupSubscriber(subscriber);

@@ -1,3 +1,11 @@
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import remarkStringify from "remark-stringify";
+import { addWorkbenchMarkdownMetadata, type MarkdownAstNode } from "./remarkWorkbench";
+
+// Budgets govern work per page, never the amount of source retained.
 export const MARKDOWN_RICH_CHAR_BUDGET = 120_000;
 export const MARKDOWN_PLAIN_CHAR_BUDGET = 180_000;
 export const MARKDOWN_LINE_BUDGET = 3_000;
@@ -8,181 +16,117 @@ export const MARKDOWN_MERMAID_CHAR_BUDGET = 12_000;
 export const MARKDOWN_MATH_BUDGET = 120;
 export const MARKDOWN_MATH_CHAR_BUDGET = 24_000;
 export const MARKDOWN_MATH_EXPRESSION_CHAR_BUDGET = 8_000;
+export const MARKDOWN_PAGE_CHARS = 16_000;
 
-export type MarkdownRenderPlan =
-  | { mode: "plain"; text: string; truncated: boolean; highlight: false; math: false }
-  | { mode: "rich"; text: string; truncated: false; highlight: boolean; math: boolean };
-
-export function isMarkdownRenderPlan(value: unknown): value is MarkdownRenderPlan {
-  if (!value || typeof value !== "object") return false;
-  const plan = value as Partial<MarkdownRenderPlan>;
-  if (typeof plan.text !== "string" || typeof plan.truncated !== "boolean") return false;
-  if (typeof plan.highlight !== "boolean" || typeof plan.math !== "boolean") return false;
-  if (plan.mode === "plain") return plan.highlight === false && plan.math === false;
-  return plan.mode === "rich" && plan.truncated === false;
-}
-
-function plainTextPlan(source: string): MarkdownRenderPlan {
-  return {
-    mode: "plain",
-    text: source.slice(0, MARKDOWN_PLAIN_CHAR_BUDGET),
-    truncated: source.length > MARKDOWN_PLAIN_CHAR_BUDGET,
-    highlight: false,
-    math: false
-  };
-}
-
-function countLinesUntilBudget(source: string) {
-  let lineCount = 1;
-  for (let index = 0; index < source.length; index += 1) {
-    if (source.charCodeAt(index) !== 10) continue;
-    lineCount += 1;
-    if (lineCount > MARKDOWN_LINE_BUDGET) break;
-  }
-  return lineCount;
-}
-
-type MathBudgetState = {
-  count: number;
-  characters: number;
+export type MarkdownRenderPlan = {
+  mode: "rich" | "plain"; text: string; truncated: boolean; highlight: boolean; math: boolean; pages?: string[];
+  pageHeadings?: { id: string; title: string }[][];
 };
-
-function isEscaped(source: string, index: number) {
-  let slashCount = 0;
-  for (let cursor = index - 1; cursor >= 0 && source.charCodeAt(cursor) === 92; cursor -= 1) slashCount += 1;
-  return slashCount % 2 === 1;
+export function isMarkdownRenderPlan(value: unknown): value is MarkdownRenderPlan {
+  const p = value as MarkdownRenderPlan | null;
+  return !!p && (p.mode === "rich" || p.mode === "plain") && typeof p.text === "string"
+    && typeof p.truncated === "boolean" && typeof p.highlight === "boolean" && typeof p.math === "boolean"
+    && (p.pages === undefined || (Array.isArray(p.pages) && p.pages.every(x => typeof x === "string")))
+    && (p.pageHeadings === undefined || (Array.isArray(p.pageHeadings) && p.pageHeadings.every(items => Array.isArray(items) && items.every(x => typeof x.id === "string" && typeof x.title === "string"))));
 }
 
-function findMathClosingDelimiter(source: string, start: number, delimiter: string, allowNewline: boolean) {
-  for (let cursor = start; cursor < source.length; cursor += 1) {
-    if (!allowNewline && source.charCodeAt(cursor) === 10) return -1;
-    if (!source.startsWith(delimiter, cursor) || isEscaped(source, cursor)) continue;
-    if (delimiter === "$" && source[cursor + 1] === "$") continue;
-    return cursor;
-  }
-  return -1;
+/** Normalize model-emitted TeX delimiters, excluding fenced/indented/inline code. */
+export function normalizeMathDelimiters(source: string): string {
+  let fence = "";
+  let inline = "";
+  return source.split(/(?<=\n)/).map(line => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && /^ {0,3}(`+|~+)\s*$/.test(line)) fence = "";
+      return line;
+    }
+    if (marker) { fence = marker[1]; return line; }
+    if (/^(?: {4}|\t)/.test(line)) return line;
+    let out = "";
+    for (let i = 0; i < line.length;) {
+      if (line[i] === "`") {
+        const run = line.slice(i).match(/^`+/)![0];
+        if (!inline) inline = run; else if (inline === run) inline = "";
+        out += run; i += run.length; continue;
+      }
+      if (!inline && line[i] === "\\") {
+        const next = line[i + 1];
+        if (next === "\\") { out += "\\\\"; i += 2; continue; }
+        if (next === "(" || next === ")") { out += "$"; i += 2; continue; }
+        if (next === "[" || next === "]") { out += "\n$$\n"; i += 2; continue; }
+      }
+      out += line[i++];
+    }
+    return out;
+  }).join("");
 }
 
-function boundedMathText(source: string, state: MathBudgetState) {
-  let result = "";
-  let copiedUntil = 0;
-  let cursor = 0;
-  while (cursor < source.length) {
-    let opener = "";
-    let closer = "";
-    let allowNewline = false;
-    if (source.startsWith("$$", cursor) && !isEscaped(source, cursor)) {
-      opener = closer = "$$";
-      allowNewline = true;
-    } else if (source.startsWith("\\[", cursor) && !isEscaped(source, cursor)) {
-      opener = "\\[";
-      closer = "\\]";
-      allowNewline = true;
-    } else if (source.startsWith("\\(", cursor) && !isEscaped(source, cursor)) {
-      opener = "\\(";
-      closer = "\\)";
-    } else if (source[cursor] === "$" && source[cursor + 1] !== "$" && !isEscaped(source, cursor)) {
-      opener = closer = "$";
-    }
-    if (!opener) {
-      cursor += 1;
-      continue;
-    }
-
-    const closingIndex = findMathClosingDelimiter(source, cursor + opener.length, closer, allowNewline);
-    if (closingIndex < 0) {
-      cursor += opener.length;
-      continue;
-    }
-    const expressionEnd = closingIndex + closer.length;
-    const expressionLength = expressionEnd - cursor;
-    state.count += 1;
-    const withinBudget = state.count <= MARKDOWN_MATH_BUDGET
-      && expressionLength <= MARKDOWN_MATH_EXPRESSION_CHAR_BUDGET
-      && state.characters + expressionLength <= MARKDOWN_MATH_CHAR_BUDGET;
-    if (withinBudget) {
-      state.characters += expressionLength;
-    } else {
-      result += source.slice(copiedUntil, cursor);
-      result += "`[公式超出安全渲染预算，已折叠]`";
-      copiedUntil = expressionEnd;
-    }
-    cursor = expressionEnd;
-  }
-  return result ? result + source.slice(copiedUntil) : source;
-}
-
-function fencedLineParts(source: string) {
-  return source.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) || [];
-}
-
-function rewriteBoundedMarkdown(source: string) {
-  const lines = fencedLineParts(source);
-  const output: string[] = [];
-  const normalLines: string[] = [];
-  const mathState: MathBudgetState = { count: 0, characters: 0 };
-  let fenceCount = 0;
-  let mermaidCount = 0;
-
-  const flushNormalLines = () => {
-    if (!normalLines.length) return;
-    output.push(boundedMathText(normalLines.join(""), mathState));
-    normalLines.length = 0;
-  };
-
-  for (let index = 0; index < lines.length;) {
-    const lineWithoutEnding = lines[index].replace(/\r?\n$/, "");
-    const opener = lineWithoutEnding.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
-    if (!opener || (opener[1][0] === "`" && opener[2].includes("`"))) {
-      normalLines.push(lines[index]);
-      index += 1;
-      continue;
-    }
-
-    flushNormalLines();
-    fenceCount += 1;
-    const fenceCharacter = opener[1][0];
-    const minimumFenceLength = opener[1].length;
-    const language = opener[2].trim().split(/\s+/, 1)[0].toLocaleLowerCase();
-    let closingIndex = index + 1;
-    for (; closingIndex < lines.length; closingIndex += 1) {
-      const candidate = lines[closingIndex].replace(/\r?\n$/, "");
-      const closingFence = candidate.match(/^[ \t]{0,3}(`+|~+)[ \t]*$/)?.[1];
-      if (closingFence?.[0] === fenceCharacter && closingFence.length >= minimumFenceLength) break;
-    }
-    const hasClosingFence = closingIndex < lines.length;
-    const blockEnd = hasClosingFence ? closingIndex + 1 : lines.length;
-    const block = lines.slice(index, blockEnd).join("");
-    const content = lines.slice(index + 1, hasClosingFence ? closingIndex : lines.length).join("");
-    if (content.length > MARKDOWN_CODE_BLOCK_CHAR_BUDGET) {
-      output.push(`\n\`\`\`text\n[代码块超过 ${Math.round(MARKDOWN_CODE_BLOCK_CHAR_BUDGET / 1000)}K 字符，已在安全预览中省略]\n\`\`\`\n`);
-    } else if (language === "mermaid" && (++mermaidCount > MARKDOWN_MERMAID_BUDGET || content.length > MARKDOWN_MERMAID_CHAR_BUDGET)) {
-      output.push("\n```text\n[Mermaid 图表超出安全渲染预算，已显示为占位信息]\n```\n");
-    } else {
-      output.push(block);
-    }
-    index = blockEnd;
-  }
-  flushNormalLines();
-  return { text: output.join(""), fenceCount };
-}
+const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(remarkStringify);
 
 export function markdownRenderPlan(source: string): MarkdownRenderPlan {
-  if (source.length > MARKDOWN_RICH_CHAR_BUDGET) return plainTextPlan(source);
-
-  const lineCount = countLinesUntilBudget(source);
-  if (lineCount > MARKDOWN_LINE_BUDGET) return plainTextPlan(source);
-
-  const tableLikeLines = source.split("\n").filter((line) => line.includes("|")).length;
-  if (tableLikeLines > 500) return plainTextPlan(source);
-
-  const { text, fenceCount } = rewriteBoundedMarkdown(source);
-
-  return {
-    mode: "rich",
-    text,
-    truncated: false,
-    highlight: source.length <= 80_000 && fenceCount <= MARKDOWN_CODE_BLOCK_BUDGET,
-    math: true
-  };
+  const text = normalizeMathDelimiters(source);
+  const result: MarkdownRenderPlan = { mode: "rich", text, truncated: false, highlight: text.length <= MARKDOWN_PAGE_CHARS, math: true };
+  if (text.length < MARKDOWN_PAGE_CHARS && text.split("\n").length < 300 && (text.match(/\$/g)?.length || 0) < 120) return result;
+  const tree = processor.parse(text);
+  const definitions = tree.children.filter(n => n.type === "definition" || n.type === "footnoteDefinition");
+  const context = definitions.length ? "\n\n" + processor.stringify({ type: "root", children: definitions }) : "";
+  const pieces: string[] = [];
+  for (const node of tree.children) {
+    if (node.type === "definition" || node.type === "footnoteDefinition") continue;
+    if (node.type === "table" && node.children.length > 100) {
+      for (let i = 1; i < node.children.length; i += 100) {
+        pieces.push(processor.stringify({ type: "root", children: [{ ...node, children: [node.children[0], ...node.children.slice(i, i + 100)] }] }));
+      }
+    } else if (node.type === "list" && node.children.length > 100) {
+      for (let i = 0; i < node.children.length; i += 100) {
+        pieces.push(processor.stringify({ type: "root", children: [{ ...node, start: node.ordered ? (node.start || 1) + i : node.start, children: node.children.slice(i, i + 100) }] }));
+      }
+    } else if (node.type === "paragraph" && (node.position!.end.offset! - node.position!.start.offset!) > MARKDOWN_PAGE_CHARS) {
+      let part = "";
+      for (const child of node.children) {
+        const value = text.slice(child.position!.start.offset, child.position!.end.offset);
+        if (child.type === "text") {
+          for (let i = 0; i < value.length;) {
+            let end = Math.min(value.length, i + MARKDOWN_PAGE_CHARS);
+            if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1])) end--;
+            part += value.slice(i, end); i = end;
+            if (part.length >= MARKDOWN_PAGE_CHARS) { pieces.push(part); part = ""; }
+          }
+        } else {
+          // Inline formula/link/code is atomic, even above the soft page budget.
+          if (part.length + value.length > MARKDOWN_PAGE_CHARS && part) { pieces.push(part); part = ""; }
+          part += value;
+        }
+      }
+      if (part) pieces.push(part);
+    } else {
+      pieces.push(text.slice(node.position!.start.offset, node.position!.end.offset));
+    }
+  }
+  const pages: string[] = [];
+  let page = "";
+  for (const piece of pieces) {
+    if (page && (page.length + piece.length > MARKDOWN_PAGE_CHARS || page.split("\n").length > 250 || (page.match(/\$/g)?.length || 0) >= 100)) {
+      pages.push(page + context); page = "";
+    }
+    page += (page ? "\n\n" : "") + piece;
+  }
+  if (page || !pages.length) pages.push(page + context);
+  if (pages.length > 1) {
+    result.pages = pages;
+    const ids = new Set<string>();
+    result.pageHeadings = pages.map(page => {
+      const tree = processor.parse(page);
+      addWorkbenchMarkdownMetadata(tree, ids);
+      const headings: { id: string; title: string }[] = [];
+      const textOf = (node: MarkdownAstNode): string => node.value || node.children?.map(textOf).join("") || "";
+      const visit = (node: MarkdownAstNode) => {
+        if (node.type === "heading") headings.push({ id: String(node.data?.hProperties?.id), title: textOf(node) });
+        node.children?.forEach(visit);
+      };
+      visit(tree);
+      return headings;
+    });
+  }
+  return result;
 }

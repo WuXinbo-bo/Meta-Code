@@ -58,50 +58,62 @@ assert.deepEqual(markdownRenderPlan("# Hello"), {
 });
 
 assert.equal(markdownRenderPlan("x".repeat(MARKDOWN_RICH_CHAR_BUDGET)).mode, "rich");
-assert.equal(markdownRenderPlan("x".repeat(MARKDOWN_RICH_CHAR_BUDGET + 1)).mode, "plain");
+assert.equal(markdownRenderPlan("x".repeat(MARKDOWN_RICH_CHAR_BUDGET + 1)).mode, "rich");
 
 const maximumRichLines = Array.from({ length: MARKDOWN_LINE_BUDGET }, () => "line").join("\n");
 assert.equal(markdownRenderPlan(maximumRichLines).mode, "rich");
-assert.equal(markdownRenderPlan(`${maximumRichLines}\nline`).mode, "plain");
+assert.equal(markdownRenderPlan(`${maximumRichLines}\nline`).mode, "rich");
 
 const fiveHundredTableLines = Array.from({ length: 500 }, () => "a|b").join("\n");
 assert.equal(markdownRenderPlan(fiveHundredTableLines).mode, "rich");
-assert.equal(markdownRenderPlan(`${fiveHundredTableLines}\na|b`).mode, "plain");
+assert.equal(markdownRenderPlan(`${fiveHundredTableLines}\na|b`).mode, "rich");
 
 const oversizedPlain = markdownRenderPlan("x".repeat(MARKDOWN_PLAIN_CHAR_BUDGET + 1));
-assert.equal(oversizedPlain.mode, "plain");
-assert.equal(oversizedPlain.text.length, MARKDOWN_PLAIN_CHAR_BUDGET);
-assert.equal(oversizedPlain.truncated, true);
+assert.equal(oversizedPlain.mode, "rich");
+assert.equal(oversizedPlain.text.length, MARKDOWN_PLAIN_CHAR_BUDGET + 1);
+assert.equal(oversizedPlain.truncated, false);
+assert.equal(oversizedPlain.pages.join("").length, MARKDOWN_PLAIN_CHAR_BUDGET + 1);
 
 const oversizedCode = `\`\`\`ts\n${"x".repeat(MARKDOWN_CODE_BLOCK_CHAR_BUDGET + 1)}\n\`\`\``;
 const codePlan = markdownRenderPlan(oversizedCode);
 assert.equal(codePlan.mode, "rich");
-assert.match(codePlan.text, /代码块超过 50K 字符/);
-assert.doesNotMatch(codePlan.text, /x{100}/);
+assert.equal(codePlan.text, oversizedCode);
 
 const mermaidBlock = (content = "graph TD; A-->B") => `\`\`\`mermaid\n${content}\n\`\`\``;
 const allowedMermaid = Array.from({ length: MARKDOWN_MERMAID_BUDGET }, () => mermaidBlock()).join("\n");
 assert.doesNotMatch(markdownRenderPlan(allowedMermaid).text, /Mermaid 图表超出/);
-assert.match(markdownRenderPlan(`${allowedMermaid}\n${mermaidBlock()}`).text, /Mermaid 图表超出/);
-assert.match(markdownRenderPlan(mermaidBlock("x".repeat(MARKDOWN_MERMAID_CHAR_BUDGET + 1))).text, /Mermaid 图表超出/);
+assert.equal(markdownRenderPlan(`${allowedMermaid}\n${mermaidBlock()}`).text, `${allowedMermaid}\n${mermaidBlock()}`);
+assert.match(markdownRenderPlan(mermaidBlock("x".repeat(MARKDOWN_MERMAID_CHAR_BUDGET + 1))).text, /x{12001}/);
 
 const maximumHighlightedBlocks = Array.from({ length: 16 }, () => "```ts\nconst x = 1;\n```").join("\n");
 assert.equal(markdownRenderPlan(maximumHighlightedBlocks).highlight, true);
-assert.equal(markdownRenderPlan(`${maximumHighlightedBlocks}\n\`\`\`ts\nconst y = 2;\n\`\`\``).highlight, false);
+assert.equal(markdownRenderPlan(`${maximumHighlightedBlocks}\n\`\`\`ts\nconst y = 2;\n\`\`\``).highlight, true);
 
 assert.equal(markdownRenderPlan("\\(x\\)".repeat(MARKDOWN_MATH_BUDGET)).math, true);
 const boundedMath = markdownRenderPlan("\\(x\\)".repeat(MARKDOWN_MATH_BUDGET + 1));
 assert.equal(boundedMath.math, true);
-assert.equal(boundedMath.text.match(/公式超出安全渲染预算/g)?.length, 1);
-assert.match(boundedMath.text, /^\\\(x\\\)/);
+assert.equal(boundedMath.text, "$x$".repeat(MARKDOWN_MATH_BUDGET + 1));
 
 const oversizedMath = markdownRenderPlan(`$$${"x".repeat(MARKDOWN_MATH_EXPRESSION_CHAR_BUDGET + 1)}$$`);
 assert.equal(oversizedMath.math, true);
-assert.match(oversizedMath.text, /公式超出安全渲染预算/);
+assert.match(oversizedMath.text, /x{8001}/);
 
 const mathInsideCode = markdownRenderPlan(`~~~text\n${"\\(x\\)".repeat(MARKDOWN_MATH_BUDGET + 1)}\n~~~\n\\(visible\\)`);
 assert.doesNotMatch(mathInsideCode.text, /公式超出安全渲染预算/);
-assert.match(mathInsideCode.text, /\\\(visible\\\)/);
+assert.match(mathInsideCode.text, /\$visible\$/);
+assert.match(mathInsideCode.text, /\\\(x\\\)/);
+assert.equal(markdownRenderPlan("`\\(code\\)` and \\(x^2\\)").text, "`\\(code\\)` and $x^2$");
+assert.match(markdownRenderPlan("\\[x^2\\]").text, /\$\$\nx\^2\n\$\$/);
+const formulaDocument = Array.from({ length: 500 }, (_, i) => `## Formula ${i}\n\n$y_{${i}}=x^2$\n`).join("\n");
+const formulaPages = markdownRenderPlan(formulaDocument).pages;
+assert.ok(formulaPages.length > 1);
+for (let i = 0; i < 500; i++) assert.equal(formulaPages.filter(p => p.includes(`$y_{${i}}=x^2$`)).length, 1);
+const referenced = markdownRenderPlan(("Paragraph [link][ref].\n\n").repeat(1000) + "\n[ref]: https://example.com\n");
+assert.ok(referenced.pages.every(page => page.includes("[ref]: https://example.com")));
+const headings = markdownRenderPlan(Array.from({ length: 100 }, () => '# Same\n\n' + 'paragraph '.repeat(100)).join('\n\n'));
+const ids = headings.pageHeadings.flat().map(h => h.id);
+assert.equal(ids.length, 100);
+assert.equal(new Set(ids).size, 100, 'heading IDs remain unique across pages');
 
 assert.equal(githubHeadingSlug("Hello, Workbench!"), "hello-workbench");
 assert.equal(githubHeadingSlug("中文 标题"), "中文-标题");
@@ -129,14 +141,14 @@ assert.equal(WORKBENCH_MARKDOWN_SANITIZE_SCHEMA.attributes.blockquote.includes("
 
 const worker = new FakeWorker();
 const client = new MarkdownWorkerClient({ workerFactory: () => worker });
-assert.equal((await client.plan("x".repeat(MARKDOWN_RICH_CHAR_BUDGET + 1))).mode, "plain");
-assert.equal(worker.messages.length, 0);
+assert.equal((await client.plan("x".repeat(MARKDOWN_RICH_CHAR_BUDGET + 1))).mode, "rich");
+assert.equal(worker.messages.length, 1);
 const [deduplicatedA, deduplicatedB] = await Promise.all([
   client.plan("same source"),
   client.plan("same source")
 ]);
 assert.deepEqual(deduplicatedA, deduplicatedB);
-assert.equal(worker.messages.filter((message) => message.type === "plan").length, 1);
+assert.equal(worker.messages.filter((message) => message.type === "plan").length, 2);
 
 const oneSubscriberCancelled = new AbortController();
 const cancelledSubscriber = client.plan("shared cancellation", { signal: oneSubscriberCancelled.signal });

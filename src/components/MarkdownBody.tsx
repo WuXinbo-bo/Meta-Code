@@ -2,15 +2,14 @@ import { isValidElement, memo, useEffect, useId, useMemo, useRef, useState, type
 import { CircleAlert, Check, Copy, Info, Lightbulb, LoaderCircle, ShieldAlert, TriangleAlert, type LucideIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
+import { MathFormula, PagedSource } from "./MathFormula";
+import { DeferredContent } from "./DeferredContent";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 import {
   MARKDOWN_MERMAID_CHAR_BUDGET,
-  MARKDOWN_PLAIN_CHAR_BUDGET,
-  MARKDOWN_RICH_CHAR_BUDGET,
   markdownRenderPlan,
   type MarkdownRenderPlan
 } from "../markdown/markdownPlan";
@@ -25,6 +24,10 @@ export type MarkdownBodyProps = {
   workspaceRoot?: string;
   onOpenLocalFile?: (path: string) => void;
   additionalRehypePlugins?: ComponentProps<typeof ReactMarkdown>["rehypePlugins"];
+  /** Internal preplanned block; prevents reparsing the document plan per viewport mount. */
+  preparedPlan?: MarkdownRenderPlan;
+  headingIds?: string[];
+  onHeading?: (id: string) => boolean;
 };
 
 function nodeText(node: React.ReactNode): string {
@@ -53,7 +56,7 @@ function CodeBlock({ children }: { children: React.ReactNode }) {
       >
         {copied ? <Check size={14} /> : <Copy size={14} />}
       </button>
-      <pre>{children}</pre>
+      {text.length > 12_000 ? <PagedSource text={text} /> : <pre>{children}</pre>}
     </div>
   );
 }
@@ -98,7 +101,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [chart, id]);
-  if (error) return <pre className="mermaid-error">{error}\n{chart.slice(0, MARKDOWN_MERMAID_CHAR_BUDGET)}</pre>;
+  if (error) return <div className="mermaid-error"><p>{error}，完整源码仍可阅读和复制。</p><PagedSource text={chart} /></div>;
   return <div className="mermaid-diagram" ref={containerRef} />;
 }
 
@@ -186,7 +189,7 @@ function isLocalMarkdownLink(href: string) {
 const MARKDOWN_SYNC_PLAN_BUDGET = 12_000;
 
 function immediateMarkdownPlan(source: string): MarkdownRenderPlan | null {
-  if (source.length <= MARKDOWN_SYNC_PLAN_BUDGET || source.length > MARKDOWN_RICH_CHAR_BUDGET) {
+  if (source.length <= MARKDOWN_SYNC_PLAN_BUDGET) {
     return markdownRenderPlan(source);
   }
   return null;
@@ -198,11 +201,29 @@ export const MarkdownBody = memo(function MarkdownBody({
   workspaceId,
   workspaceRoot,
   onOpenLocalFile,
-  additionalRehypePlugins
+  additionalRehypePlugins,
+  preparedPlan,
+  headingIds,
+  onHeading
 }: MarkdownBodyProps) {
-  const immediatePlan = useMemo(() => immediateMarkdownPlan(text), [text]);
+  const immediatePlan = useMemo(() => preparedPlan || immediateMarkdownPlan(text), [text, preparedPlan]);
   const [planned, setPlanned] = useState<{ source: string; plan: MarkdownRenderPlan | null }>(() => ({ source: text, plan: immediatePlan }));
-  const plan = planned.source === text ? planned.plan : immediatePlan;
+  const plan = planned.source === text ? planned.plan : immediatePlan || planned.plan;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const blockId = useId();
+  const [headingTarget, setHeadingTarget] = useState("");
+  useEffect(() => {
+    if (!headingTarget) return;
+    let frames = 0;
+    let frame = 0;
+    const seek = () => {
+      const target = [...(bodyRef.current?.querySelectorAll<HTMLElement>("[id]") || [])].find(node => node.id === headingTarget || node.id === `user-content-${headingTarget}`);
+      if (target) target.scrollIntoView({ block: "start" });
+      else if (++frames < 60) frame = requestAnimationFrame(seek);
+    };
+    frame = requestAnimationFrame(seek);
+    return () => cancelAnimationFrame(frame);
+  }, [headingTarget]);
 
   useEffect(() => {
     if (immediatePlan) {
@@ -210,20 +231,13 @@ export const MarkdownBody = memo(function MarkdownBody({
       return;
     }
     const controller = new AbortController();
-    setPlanned((current) => current.source === text ? current : { source: text, plan: null });
     void planMarkdownRender(text, { signal: controller.signal }).then((next) => {
       if (!controller.signal.aborted) setPlanned({ source: text, plan: next });
     }).catch((error) => {
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
       setPlanned({
         source: text,
-        plan: {
-          mode: "plain",
-          text: text.slice(0, MARKDOWN_PLAIN_CHAR_BUDGET),
-          truncated: text.length > MARKDOWN_PLAIN_CHAR_BUDGET,
-          highlight: false,
-          math: false
-        }
+        plan: { mode: "plain", text, truncated: false, highlight: false, math: false }
       });
     });
     return () => controller.abort();
@@ -231,23 +245,39 @@ export const MarkdownBody = memo(function MarkdownBody({
 
   if (!plan) return <div className="markdown-planning"><LoaderCircle className="spin" size={15} /><span>正在准备内容预览</span></div>;
   if (plan.mode === "plain") return <div className="markdown-safe-fallback">
-    <p>内容规模超出富文本安全预算，已切换为纯文本预览。</p>
-    <pre>{plan.text}</pre>
-    {plan.truncated && <small>当前视图仅显示前 {MARKDOWN_PLAIN_CHAR_BUDGET.toLocaleString()} 个字符。</small>}
+    <p>内容排版暂时不可用，可分段阅读完整源码。</p>
+    <PagedSource text={plan.text} />
+  </div>;
+  const navigateHeading = (id: string) => {
+    const target = plan.pageHeadings?.findIndex(items => items.some(item => item.id === id)) ?? -1;
+    if (target < 0) return onHeading?.(id) || false;
+    document.getElementById(`${blockId}-${target}`)?.scrollIntoView({ block: "start" });
+    setHeadingTarget("");
+    requestAnimationFrame(() => setHeadingTarget(id));
+    return true;
+  };
+  if (plan.pages) return <div className="markdown-continuous" ref={bodyRef}>
+    {markdownPath && plan.pageHeadings?.some(items => items.length > 0) && <select className="markdown-outline" aria-label="当前内容目录" value="" onChange={event => navigateHeading(event.target.value)}><option value="" disabled>跳转到章节…</option>{plan.pageHeadings.flat().map(heading => <option key={heading.id} value={heading.id}>{heading.title}</option>)}</select>}
+    {plan.pages.map((chunk, index) => <DeferredContent key={index} anchor={`${blockId}-${index}`} initial={index === 0} estimate={Math.max(160, Math.min(6000, chunk.length / 60 * 24))}>
+      <MarkdownBody text={chunk} markdownPath={markdownPath} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} additionalRehypePlugins={additionalRehypePlugins}
+        preparedPlan={{ mode: "rich", text: chunk, math: true, highlight: chunk.length <= 16_000, truncated: false }} headingIds={plan.pageHeadings?.[index]?.map(item => item.id)} onHeading={navigateHeading} />
+    </DeferredContent>)}
   </div>;
   return (
-    <div className="markdown-body">
+    <div className="markdown-body" ref={bodyRef}>
       <ReactMarkdown
         remarkPlugins={plan.math
-          ? [remarkGfm, remarkMath, ...(markdownPath ? [remarkWorkbench] : []), remarkBreaks]
+          ? [remarkGfm, remarkMath, ...(markdownPath ? [[remarkWorkbench, { headingIds }] as [typeof remarkWorkbench, { headingIds?: string[] }]] : []), remarkBreaks]
           : [remarkGfm, ...(markdownPath ? [remarkWorkbench] : []), remarkBreaks]}
         rehypePlugins={[
           ...(additionalRehypePlugins || []),
-          ...(plan.math ? [rehypeKatex] : []),
           ...(plan.highlight ? [rehypeHighlight] : [])
         ]}
         urlTransform={markdownUrlTransform}
         components={{
+          code: ({ node: _node, className, children, ...props }) => className?.split(" ").includes("language-math")
+            ? <MathFormula source={nodeText(children).replace(/\n$/, "")} />
+            : <code {...props} className={className}>{children}</code>,
           h1: ({ node: _node, ...props }) => <MarkdownHeading level={1} {...props} />,
           h2: ({ node: _node, ...props }) => <MarkdownHeading level={2} {...props} />,
           h3: ({ node: _node, ...props }) => <MarkdownHeading level={3} {...props} />,
@@ -256,6 +286,7 @@ export const MarkdownBody = memo(function MarkdownBody({
           h6: ({ node: _node, ...props }) => <MarkdownHeading level={6} {...props} />,
           pre: ({ children }) => {
             const child = isValidElement<{ className?: string; children?: React.ReactNode }>(children) ? children : null;
+            if (child?.props.className?.split(" ").includes("language-math")) return <MathFormula source={nodeText(child.props.children).replace(/\n$/, "")} display />;
             if (child?.props.className?.split(" ").includes("language-mermaid")) {
               return <MermaidDiagram chart={nodeText(child.props.children).replace(/\n$/, "")} />;
             }
@@ -272,6 +303,10 @@ export const MarkdownBody = memo(function MarkdownBody({
             : <input {...props} type={type} />,
           a: ({ children, href, ...props }) => {
             if (!href) return <span>{children}</span>;
+            if (href.startsWith("#") && onHeading) {
+              let id = href.slice(1); try { id = decodeURIComponent(id); } catch { /* retain literal fragment */ }
+              return <a {...props} href={href} onClick={event => { if (onHeading(id)) event.preventDefault(); }}>{children}</a>;
+            }
             const localPath = workspaceRelativePath(href, workspaceRoot, markdownPath);
             if (localPath && onOpenLocalFile) {
               return <a {...props} href="#" onClick={(event) => {
@@ -298,6 +333,10 @@ export const MarkdownBody = memo(function MarkdownBody({
   previous.markdownPath === next.markdownPath &&
   previous.workspaceId === next.workspaceId &&
   previous.workspaceRoot === next.workspaceRoot &&
+  previous.preparedPlan?.text === next.preparedPlan?.text &&
+  previous.headingIds?.join("\n") === next.headingIds?.join("\n") &&
+  previous.onHeading === next.onHeading &&
+  previous.onOpenLocalFile === next.onOpenLocalFile &&
   previous.additionalRehypePlugins === next.additionalRehypePlugins
 );
 

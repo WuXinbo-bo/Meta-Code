@@ -1917,7 +1917,7 @@ function EventMessage({
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
       {open && (message.eventType === "reasoning"
-        ? <div className="reasoning-content">{reasoningText.length > 60_000 ? <pre>{reasoningText.slice(0, 80_000)}</pre> : <MarkdownBody text={reasoningText} />}</div>
+        ? <div className="reasoning-content"><MarkdownBody text={reasoningText} /></div>
         : <div className="event-detail-panel">
             <p>{productEventText(message.text) || "该运行事件已记录"}</p>
             <details><summary>技术详情</summary><pre>{JSON.stringify(message.payload ?? { text: message.text, type: message.eventType }, null, 2)}</pre></details>
