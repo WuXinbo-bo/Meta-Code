@@ -4,6 +4,26 @@ All notable changes to Meta Code are documented here. The project follows [Seman
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-17
+
+### Changed
+
+- Main conversations and sub-Agent drawers share message, reasoning, and activity layouts.
+- Long Markdown and file previews use continuous scrolling with viewport buffering, without visible pagination controls.
+- Mathematical formulas render in an isolated worker with bounded caching and per-formula failure isolation.
+
+### Fixed
+
+- Newly created conversations remain selected while navigation data catches up.
+- Delegated Agent logs update during execution rather than only after pause or completion.
+- Supported math delimiters render consistently across replies, reasoning, drawers, and file previews without arbitrary formula-count truncation.
+- Large file previews load complete content incrementally, reload evicted blocks on scrollback, and reject reads from changed file versions.
+- Narrative messages retain their full source during ingestion, import, persistence, and history loading; previously truncated stored text cannot be reconstructed.
+
+### Validation
+
+- Added repeatable browser regressions for Agent drawers and continuous Markdown scrolling, alongside math-worker and file-preview safeguards.
+
 ## [0.1.4] - 2026-09-05
 
 ### Added

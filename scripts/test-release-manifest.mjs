@@ -15,7 +15,9 @@ const signingKeys = crypto.generateKeyPairSync("ed25519");
 const signingKeyId = "release-test-key";
 config.manifestSigning.trustedKeys[signingKeyId] = signingKeys.publicKey.export({ type: "spki", format: "der" }).toString("base64");
 assert.equal(config.productName, "Meta Code");
-assert.equal(config.currentVersion, "0.1.5", "发布版本必须保持为 0.1.5");
+const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+assert.equal(config.currentVersion, packageJson.version, "发布版本必须与 package.json 一致");
+const version = packageJson.version;
 assert.equal(config.dataSchemaVersion, CURRENT_STATE_SCHEMA_VERSION, "发布清单的数据 Schema 必须与状态存储一致");
 
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "meta-code-release-"));
@@ -27,18 +29,18 @@ try {
     config,
     channel: "stable",
     publishedAt: "2026-08-31T00:00:00.000Z",
-    releaseNotes: "Meta Code 0.1.5",
-    releaseUrl: "https://example.com/releases/0.1.5",
-    buildId: "test-build-0.1.5",
+    releaseNotes: `Meta Code ${version}`,
+    releaseUrl: `https://example.com/releases/${version}`,
+    buildId: `test-build-${version}`,
     signingKeyId,
     signingPrivateKey: signingKeys.privateKey.export({ type: "pkcs8", format: "pem" }),
-    assets: [{ file: asset, url: "https://example.com/meta-code-0.1.5.zip", platform: "win32", arch: "x64" }]
+    assets: [{ file: asset, url: `https://example.com/meta-code-${version}.zip`, platform: "win32", arch: "x64" }]
   });
-  assert.equal(manifest.version, "0.1.5");
-  assert.equal(manifest.buildId, "test-build-0.1.5");
+  assert.equal(manifest.version, version);
+  assert.equal(manifest.buildId, `test-build-${version}`);
   assert.equal(manifest.assets[0].size, content.byteLength);
   assert.equal(manifest.assets[0].sha256, crypto.createHash("sha256").update(content).digest("hex"));
-  const output = path.join(temporary, "release-artifacts", "meta-code-0.1.5", "stable", "latest.json");
+  const output = path.join(temporary, "release-artifacts", `meta-code-${version}`, "stable", "latest.json");
   await writeReleaseManifest(output, manifest);
   const persisted = parseAppUpdateManifest(JSON.parse(await fs.readFile(output, "utf8")), config);
   assert.deepEqual(persisted, manifest);

@@ -13,7 +13,10 @@ const desktopPreload = await fs.readFile(path.join(root, "desktop", "preload.cjs
 const backendRecovery = await fs.readFile(path.join(root, "desktop", "backend-recovery.cjs"), "utf8");
 const releaseWorkflow = await fs.readFile(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 
-assert.equal(packageJson.version, "0.1.5");
+assert.match(packageJson.version, /^\d+\.\d+\.\d+$/);
+const packageLock = JSON.parse(await fs.readFile(path.join(root, "package-lock.json"), "utf8"));
+assert.equal(packageLock.version, packageJson.version);
+assert.equal(packageLock.packages[""].version, packageJson.version);
 assert.match(buildScript, /Meta-Code-Packages/);
 assert.match(buildScript, /assertPackagingPath/);
 assert.match(buildScript, /installerSidebar\.bmp/);
