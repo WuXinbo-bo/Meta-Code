@@ -1,10 +1,10 @@
 import type { HTMLAttributes, ReactNode } from "react";
-import { MarkdownBody } from "./MarkdownBody";
+import { LazyMarkdownBody } from "./LazyMarkdownBody";
 
 export function AgentReplyContent({ text, renderMessage }: { text: unknown; renderMessage?: (text: string) => ReactNode }) {
   const messageText = typeof text === "string" && text ? text : "已更新任务进度";
   if (renderMessage) return <>{renderMessage(messageText)}</>;
-  return <div className="agent-markdown-message"><MarkdownBody text={messageText} /></div>;
+  return <div className="agent-markdown-message"><LazyMarkdownBody text={messageText} /></div>;
 }
 
 /** Main replies and Agent transcripts share the same row, typography and action slots. */

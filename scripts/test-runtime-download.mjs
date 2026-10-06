@@ -31,7 +31,10 @@ const server = http.createServer((req, res) => {
   if (firstRequest) {
     firstRequest = false;
     res.write(payload.subarray(0, 1024 * 1024));
-    setImmediate(() => res.destroy());
+    // Give the client a scheduling turn to receive the written prefix before
+    // simulating a dropped connection. This is stable across Node/undici
+    // versions while still exercising ranged resume behavior.
+    setTimeout(() => res.destroy(), 10);
     return;
   }
   res.end(payload.subarray(offset));
@@ -99,7 +102,10 @@ const registryAddress = registryServer.address();
 assert.ok(registryAddress && typeof registryAddress === "object");
 const registries = [`http://127.0.0.1:${registryAddress.port}/fast`, `http://127.0.0.1:${registryAddress.port}/complete`];
 const resolved = await resolveNpmArtifacts("@vendor/tool", "1.0.0", network, registries);
-assert.equal(resolved.selected, registries[1]);
+// Non-Windows platforms do not select the synthetic win32 optional package,
+// so the first registry is already complete there. Windows x64 must fall
+// through to the second registry after the platform artifact returns 404.
+assert.equal(resolved.selected, process.platform === "win32" && process.arch === "x64" ? registries[1] : registries[0]);
 assert.equal(resolved.artifacts.length, process.platform === "win32" && process.arch === "x64" ? 2 : 1);
 if (process.platform === "win32" && process.arch === "x64") {
   assert.equal(registryState.firstPlatform, 1);
