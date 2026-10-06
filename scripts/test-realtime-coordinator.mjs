@@ -50,6 +50,9 @@ try {
   assert.equal(sessionStorage.getItem("modelx.lastEventId"), "41");
   assert.ok(states.includes("connected"));
   assert.ok(reconciles.includes("connected"));
+  source.emit("session.changed", { sessionId: "task-1", revision: 7 }, "40");
+  source.emit("session.changed", { sessionId: "task-1", revision: 8 }, "41");
+  assert.equal(events.length, 1, "stale or duplicate SSE frames must not trigger another refresh");
 
   source.emit("stream.ready", { replayComplete: false });
   assert.ok(reconciles.includes("gap"), "an incomplete replay must force snapshot reconciliation");
@@ -57,6 +60,13 @@ try {
   source.onerror?.();
   assert.equal(realtimeCoordinator.connectionState(), "reconnecting");
   assert.ok(reconciles.includes("error"));
+  source.emit("stream.ready", { replayComplete: false, latestEventId: 10 });
+  assert.equal(sessionStorage.getItem("modelx.lastEventId"), "10", "a server replay gap resets a stale browser cursor");
+  source.emit("session.changed", { sessionId: "task-1", revision: 9 }, "11");
+  assert.equal(events.length, 2);
+  sessionStorage.setItem = () => { throw new Error("storage disabled"); };
+  source.emit("session.changed", { sessionId: "task-1", revision: 10 }, "12");
+  assert.equal(events.length, 3, "disabled browser storage must not break live updates");
 } finally {
   realtimeCoordinator.stop();
   unsubscribeStatus();

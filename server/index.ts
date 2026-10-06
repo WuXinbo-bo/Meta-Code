@@ -67,6 +67,7 @@ import { claudeMcpConfig, codexMcpConfig, type CodexConfigObject, type Workbench
 import { CodexLinkRepository } from "./codexLink/repository.js";
 import { createCodexLinkRouter } from "./codexLink/routes.js";
 import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTranscriptIndex.js";
+import { IncrementalJsonl } from "./incrementalJsonl.js";
 import { normalizeSessionScope } from "./sessionScope.js";
 import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
 import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
@@ -330,7 +331,51 @@ type AgentThread = {
   task?: string;
   logCount?: number;
   revision?: number;
+  /** Immutable identity contract used to keep Provider/source attribution stable. */
+  identity?: AgentThreadIdentity;
+  /** Explicit aliases allow native and bridge projections of the same invocation to merge. */
+  identityAliases?: string[];
 };
+
+type AgentThreadSourceKind = "native" | "bridge" | "acp";
+type AgentThreadIdentity = {
+  key: string;
+  agentId: string;
+  providerId: AgentProviderId;
+  sourceKind: AgentThreadSourceKind;
+  parentSessionId: string;
+  identityVersion: 1;
+};
+
+function normalizedAgentProvider(value: unknown, fallback: AgentProviderId = "unknown") {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider || fallback;
+}
+
+function agentIdentityKey(provider: AgentProviderId, id: string, toolUseId?: string) {
+  const normalized = normalizedAgentProvider(provider);
+  return toolUseId ? `${normalized}:tool:${toolUseId}` : `${normalized}:agent:${id}`;
+}
+
+function agentIdentityFor(agent: Pick<AgentThread, "id" | "provider" | "toolUseId" | "parentThreadId" | "identity" | "identityAliases">, parentSessionId: string, sourceKind: AgentThreadSourceKind): AgentThreadIdentity {
+  const providerId = normalizedAgentProvider(agent.provider || agent.identity?.providerId);
+  const providerPrefix = `${providerId}:`;
+  const key = [agent.identity?.key, ...(agent.identityAliases || [])]
+    .find((candidate) => typeof candidate === "string" && candidate.startsWith(providerPrefix))
+    || agentIdentityKey(providerId, agent.id, agent.toolUseId);
+  return {
+    key,
+    agentId: agent.id,
+    providerId,
+    sourceKind,
+    parentSessionId,
+    identityVersion: 1
+  };
+}
+
+function sourceKindForAgent(agent: AgentThread): AgentThreadSourceKind {
+  return agent.identity?.sourceKind || (agent.provider === "codex" || agent.provider === "claude" ? "native" : "acp");
+}
 
 const MAX_STORED_AGENT_LOGS = 120;
 const MAX_VISIBLE_AGENT_LOGS = 80;
@@ -2152,13 +2197,17 @@ const agentPublishTimers = new Map<string, NodeJS.Timeout>();
 const publishedAgentRevisions = new Map<string, number>();
 
 function emitAgentChanged(session: Session, agent: AgentThread) {
-  const key = `${session.id}:${agent.id}`;
+  const identityKey = agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+  const key = `${session.id}:${identityKey}`;
   const revision = Math.max(0, Number(agent.revision || 0));
   if ((publishedAgentRevisions.get(key) ?? -1) >= revision && agent.status === "running") return;
   publishedAgentRevisions.set(key, revision);
   eventHub.publish("agents.changed", {
     sessionId: session.id,
     agentId: agent.id,
+    identityKey,
+    identity: agent.identity,
+    providerId: agent.identity?.providerId || normalizedAgentProvider(agent.provider),
     revision,
     status: agent.status,
     logCount: agent.logCount ?? agent.logs.length
@@ -2166,7 +2215,8 @@ function emitAgentChanged(session: Session, agent: AgentThread) {
 }
 
 function publishAgentChanged(session: Session, agent: AgentThread, immediate = agent.status !== "running") {
-  const key = `${session.id}:${agent.id}`;
+  const identityKey = agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+  const key = `${session.id}:${identityKey}`;
   pendingAgentPublishes.set(key, { session, agent });
   if (immediate) {
     const timer = agentPublishTimers.get(key);
@@ -2805,6 +2855,8 @@ function codexAgentLogFromEvent(event: ThreadEvent, index: number, context?: { a
 
 function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor({ ...agent, provider: "codex" }, parentSession.id, "bridge");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "codex", nickname: agent.nickname,
@@ -2817,6 +2869,10 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
     type: "codex_subagent",
     action: "spawn_agent",
     provider: "codex",
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -3073,6 +3129,8 @@ function claudeAgentLogFromEvent(event: NormalizedEngineEvent, index: number, co
 
 function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor({ ...agent, provider: "claude" }, parentSession.id, "bridge");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "claude", mode: agent.mode,
@@ -3085,6 +3143,10 @@ function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAg
     type: "claude_subagent",
     action: "spawn_agent",
     provider: "claude",
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -3812,6 +3874,8 @@ function acpDelegatedAgentLog(providerId: AgentProviderId, event: NormalizedEngi
 
 function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor(agent, parentSession.id, "acp");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   const descriptor = agentAdapterRegistry.descriptor(agent.provider);
   upsertDelegatedTask({
@@ -3825,6 +3889,10 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
     type: "workbench_subagent",
     action: "spawn_agent",
     provider: agent.provider,
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -4873,43 +4941,55 @@ function withCanonicalAgentActivity(log: AgentLog, options: {
   } satisfies AgentLog;
 }
 
+type CodexTranscriptState = {
+  meta: Record<string, unknown>;
+  status: AgentThread["status"];
+  usage: Usage;
+  updatedAt: string;
+  logCount: number;
+  logs: Array<{ log: AgentLog; rawType: string }>;
+};
+
+const codexTranscriptReader = new IncrementalJsonl<CodexTranscriptState>(
+  () => ({ meta: {}, status: "interrupted", usage: emptyUsage(), updatedAt: "", logCount: 0, logs: [] }),
+  (state, record, index) => {
+    if (record.type === "session_meta") state.meta = recordOf(record.payload) || {};
+    if (typeof record.timestamp === "string" && record.timestamp > state.updatedAt) state.updatedAt = record.timestamp;
+    const payload = recordOf(record.payload);
+    const payloadType = String(payload?.type || "");
+    if (payloadType === "task_started") state.status = "running";
+    if (payloadType === "task_complete") state.status = "completed";
+    if (payloadType.includes("error") || payloadType.includes("failed")) state.status = "failed";
+    if (payloadType === "token_count") {
+      const total = recordOf(recordOf(payload?.info)?.total_token_usage);
+      if (total) state.usage = { input_tokens: Number(total.input_tokens || 0), cached_input_tokens: Number(total.cached_input_tokens || 0), output_tokens: Number(total.output_tokens || 0), reasoning_output_tokens: Number(total.reasoning_output_tokens || 0) };
+    }
+    const log = agentLogFromRecord(record, index);
+    if (!log) return;
+    state.logCount += 1;
+    trimAgentLogs([log]);
+    state.logs.push({ log, rawType: `${String(record.type || "unknown")}.${payloadType || "unknown"}` });
+    if (state.logs.length > MAX_STORED_AGENT_LOGS) state.logs.splice(0, state.logs.length - MAX_STORED_AGENT_LOGS);
+  }
+);
+
 async function codexAgentThreadFromTranscript(descriptor: AgentTranscriptDescriptor): Promise<AgentThread | null> {
   const cached = codexAgentThreadFileCache.get(descriptor.file);
   if (cached && cached.mtimeMs === descriptor.mtimeMs && cached.size === descriptor.size) return cached.agent;
-  let records: Record<string, unknown>[];
-  try {
-    records = (await fsp.readFile(descriptor.file, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
-  } catch { return cached?.agent || null; }
-  const meta = recordOf(records.find((record) => record.type === "session_meta")?.payload);
-  const spawn = recordOf(recordOf(recordOf(meta?.source)?.subagent)?.thread_spawn);
-  let status: AgentThread["status"] = "interrupted";
-  let usage = emptyUsage();
-  let updatedAt = typeof meta?.timestamp === "string" ? meta.timestamp : new Date(descriptor.mtimeMs).toISOString();
-  const logs: AgentLog[] = [];
-  records.forEach((record, index) => {
-    if (typeof record.timestamp === "string") updatedAt = record.timestamp;
-    const payload = recordOf(record.payload);
-    const payloadType = String(payload?.type || "");
-    if (payloadType === "task_started") status = "running";
-    if (payloadType === "task_complete") status = "completed";
-    if (payloadType.includes("error") || payloadType.includes("failed")) status = "failed";
-    if (payloadType === "token_count") {
-      const total = recordOf(recordOf(payload?.info)?.total_token_usage);
-      if (total) usage = { input_tokens: Number(total.input_tokens || 0), cached_input_tokens: Number(total.cached_input_tokens || 0), output_tokens: Number(total.output_tokens || 0), reasoning_output_tokens: Number(total.reasoning_output_tokens || 0) };
-    }
-    const log = agentLogFromRecord(record, index);
-    if (log) logs.push(withCanonicalAgentActivity(log, {
-      provider: "codex",
-      actorId: descriptor.threadId,
-      parentId: descriptor.parentThreadId,
-      rawType: `${String(record.type || "unknown")}.${payloadType || "unknown"}`,
-      scope: { threadId: descriptor.threadId }
-    }));
-  });
+  let transcript: CodexTranscriptState;
+  try { transcript = await codexTranscriptReader.read(descriptor.file); }
+  catch { return cached?.agent || null; }
+  const { meta, status, usage, logCount } = transcript;
+  const spawn = recordOf(recordOf(recordOf(meta.source)?.subagent)?.thread_spawn);
+  const logs = transcript.logs.map(({ log, rawType }) => withCanonicalAgentActivity(log, {
+    provider: "codex", actorId: descriptor.threadId, parentId: descriptor.parentThreadId,
+    rawType, scope: { threadId: descriptor.threadId }
+  }));
   const agent: AgentThread = {
     id: descriptor.threadId, parentThreadId: descriptor.parentThreadId,
-    nickname: String(meta?.agent_nickname || spawn?.agent_nickname || "子 Agent"), path: String(meta?.agent_path || spawn?.agent_path || ""),
-    status, updatedAt, revision: Math.max(0, Math.floor(descriptor.mtimeMs)), usage, logs: newestAgentLogs(logs), logCount: logs.length, provider: "codex"
+    nickname: String(meta.agent_nickname || spawn?.agent_nickname || "子 Agent"), path: String(meta.agent_path || spawn?.agent_path || ""),
+    status, updatedAt: transcript.updatedAt || new Date(descriptor.mtimeMs).toISOString(),
+    revision: Math.max(0, Math.floor(descriptor.mtimeMs)), usage, logs: newestAgentLogs(logs), logCount, provider: "codex"
   };
   codexAgentThreadFileCache.set(descriptor.file, { mtimeMs: descriptor.mtimeMs, size: descriptor.size, agent });
   return agent;
@@ -4969,6 +5049,54 @@ async function claudeSubagentRoots(parentSessionId: string) {
   }
 }
 
+type ClaudeTranscriptState = {
+  recordCount: number;
+  agentId: string;
+  toolUseId?: string;
+  task: string;
+  updatedAt: string;
+  completed: boolean;
+  failed: boolean;
+  usage: Usage;
+  logCount: number;
+  logs: Map<string, AgentLog>;
+};
+
+const claudeTranscriptReader = new IncrementalJsonl<ClaudeTranscriptState>(
+  () => ({ recordCount: 0, agentId: "", task: "", updatedAt: "", completed: false, failed: false, usage: emptyUsage(), logCount: 0, logs: new Map() }),
+  (state, record, recordIndex) => {
+    state.recordCount += 1;
+    if (!state.agentId && typeof record.agentId === "string") state.agentId = record.agentId;
+    if (!state.toolUseId) state.toolUseId = String(record.parentToolUseID || record.parentToolUseId || "") || undefined;
+    if (typeof record.timestamp === "string" && record.timestamp > state.updatedAt) state.updatedAt = record.timestamp;
+    const message = recordOf(record.message);
+    if (record.type === "assistant" && message?.stop_reason === "end_turn") state.completed = true;
+    if (/error|failed/i.test(String(record.type || "")) && record.isSidechain === true) state.failed = true;
+    if (!state.task && record.type === "user") state.task = typeof message?.content === "string" ? message.content : textContent(message?.content);
+    const source = recordOf(message?.usage);
+    if (source) state.usage = addUsage(state.usage, {
+      input_tokens: Number(source.input_tokens || 0),
+      cached_input_tokens: Number(source.cache_read_input_tokens || source.cached_input_tokens || 0),
+      output_tokens: Number(source.output_tokens || 0), reasoning_output_tokens: 0
+    });
+    for (const log of claudeNativeAgentLog(record, recordIndex)) {
+      const previous = state.logs.get(log.id);
+      const completedTool = previous?.kind === "tool" && ["result", "error"].includes(log.kind);
+      const merged = completedTool ? {
+        ...previous, ...log,
+        title: log.kind === "error" ? `${previous.title}失败` : `${previous.title}完成`,
+        category: log.kind === "error" ? "error" : previous.category,
+        detail: { ...(recordOf(previous.detail) || {}), ...(recordOf(log.detail) || {}) }
+      } satisfies AgentLog : log;
+      if (!previous) state.logCount += 1;
+      trimAgentLogs([merged]);
+      state.logs.delete(log.id);
+      state.logs.set(log.id, merged);
+      while (state.logs.size > MAX_STORED_AGENT_LOGS) state.logs.delete(state.logs.keys().next().value!);
+    }
+  }
+);
+
 async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRunning: boolean): Promise<AgentThread[]> {
   if (!parentSessionId) return [];
   const roots = await claudeSubagentRoots(parentSessionId);
@@ -4976,92 +5104,37 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
   const agents: AgentThread[] = [];
   for (const file of files) {
     let fileStat: fs.Stats;
-    try {
-      fileStat = await fsp.stat(file);
-    } catch {
-      continue;
-    }
+    try { fileStat = await fsp.stat(file); } catch { continue; }
     const cached = claudeAgentThreadFileCache.get(file);
     if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
       agents.push({
         ...cached.agent,
         status: cached.agent.status === "completed" || cached.agent.status === "failed"
-          ? cached.agent.status
-          : parentIsRunning ? "running" : "interrupted"
+          ? cached.agent.status : parentIsRunning ? "running" : "interrupted"
       });
       continue;
     }
-    let records: Record<string, unknown>[];
-    try {
-      records = (await fsp.readFile(file, "utf8")).split(/\r?\n/).flatMap((line) => {
-        if (!line.trim()) return [];
-        try { return [JSON.parse(line) as Record<string, unknown>]; }
-        catch { return []; }
-      });
-    } catch {
-      continue;
-    }
-    if (!records.length) continue;
+    let transcript: ClaudeTranscriptState;
+    try { transcript = await claudeTranscriptReader.read(file); } catch { continue; }
+    if (!transcript.recordCount) continue;
     let metadata: Record<string, unknown> = {};
     try { metadata = JSON.parse(await fsp.readFile(file.replace(/\.jsonl$/i, ".meta.json"), "utf8")) as Record<string, unknown>; } catch { /* Metadata is optional. */ }
-    const agentId = String(records.find((record) => typeof record.agentId === "string")?.agentId || path.basename(file, ".jsonl").replace(/^agent-/, ""));
-    const logsById = new Map<string, AgentLog>();
-    records.forEach((record, recordIndex) => {
-      for (const log of claudeNativeAgentLog(record, recordIndex)) {
-        const previous = logsById.get(log.id);
-        const completedTool = previous?.kind === "tool" && ["result", "error"].includes(log.kind);
-        const merged = completedTool ? {
-          ...previous,
-          ...log,
-          title: log.kind === "error" ? `${previous.title}失败` : `${previous.title}完成`,
-          category: log.kind === "error" ? "error" : previous.category,
-          detail: { ...(recordOf(previous.detail) || {}), ...(recordOf(log.detail) || {}) }
-        } satisfies AgentLog : log;
-        const message = recordOf(record.message);
-        logsById.set(log.id, withCanonicalAgentActivity(merged, {
-          provider: "claude",
-          actorId: agentId,
-          parentId: parentSessionId,
-          rawType: `${String(record.type || "unknown")}.${String(message?.role || record.type || "unknown")}`,
-          scope: { sessionId: parentSessionId, threadId: agentId }
-        }));
-      }
-    });
-    const logs = [...logsById.values()];
-    const updatedAt = records.map((record) => typeof record.timestamp === "string" ? record.timestamp : "").filter(Boolean).sort().at(-1) || fileStat.mtime.toISOString();
-    const terminal = [...records].reverse().find((record) => record.type === "assistant");
-    const terminalMessage = recordOf(terminal?.message);
-    const failed = records.some((record) => /error|failed/i.test(String(record.type || "")) && record.isSidechain === true);
-    const completed = terminalMessage?.stop_reason === "end_turn";
-    const status: AgentThread["status"] = failed ? "failed" : completed ? "completed" : parentIsRunning ? "running" : "interrupted";
+    const agentId = transcript.agentId || path.basename(file, ".jsonl").replace(/^agent-/, "");
+    const logs = [...transcript.logs.values()].map((log) => withCanonicalAgentActivity(log, {
+      provider: "claude", actorId: agentId, parentId: parentSessionId,
+      rawType: `transcript.${log.kind}`, scope: { sessionId: parentSessionId, threadId: agentId }
+    }));
+    const status: AgentThread["status"] = transcript.failed ? "failed" : transcript.completed ? "completed" : parentIsRunning ? "running" : "interrupted";
     if (status !== "running") settleSupersededReasoning(logs);
-    const taskRecord = records.find((record) => record.type === "user");
-    const taskMessage = recordOf(taskRecord?.message);
-    const task = typeof taskMessage?.content === "string" ? taskMessage.content : textContent(taskMessage?.content);
-    let usage = emptyUsage();
-    for (const record of records) {
-      const message = recordOf(record.message);
-      const source = recordOf(message?.usage);
-      if (!source) continue;
-      usage = addUsage(usage, {
-        input_tokens: Number(source.input_tokens || 0),
-        cached_input_tokens: Number(source.cache_read_input_tokens || source.cached_input_tokens || 0),
-        output_tokens: Number(source.output_tokens || 0),
-        reasoning_output_tokens: 0
-      });
-    }
     const agent: AgentThread = {
       id: agentId,
+      toolUseId: String(metadata.toolUseId || metadata.tool_use_id || metadata.parentToolUseId || transcript.toolUseId || "") || undefined,
       parentThreadId: parentSessionId,
       nickname: String(metadata.description || metadata.agentType || `Claude Agent ${agents.length + 1}`),
       path: String(metadata.agentType || "Claude CLI · 原生 Agent"),
-      status,
-      updatedAt,
-      revision: Math.max(0, Math.floor(fileStat.mtimeMs)),
-      usage,
-      logs: newestAgentLogs(logs),
-      provider: "claude",
-      task
+      status, updatedAt: transcript.updatedAt || fileStat.mtime.toISOString(),
+      revision: Math.max(0, Math.floor(fileStat.mtimeMs)), usage: transcript.usage,
+      logs: newestAgentLogs(logs), logCount: transcript.logCount, provider: "claude", task: transcript.task
     };
     claudeAgentThreadFileCache.set(file, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, agent });
     agents.push(agent);
@@ -5118,11 +5191,21 @@ function listManagedAgentThreads(session: Session): AgentThread[] {
   return session.messages.filter((message) => message.eventType === "subagent" && !isNativeAgentProjection(message.payload)).map((message, index): AgentThread => {
     const payload = message.payload as Record<string, any> | undefined;
     if (payload && (payload.action === "spawn_agent" || String(payload.type || "").endsWith("_subagent"))) {
-      const provider = String(payload.provider || (payload.type === "codex_subagent" ? "codex" : "claude")).trim().toLowerCase();
+      const provider = normalizedAgentProvider(payload.provider || (payload.type === "codex_subagent" ? "codex" : payload.type === "claude_subagent" ? "claude" : "unknown"));
       const providerName = providerDisplayName(provider);
+      const id = String(payload.agent_id || message.sourceId || message.id);
+      const toolUseId = typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined;
+      const logs = Array.isArray(payload.logs) ? newestAgentLogs(payload.logs) : [];
+      const payloadIdentity = recordOf(payload.identity);
+      const identityAliases = [...new Set([
+        typeof payload.identityKey === "string" ? payload.identityKey : "",
+        typeof payloadIdentity?.key === "string" ? payloadIdentity.key : "",
+        ...(Array.isArray(payload.identityAliases) ? payload.identityAliases.filter((item: unknown): item is string => typeof item === "string") : []),
+        agentIdentityKey(provider, id, toolUseId)
+      ].filter(Boolean))];
       return {
-        id: String(payload.agent_id || message.sourceId || message.id),
-        toolUseId: typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined,
+        id,
+        toolUseId,
         parentThreadId: String(payload.parentThreadId || session.engineSessionId || session.id),
         nickname: String(payload.nickname || `${providerName} Agent ${index + 1}`),
         path: String(payload.path || `${providerName} CLI · 独立上下文`),
@@ -5133,40 +5216,87 @@ function listManagedAgentThreads(session: Session): AgentThread[] {
         updatedAt: String(payload.updatedAt || message.createdAt),
         revision: Math.max(0, Number(payload.revision || 0)),
         usage: payload.usage || emptyUsage(),
-        logs: Array.isArray(payload.logs) ? newestAgentLogs(payload.logs) : [],
+        logs,
+        logCount: Number.isFinite(Number(payload.logCount)) ? Number(payload.logCount) : logs.length,
         provider,
         mode: (["analysis", "review", "implementation"].includes(payload.mode) ? payload.mode : undefined) as AgentThread["mode"],
-        task: String(payload.task || "")
+        task: String(payload.task || ""),
+        identityAliases
       };
     }
+    const id = message.sourceId || message.id;
+    const logs = [{ id: message.id, createdAt: message.createdAt, kind: "tool", title: payload?.name || "Agent", text: message.text, payload: message.payload } satisfies AgentLog];
     return {
-      id: message.sourceId || message.id,
+      id,
       toolUseId: typeof payload?.tool_use_id === "string" ? payload.tool_use_id : undefined,
       parentThreadId: session.engineSessionId || session.id,
       nickname: payload?.input?.description || payload?.name || `Claude Agent ${index + 1}`,
       path: "Claude CLI",
+      provider: "claude",
       status: message.eventPhase === "completed" ? "completed" : session.status === "running" ? "running" : "interrupted",
       updatedAt: message.createdAt,
       usage: emptyUsage(),
-      logs: [{ id: message.id, createdAt: message.createdAt, kind: "tool", title: payload?.name || "Agent", text: message.text, payload: message.payload }]
+      logs,
+      logCount: logs.length,
+      identityAliases: [agentIdentityKey("claude", id, typeof payload?.tool_use_id === "string" ? payload.tool_use_id : undefined)]
     };
-  }).filter((agent) => !seen.has(agent.id) && Boolean(seen.add(agent.id)))
+  }).map((agent) => ({
+    ...agent,
+    identity: agent.identity || agentIdentityFor(agent, session.id, "bridge")
+  })).filter((agent) => {
+    const key = agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+    return !seen.has(key) && Boolean(seen.add(key));
+  })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function mergeAgentThreads(...groups: AgentThread[][]) {
   const byId = new Map<string, AgentThread>();
+  const aliasToIdentity = new Map<string, string>();
   for (const group of groups) {
     for (const agent of group) {
-      const identity = agent.toolUseId ? `tool:${agent.toolUseId}` : `agent:${agent.id}`;
+      const provider = normalizedAgentProvider(agent.provider || agent.identity?.providerId);
+      const aliases = [
+        ...(agent.identityAliases || []),
+        ...(agent.identity?.key ? [agent.identity.key] : []),
+        agentIdentityKey(provider, agent.id, agent.toolUseId)
+      ];
+      // Provider is always part of the key. Native and bridge projections can
+      // merge only through an explicit alias/tool-use id; a Claude id can never
+      // overwrite a Codex projection with the same raw id.
+      const identity = aliases
+        .filter((alias) => alias.startsWith(`${provider}:`))
+        .map((alias) => aliasToIdentity.get(alias))
+        .find(Boolean)
+        || aliases.find((value) => value.startsWith(`${provider}:`))
+        || aliases[0];
       const existing = byId.get(identity);
       if (!existing) {
-        byId.set(identity, agent);
+        byId.set(identity, {
+          ...agent,
+          provider,
+          identity: agentIdentityFor({ ...agent, provider, identityAliases: aliases }, agent.parentThreadId, sourceKindForAgent(agent)),
+          identityAliases: aliases
+        });
+        for (const alias of aliases) aliasToIdentity.set(alias, identity);
         continue;
       }
-      const logs = [...existing.logs, ...agent.logs]
-        .reduce<AgentLog[]>((unique, log) => unique.some((item) => item.id === log.id) ? unique : [...unique, log], [])
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const logsById = new Map<string, AgentLog>();
+      for (const log of [...existing.logs, ...agent.logs]) {
+        const previous = logsById.get(log.id);
+        if (!previous) {
+          logsById.set(log.id, log);
+          continue;
+        }
+        const previousTerminal = previous.phase === "completed" || previous.phase === "failed" || previous.kind === "result" || previous.kind === "error";
+        const nextTerminal = log.phase === "completed" || log.phase === "failed" || log.kind === "result" || log.kind === "error";
+        if (log.createdAt >= previous.createdAt || (nextTerminal && !previousTerminal)) logsById.set(log.id, log);
+      }
+      const logs = [...logsById.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const mergedProvider = normalizedAgentProvider(existing.provider || agent.provider);
+      const latest = (agent.revision || 0) > (existing.revision || 0)
+        || ((agent.revision || 0) === (existing.revision || 0) && agent.updatedAt > existing.updatedAt) ? agent : existing;
+      const mergedAliases = [...new Set([...(existing.identityAliases || []), ...(agent.identityAliases || []), identity])];
       byId.set(identity, {
         ...existing,
         ...agent,
@@ -5176,13 +5306,16 @@ function mergeAgentThreads(...groups: AgentThread[][]) {
         id: existing.id,
         nickname: existing.nickname || agent.nickname,
         path: existing.path || agent.path,
-        provider: existing.provider || agent.provider,
+        provider: mergedProvider,
         task: existing.task || agent.task,
         toolUseId: existing.toolUseId || agent.toolUseId,
-        updatedAt: existing.updatedAt > agent.updatedAt ? existing.updatedAt : agent.updatedAt,
+        updatedAt: latest.updatedAt,
         revision: Math.max(existing.revision || 0, agent.revision || 0),
         status: mergeAgentRuntimeStatus(existing.status, agent.status),
         logs: logs.slice(0, MAX_VISIBLE_AGENT_LOGS),
+        logCount: Math.max(existing.logCount || existing.logs.length, agent.logCount || agent.logs.length, logs.length),
+        identity: agentIdentityFor({ ...existing, ...agent, provider: mergedProvider, identityAliases: mergedAliases }, existing.parentThreadId, existing.identity?.sourceKind || agent.identity?.sourceKind || sourceKindForAgent(existing)),
+        identityAliases: mergedAliases,
         usage: {
           input_tokens: Math.max(existing.usage.input_tokens, agent.usage.input_tokens),
           cached_input_tokens: Math.max(existing.usage.cached_input_tokens, agent.usage.cached_input_tokens),
@@ -5190,6 +5323,7 @@ function mergeAgentThreads(...groups: AgentThread[][]) {
           reasoning_output_tokens: Math.max(existing.usage.reasoning_output_tokens, agent.usage.reasoning_output_tokens)
         }
       });
+      for (const alias of mergedAliases) aliasToIdentity.set(alias, identity);
     }
   }
   return [...byId.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -5216,7 +5350,9 @@ function listPersistedDelegatedAgentThreads(session: Session): AgentThread[] {
       })] : [],
       provider: task.provider,
       mode: task.mode,
-      task: task.task
+      task: task.task,
+      identityAliases: [agentIdentityKey(task.provider, task.id)],
+      identity: agentIdentityFor({ id: task.id, provider: task.provider, parentThreadId: session.engineSessionId || session.id }, session.id, "bridge")
     }));
 }
 
@@ -5234,29 +5370,81 @@ async function listCodexAgentThreadDetails(parentThreadId: string, parentIsRunni
 }
 
 async function listSessionAgentThreads(session: Session, agentId?: string): Promise<AgentThread[]> {
-  const managed = listManagedAgentThreads(session);
-  const persisted = listPersistedDelegatedAgentThreads(session);
+  const managed = listManagedAgentThreads(session).map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "bridge"),
+    identityAliases: [...new Set([...(agent.identityAliases || []), agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)])]
+  }));
+  const persisted = listPersistedDelegatedAgentThreads(session).map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "bridge")
+  }));
   const native = session.engine === "codex"
     ? agentId
       ? await listCodexAgentThreadDetails(session.codexThreadId || "", session.status === "running", agentId)
       : await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
     : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
+  const nativeWithIdentity = native.map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "native"),
+    identityAliases: [...new Set([...(agent.identityAliases || []), agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)])]
+  }));
   // Detail reads are side-effect free. Project native lifecycle cards only while
   // reconciling the session-wide summary, otherwise summary/detail timestamps can
   // alternate and create a self-sustaining refresh loop.
-  if (!agentId) syncNativeAgentMessages(session, native);
-  const merged = mergeAgentThreads(native, managed, persisted);
+  const merged = mergeAgentThreads(nativeWithIdentity, managed, persisted).map((agent) => ({
+    ...agent,
+    identity: {
+      ...(agent.identity || agentIdentityFor(agent, session.id, sourceKindForAgent(agent))),
+      parentSessionId: session.id,
+      providerId: normalizedAgentProvider(agent.provider || agent.identity?.providerId),
+      key: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)
+    },
+    identityAliases: agent.identityAliases || []
+  }));
   return agentId ? merged.filter((agent) => agent.id === agentId) : merged;
+}
+
+/**
+ * Native transcript projection is kept out of GET handlers. This reconciler is
+ * scoped to active sessions so opening the drawer remains a read-only operation
+ * and cannot create a publish/request loop.
+ */
+async function reconcileActiveNativeAgentProjections() {
+  const now = Date.now();
+  const active = state.sessions.filter((session) => {
+    if (session.status === "running" || activeRuns.has(session.id)) return true;
+    // Give a just-finished native transcript a few reconciliation ticks so its
+    // terminal status/logs are projected even after activeRuns is released.
+    const finishedAt = Date.parse(session.runFinishedAt || "");
+    return Number.isFinite(finishedAt) && now - finishedAt < 10_000;
+  });
+  for (const session of active) {
+    try {
+      const native = session.engine === "codex"
+        ? await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
+        : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
+      if (native.length) syncNativeAgentMessages(session, native);
+    } catch (error) {
+      console.warn(`Native Agent projection reconcile failed for ${session.id}:`, error instanceof Error ? error.message : String(error));
+    }
+  }
 }
 
 function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
   let changed = false;
   for (const agent of agents) {
     const provider = agent.provider || session.engine;
+    const identity = agent.identity || agentIdentityFor({ ...agent, provider }, session.id, "native");
+    agent.identity = identity;
     const sourceId = `native-agent:${provider}:${agent.id}`;
     const payload = {
       type: `${provider}_subagent`,
       provider,
+      providerId: identity.providerId,
+      identity,
+      identityKey: identity.key,
+      identityAliases: agent.identityAliases,
       agent_id: agent.id,
       tool_use_id: agent.toolUseId,
       parentThreadId: agent.parentThreadId,
@@ -5276,7 +5464,7 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
     const existing = messageBySourceId(session, sourceId)
       || session.messages.find((message) => {
         const previous = recordOf(message.payload);
-        return message.eventType === "subagent" && nativeAgentMessageCanReuse(previous, agent.id);
+        return message.eventType === "subagent" && nativeAgentMessageCanReuse(previous, agent.id, identity.providerId, identity.key);
       });
     if (existing) {
       const previous = recordOf(existing.payload);
@@ -5368,6 +5556,7 @@ await Promise.all([detectCodexRuntime(), getClaudeRuntime()]);
 let httpServer: { close: (callback?: () => void) => void } | null = null;
 let workflowLeaseReconciler: NodeJS.Timeout | null = null;
 let sessionTrashCleaner: NodeJS.Timeout | null = null;
+let nativeAgentProjectionReconciler: NodeJS.Timeout | null = null;
 let shuttingDown = false;
 
 async function shutdown(reason: string) {
@@ -5394,6 +5583,7 @@ async function shutdown(reason: string) {
     clearAgentPublishState();
     if (workflowLeaseReconciler) clearInterval(workflowLeaseReconciler);
     if (sessionTrashCleaner) clearInterval(sessionTrashCleaner);
+    if (nativeAgentProjectionReconciler) clearInterval(nativeAgentProjectionReconciler);
     appUpdateService.close();
     terminateTrackedProcessTrees();
 
@@ -11077,8 +11267,45 @@ app.get("/api/sessions/:id/agents", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const agents = await listSessionAgentThreads(session);
-  res.json(agents.map(({ logs, ...agent }) => ({ ...agent, logs: [], logCount: agent.logCount ?? logs.length })));
+  const payload = agents.map(({ logs, ...agent }) => ({
+    ...agent,
+    identityKey: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId),
+    logs: [],
+    logCount: agent.logCount ?? logs.length
+  }));
+  const etag = agentCollectionEtag(payload);
+  if (ifNoneMatch(req, etag)) return res.status(304).end();
+  res.setHeader("ETag", etag);
+  res.json(payload);
 });
+
+function agentCollectionEtag(value: unknown) {
+  // Summary responses contain no logs, so a compact fingerprint avoids work
+  // during the high-frequency list poll. Detail responses retain bounded logs;
+  // hash the complete bounded payload there so a phase/output change cannot be
+  // hidden behind a stale revision or timestamp.
+  const fingerprint = Array.isArray(value) ? value.map((agent) => agentSnapshotFingerprint(agent)) : value;
+  return `"${crypto.createHash("sha256").update(JSON.stringify(fingerprint)).digest("hex").slice(0, 24)}"`;
+}
+
+function agentSnapshotFingerprint(value: unknown) {
+  const source = recordOf(value);
+  if (!source) return value;
+  return {
+    identityKey: source.identityKey || recordOf(source.identity)?.key || source.id,
+    provider: source.provider || source.providerId || recordOf(source.identity)?.providerId,
+    revision: source.revision || 0,
+    updatedAt: source.updatedAt || "",
+    status: source.status || "",
+    logCount: source.logCount || (Array.isArray(source.logs) ? source.logs.length : 0),
+    logTailId: Array.isArray(source.logs) ? recordOf(source.logs[0])?.id || recordOf(source.logs.at(-1))?.id : undefined
+  };
+}
+
+function ifNoneMatch(req: express.Request, etag: string) {
+  const header = String(req.headers["if-none-match"] || "");
+  return header.split(",").map((item) => item.trim().replace(/^W\//i, "")).includes(etag) || header.trim() === "*";
+}
 
 function agentLogsForResponse(logs: AgentLog[], byteBudget = 750_000) {
   const result: AgentLog[] = [];
@@ -11102,9 +11329,36 @@ app.get("/api/sessions/:id/agents/:agentId", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const agents = await listSessionAgentThreads(session, req.params.agentId);
-  const agent = agents.find((item) => item.id === req.params.agentId);
+  const requestedIdentity = String(req.query.identityKey || "").trim();
+  const requestedProvider = normalizedAgentProvider(req.query.provider, "");
+  const candidates = agents.filter((item) => item.id === req.params.agentId);
+  let agent: AgentThread | undefined;
+  if (requestedIdentity) {
+    agent = candidates.find((item) => item.identity?.key === requestedIdentity || item.identityAliases?.includes(requestedIdentity));
+    if (!agent) return res.status(404).json({ error: "子 Agent 身份不存在", code: "AGENT_IDENTITY_NOT_FOUND" });
+  } else if (requestedProvider) {
+    agent = candidates.find((item) => normalizedAgentProvider(item.provider) === requestedProvider);
+    if (!agent) return res.status(404).json({ error: "子 Agent Provider 不匹配", code: "AGENT_PROVIDER_MISMATCH" });
+  } else if (candidates.length === 1) {
+    agent = candidates[0];
+  } else if (candidates.length > 1) {
+    return res.status(409).json({
+      error: "子 Agent 身份存在歧义，请提供 identityKey",
+      code: "AGENT_IDENTITY_REQUIRED",
+      candidates: candidates.map((item) => ({ id: item.id, identityKey: item.identity?.key, provider: item.provider }))
+    });
+  }
   if (!agent) return res.status(404).json({ error: "子 Agent 线程不存在" });
-  res.json({ ...agent, logCount: agent.logCount ?? agent.logs.length, logs: agentLogsForResponse(agent.logs) });
+  const payload = {
+    ...agent,
+    identityKey: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId),
+    logCount: agent.logCount ?? agent.logs.length,
+    logs: agentLogsForResponse(agent.logs)
+  };
+  const etag = agentCollectionEtag(payload);
+  if (ifNoneMatch(req, etag)) return res.status(304).end();
+  res.setHeader("ETag", etag);
+  res.json(payload);
 });
 
 app.delete("/api/sessions/:id", async (req, res) => {
@@ -12012,6 +12266,13 @@ const listeningServer = app.listen(PORT, "127.0.0.1", () => {
     }
     catch (error) { console.error("Startup workflow recovery failed", error); }
   }, 250);
+  // Reconcile native sub-agent projections independently from the read-only
+  // drawer endpoints. A short cadence keeps lifecycle cards responsive while
+  // avoiding a full transcript scan for idle sessions.
+  nativeAgentProjectionReconciler = setInterval(() => {
+    void reconcileActiveNativeAgentProjections().catch((error) => console.warn("Native Agent projection reconcile failed:", error));
+  }, 1_500);
+  nativeAgentProjectionReconciler.unref();
 });
 httpServer = listeningServer;
 listeningServer.on("error", (error: NodeJS.ErrnoException) => {

@@ -821,6 +821,7 @@
 .agent-drawer-title strong { color: var(--mc-text); font-size: 13px; }
 .agent-drawer-title small { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-drawer-body { grid-row: 3; padding: 12px 18px 28px; }
+.agent-drawer-new-activity { position: absolute; z-index: 4; right: 18px; bottom: 18px; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border: 1px solid var(--mc-line-strong); border-radius: 999px; background: var(--mc-surface); color: var(--mc-text-secondary); box-shadow: 0 4px 14px color-mix(in srgb, var(--mc-shadow) 35%, transparent); font-size: 11px; cursor: pointer; }
 .agent-drawer-navigation { grid-row: 2; min-width: 0; }
 .agent-drawer-navigation:empty { display: none; }
 .agent-drawer-navigation .agent-thread-tabs { position: static; margin: 0; padding: 8px 14px; background: var(--mc-surface); }
@@ -831,9 +832,18 @@
 .agent-task-description[open] > summary > span { display: none; }
 .agent-task-description > p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
 .agent-conversation-notice { color: var(--mc-text-secondary); font-size: 12px; line-height: 1.6; }
+.activity-timeline-controls { display: flex; align-items: center; gap: 5px; margin: 0 0 7px; padding: 3px 6px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-sm); background: var(--mc-surface-subtle); color: var(--mc-text-tertiary); }
+.activity-timeline-controls input, .activity-timeline-controls select { min-width: 0; height: 24px; padding: 0 5px; border: 0; background: transparent; color: inherit; font-size: 11px; }
+.activity-timeline-controls input { flex: 1; }
+.activity-timeline-controls input:focus, .activity-timeline-controls select:focus { outline: none; }
+.activity-timeline-controls button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.activity-timeline-controls .activity-failure-filter { width: auto; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--mc-danger) 40%, var(--mc-line)); border-radius: 999px; color: var(--mc-danger); }
+.activity-timeline-no-results { margin: 12px 8px; color: var(--mc-text-tertiary); font-size: 11px; text-align: center; }
+.activity-timeline-result-count { margin: -3px 0 6px; color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-drawer .agent-task p { max-height: none; overflow: visible; }
 .agent-drawer .agent-conversation { contain: none; }
 .agent-drawer .activity-timeline.single-layer { margin: 0; }
+.agent-event-copy-link { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 3px 6px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-sm); background: transparent; color: var(--mc-text-tertiary); font-size: 11px; cursor: pointer; }
 .agent-drawer .activity-timeline-list > :not(.assistant-reply):not(.activity-virtual-content),
 .agent-drawer .activity-virtual-row > :not(.assistant-reply) { margin-left: 41px; }
 .agent-summary-line { color: var(--mc-text-tertiary); background: transparent; border-color: var(--mc-line); }

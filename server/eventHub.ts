@@ -15,8 +15,10 @@ type EventClient = {
   response: Response;
   userId?: string;
   blocked: boolean;
-  pending: WorkbenchEvent[];
+  pending: EventFrame[];
 };
+
+type EventFrame = Pick<WorkbenchEvent, "type" | "data"> & { id?: number };
 
 export class WorkbenchEventHub {
   // Keep IDs ahead of values retained by browsers across server restarts.
@@ -53,39 +55,30 @@ export class WorkbenchEventHub {
     const oldestEventId = this.events[0]?.id || 0;
     const latestEventId = this.events.at(-1)?.id || 0;
     const replayComplete = afterId === 0 || (oldestEventId > 0 && afterId >= oldestEventId - 1 && afterId <= latestEventId);
-    if (this.clients.has(response)) {
-      try {
-        if (this.writeControl(response, "stream.ready", { afterId, oldestEventId, latestEventId, replayComplete }) === false) {
-          client.blocked = true;
-          response.once("drain", () => this.flush(client));
-        }
-      }
-      catch { this.drop(client); }
-    }
+    // Ready must follow all replay frames, including frames waiting for drain.
+    // Bypassing the queue would let the client reconcile before replay ended.
+    if (this.clients.has(response)) this.send(client, {
+      type: "stream.ready", data: { afterId, oldestEventId, latestEventId, replayComplete }
+    });
     return () => this.clients.delete(response);
   }
 
   heartbeat(response: Response) {
     const client = this.clients.get(response);
     if (!client || client.blocked) return;
-    try {
-      if (this.writeControl(response, "stream.heartbeat", { sentAt: new Date().toISOString() }) === false) {
-        client.blocked = true;
-        response.once("drain", () => this.flush(client));
-      }
-    }
-    catch { this.drop(client); }
+    this.send(client, { type: "stream.heartbeat", data: { sentAt: new Date().toISOString() } });
   }
 
-  private write(response: Response, event: WorkbenchEvent) {
-    return response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+  private write(response: Response, event: EventFrame) {
+    // The SSE id is persisted by the browser for replay. Echo it in the
+    // payload as well so consumers that proxy/record events can correlate an
+    // update with the exact server sequence without relying on EventSource's
+    // mutable lastEventId property.
+    const data = event.id === undefined ? event.data : { ...event.data, eventSeq: event.id };
+    return response.write(`${event.id === undefined ? "" : `id: ${event.id}\n`}event: ${event.type}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  private writeControl(response: Response, type: string, data: Record<string, unknown>) {
-    return response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
-  }
-
-  private send(client: EventClient, event: WorkbenchEvent) {
+  private send(client: EventClient, event: EventFrame) {
     if (client.blocked) {
       client.pending.push(event);
       if (client.pending.length > MAX_PENDING_EVENTS) this.drop(client);

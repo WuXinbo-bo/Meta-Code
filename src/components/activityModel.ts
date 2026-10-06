@@ -112,7 +112,7 @@ export function agentPlanSnapshot(log: ActivityViewLog, provider: string): Agent
 }
 
 function validTimestamp(value: unknown, index: number) {
-  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return new Date(value).toISOString();
   return new Date(index).toISOString();
 }
 
@@ -149,9 +149,28 @@ export function normalizeAgentStreamLog(value: unknown, index = 0): SharedAgentL
   };
 }
 
+const streamVersionCache = new WeakMap<object, string>();
+
+function logContentVersion(value: unknown, index: number) {
+  if (value && typeof value === "object") {
+    const cached = streamVersionCache.get(value);
+    if (cached) return cached;
+  }
+  const log = normalizeAgentStreamLog(value, index);
+  // Include phase and details: tool completions often keep the same id and
+  // timestamp, and equal-length edits must still invalidate the view.
+  const source = JSON.stringify([log.id, log.createdAt, log.provider, log.actor, log.scope, log.kind, log.title, log.text, log.category, log.phase, log.detail, log.artifactRefs]);
+  let hash = 2166136261;
+  for (let i = 0; i < source.length; i += 1) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+  const version = (hash >>> 0).toString(36);
+  if (value && typeof value === "object") streamVersionCache.set(value, version);
+  return version;
+}
+
+/** Callers use immutable log records; cached records are shared across snapshots. */
 export function agentStreamVersion(logs: readonly unknown[]) {
   const latest = normalizeAgentStreamLog(logs.at(-1), Math.max(0, logs.length - 1));
-  return `${logs.length}|${latest.id}|${latest.createdAt}|${latest.text.length}`;
+  return `${logs.length}|${latest.id}|${latest.createdAt}|${logs.map(logContentVersion).join(".")}`;
 }
 
 export function activityCategory(log: SharedAgentLog): ActivityCategory {
@@ -188,12 +207,12 @@ function logFingerprint(log: SharedAgentLog) {
 
 /**
  * Turns provider-specific event streams into one stable presentation stream.
- * Stable ids are updated in place, adjacent duplicate partials are removed,
+ * Stable identities are updated in place; repeated commands with different IDs
+ * remain distinct (parallel work and retries may legitimately be identical),
  * and timestamps are normalized to chronological order.
  */
 export function normalizeActivityLogs(logs: readonly unknown[]): ActivityViewLog[] {
   const byId = new Map<string, ActivityViewLog>();
-  const ordered: ActivityViewLog[] = [];
   for (const [index, value] of logs.entries()) {
     const raw = normalizeAgentStreamLog(value, index);
     const log: ActivityViewLog = {
@@ -202,21 +221,21 @@ export function normalizeActivityLogs(logs: readonly unknown[]): ActivityViewLog
       phase: activityPhase(raw),
       fingerprint: logFingerprint(raw)
     };
-    const existing = byId.get(log.id);
+    const identity = JSON.stringify([log.provider || "", log.actor?.id || "", log.scope?.attempt ?? "", log.id]);
+    const existing = byId.get(identity);
     if (existing) {
-      const index = ordered.indexOf(existing);
-      if (index >= 0) ordered[index] = log;
-      byId.set(log.id, log);
-      continue;
+      if (Date.parse(log.createdAt) < Date.parse(existing.createdAt)) continue;
+      const terminal = (phase: ActivityPhase) => phase === "completed" || phase === "failed";
+      if (log.createdAt === existing.createdAt && terminal(existing.phase) && !terminal(log.phase)) continue;
     }
-    const previous = ordered.at(-1);
-    const time = Date.parse(log.createdAt);
-    const previousTime = previous ? Date.parse(previous.createdAt) : Number.NaN;
-    if (previous && previous.fingerprint === log.fingerprint && Number.isFinite(time) && Number.isFinite(previousTime) && Math.abs(time - previousTime) < 2_000) continue;
-    byId.set(log.id, log);
-    ordered.push(log);
+    byId.set(identity, log);
   }
-  return ordered.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const ordered = [...byId.values()];
+  const counts = new Map<string, number>();
+  for (const log of ordered) counts.set(log.id, (counts.get(log.id) || 0) + 1);
+  return ordered.map((log) => (counts.get(log.id) || 0) > 1
+    ? { ...log, id: JSON.stringify([log.provider, log.actor?.id, log.scope?.attempt, log.id]) }
+    : log).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
 const PAUSE_PATTERN = /(?:^|\b)(?:paused|pause requested)(?:\b|$)|已暂停|请求暂停|等待继续/i;

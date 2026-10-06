@@ -101,9 +101,15 @@ function recordOf(value: unknown): Record<string, unknown> | null {
 }
 
 /** Native transcript projection must never take ownership of a workbench bridge message. */
-export function nativeAgentMessageCanReuse(payload: unknown, agentId: string) {
+export function nativeAgentMessageCanReuse(payload: unknown, agentId: string, providerId?: string, identityKey?: string) {
   const source = recordOf(payload);
   if (!source || String(source.agent_id || "") !== agentId) return false;
+  const explicitProvider = String(source.providerId || source.provider || "").trim().toLowerCase();
+  const typeProvider = String(source.type || "").trim().toLowerCase().match(/^(codex|claude|[a-z0-9-]+)_subagent$/)?.[1] || "";
+  const payloadProvider = explicitProvider || typeProvider;
+  if (providerId && (!payloadProvider || payloadProvider !== String(providerId).trim().toLowerCase())) return false;
+  const payloadIdentity = String(source.identityKey || (recordOf(source.identity)?.key || "")).trim();
+  if (identityKey && payloadIdentity && payloadIdentity !== identityKey) return false;
   return source.native === true || source.action !== "spawn_agent";
 }
 

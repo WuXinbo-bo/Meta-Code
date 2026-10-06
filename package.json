@@ -65,6 +65,7 @@
     "test:math-worker": "node --import tsx scripts/test-math-worker.mjs",
     "test:markdown-pages": "node --import tsx scripts/test-markdown-preview-pages.mjs",
     "test:agent-index": "npm run build && node scripts/test-agent-transcript-index.mjs",
+    "test:incremental-jsonl": "node --import tsx scripts/test-incremental-jsonl.mjs",
     "test:runtime-resilience": "npm run build && node scripts/test-runtime-resilience.mjs",
     "test:claude-real": "npm run build && node scripts/test-claude-real-cli.mjs",
     "test:managed-skills": "npm run build && node scripts/test-managed-skill-manager.mjs",

@@ -77,7 +77,7 @@ assert.match(app, /showProvider=\{false\}/);
 assert.doesNotMatch(app, /message-agent-heading/);
 assert.match(app, /message\.role !== "user" && <div className="avatar"><Bot size=\{17\}/);
 assert.match(app, /<ProviderIcon provider=\{provider\} icon=\{providerControl\?\.identity\.icon\} accent=\{providerControl\?\.identity\.accent\} size=\{18\}/);
-assert.match(entry, /<ProviderIcon provider=\{provider\} icon=\{providerIcon\} accent=\{providerAccent\} size=\{18\}/);
+assert.match(entry, /<ProviderIcon provider=\{eventProvider\} icon=\{eventProviderIcon\} accent=\{eventProviderAccent\} size=\{18\}/);
 assert.match(entry, /\{preview\.available && <span><i>\+\{preview\.additions\}<\/i><b>-\{preview\.deletions\}<\/b><\/span>\}/);
 assert.match(conversation, /providerIcon=\{providerIcon\}/);
 assert.match(app, /subagentStatusLabel\(agent\.status\)/);

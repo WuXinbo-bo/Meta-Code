@@ -1,5 +1,5 @@
-import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { commandActivitySummary } from "./AgentActivityEntry";
 import { ActivityRenderer } from "./ActivityRenderer";
@@ -208,10 +208,42 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
 }) {
   const localScrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const items = useMemo(() => minimalActivities(logs, provider, status), [logs, provider, status]);
-  const virtualized = items.length > 80;
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [phaseFilter, setPhaseFilter] = useState("all");
+  const normalizedLogs = useMemo(() => normalizeActivityLogs(logs), [logs]);
+  const hasFilters = Boolean(query.trim() || categoryFilter !== "all" || phaseFilter !== "all");
+  const failureCount = useMemo(() => normalizedLogs.filter((log) => log.phase === "failed").length, [normalizedLogs]);
+  const categories = useMemo(() => [...new Set(normalizedLogs.map((log) => log.category))].sort(), [normalizedLogs]);
+  const filteredLogs = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return normalizedLogs.filter((log) => {
+      if (categoryFilter !== "all" && log.category !== categoryFilter) return false;
+      if (phaseFilter !== "all" && log.phase !== phaseFilter) return false;
+      if (!needle) return true;
+      return `${log.title} ${log.text} ${log.rawType || ""}`.toLocaleLowerCase().includes(needle);
+    });
+  }, [normalizedLogs, query, categoryFilter, phaseFilter]);
+  // Search is an inspection view: every match remains individually accessible,
+  // including historical live tools and reasoning/status events hidden by the
+  // concise default presentation.
+  const items = useMemo<ActivityItem[]>(() => hasFilters
+    ? filteredLogs.map((log) => ({ type: "log", log: { ...log, transient: false } }))
+    : minimalActivities(filteredLogs, provider, status), [filteredLogs, provider, status, hasFilters]);
+  const virtualized = items.length > 40;
   const [scrollMargin, setScrollMargin] = useState(0);
   const [externalScrollElement, setExternalScrollElement] = useState<HTMLDivElement | null>(null);
+  const filterKey = `${query}\u0000${categoryFilter}\u0000${phaseFilter}`;
+  const previousFilterKeyRef = useRef(filterKey);
+  useLayoutEffect(() => {
+    if (previousFilterKeyRef.current === filterKey) return;
+    previousFilterKeyRef.current = filterKey;
+    const container = externalScrollRef?.current || localScrollRef.current;
+    const list = listRef.current;
+    if (container) container.scrollTop = externalScrollRef && list
+      ? list.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+      : 0;
+  }, [filterKey, externalScrollRef]);
   // Parent refs are attached after child layout effects. Resolve an external
   // viewport after commit so an initially virtualized drawer cannot stay blank.
   useEffect(() => {
@@ -252,10 +284,25 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
       ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} /></div>
     : item.type === "plan"
       ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
-    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} />;
+    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} showReasoning={hasFilters} />;
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
   return <div className="activity-timeline single-layer">
+    {(normalizedLogs.length > 3 || hasFilters || failureCount > 0) && <div className="activity-timeline-controls" role="search" aria-label="筛选活动">
+      <Search size={13} aria-hidden="true" />
+      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索活动" aria-label="搜索活动" />
+      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="活动类型">
+        <option value="all">全部类型</option>
+        {categories.map((category) => <option value={category} key={category}>{activityCategoryLabel(category)}</option>)}
+      </select>
+      <select value={phaseFilter} onChange={(event) => setPhaseFilter(event.target.value)} aria-label="活动状态">
+        <option value="all">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="started">已开始</option>
+      </select>
+      {failureCount > 0 && <button className="activity-failure-filter" type="button" title="查看失败活动" aria-label={`查看 ${failureCount} 条失败活动`} aria-pressed={phaseFilter === "failed"} onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("failed"); }}>失败 {failureCount}</button>}
+      {(query || categoryFilter !== "all" || phaseFilter !== "all") && <button type="button" title="清除筛选" aria-label="清除筛选" onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("all"); }}><X size={13} /></button>}
+    </div>}
+    {hasFilters && <p className="activity-timeline-result-count" role="status">匹配 {filteredLogs.length} / {normalizedLogs.length} 条活动</p>}
+    {!items.length && normalizedLogs.length > 0 && <p className="activity-timeline-no-results" role="status">没有匹配的活动</p>}
     <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""} ${externalScrollRef ? "external-scroll" : ""}`} ref={externalScrollRef ? listRef : localScrollRef}>
       {virtualized
         ? <div className="activity-virtual-content" style={{ height: `${virtualizer.getTotalSize()}px` }}>

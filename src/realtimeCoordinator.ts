@@ -42,6 +42,7 @@ class RealtimeCoordinator {
   private started = false;
   private hasConnected = false;
   private lastReconcileAt = 0;
+  private lastEventId = 0;
 
   start() {
     if (this.started) return;
@@ -90,11 +91,14 @@ class RealtimeCoordinator {
   private connect() {
     if (!this.started || this.source) return;
     this.setState(this.hasConnected ? "reconnecting" : "connecting");
-    const after = Number(sessionStorage.getItem(LAST_EVENT_ID_KEY) || 0) || 0;
+    let after = this.lastEventId;
+    try { after = Number(sessionStorage.getItem(LAST_EVENT_ID_KEY) || after) || 0; } catch { /* Storage may be disabled. */ }
+    this.lastEventId = after;
     const source = new EventSource(`/api/events?after=${after}`);
     this.source = source;
     this.lastActivityAt = Date.now();
     source.onopen = () => {
+      if (this.source !== source) return;
       this.lastActivityAt = Date.now();
       this.setState("connected");
     };
@@ -103,29 +107,47 @@ class RealtimeCoordinator {
       this.setState("reconnecting");
       this.emitReconcile("error");
     };
-    for (const type of EVENT_TYPES) source.addEventListener(type, this.handleEvent as EventListenerOrEventListenerObject);
+    for (const type of EVENT_TYPES) source.addEventListener(type, (event) => {
+      if (this.source === source) this.handleEvent(event);
+    });
   }
 
   private handleEvent = (rawEvent: Event) => {
     const event = rawEvent as MessageEvent;
     this.lastActivityAt = Date.now();
-    if (event.lastEventId) sessionStorage.setItem(LAST_EVENT_ID_KEY, event.lastEventId);
     let detail: RealtimeEventDetail = {};
     try { detail = JSON.parse(event.data || "{}") as RealtimeEventDetail; }
-    catch { /* Invalid event data is ignored without breaking the stream. */ }
+    catch { this.emitReconcile("gap"); return; }
+    if (!detail || typeof detail !== "object" || Array.isArray(detail)) { this.emitReconcile("gap"); return; }
     if (event.type === "stream.heartbeat") {
       if (this.state !== "connected") this.setState("connected");
       return;
     }
     if (event.type === "stream.ready") {
+      // A restarted server may no longer have the browser's saved cursor.
+      // Reset it to the acknowledged snapshot boundary rather than repeatedly
+      // asking to replay an unavailable range on every reconnect.
+      if (detail.replayComplete === false && Number.isSafeInteger(detail.latestEventId) && Number(detail.latestEventId) >= 0) {
+        this.rememberEventId(Number(detail.latestEventId));
+      }
       const reconnected = this.hasConnected;
       this.hasConnected = true;
       this.setState("connected");
       this.emitReconcile(detail.replayComplete === false ? "gap" : reconnected ? "reconnected" : "connected");
       return;
     }
-    for (const listener of this.listeners.get(event.type) || []) listener(detail, event);
+    const eventId = Number(event.lastEventId || detail.eventSeq || 0);
+    if (Number.isSafeInteger(eventId) && eventId > 0) {
+      if (eventId <= this.lastEventId) return;
+      this.rememberEventId(eventId);
+    }
+    for (const listener of [...(this.listeners.get(event.type) || [])]) listener(detail, event);
   };
+
+  private rememberEventId(eventId: number) {
+    this.lastEventId = eventId;
+    try { sessionStorage.setItem(LAST_EVENT_ID_KEY, String(eventId)); } catch { /* Reconnection can use the in-memory cursor. */ }
+  }
 
   private handleVisibility = () => {
     if (document.hidden) return;

@@ -13,6 +13,7 @@ assert.equal(userOne.chunks.length, 1);
 assert.match(userOne.chunks[0], /event: stream\.ready/);
 hub.publish("agents.changed", { sessionId: "three" }, ["user-1"]);
 assert.equal(userOne.chunks.length, 2);
+assert.match(userOne.chunks.at(-1), /"eventSeq":\d+/);
 unsubscribe();
 hub.publish("agents.changed", { sessionId: "four" }, ["user-1"]);
 assert.equal(userOne.chunks.length, 2);
@@ -55,4 +56,23 @@ slow.blocked = false;
 drainListeners.shift()();
 assert.match(slow.chunks.at(-1), /"index":2/);
 assert.equal(slow.ended, false);
+
+const replayBackpressure = new WorkbenchEventHub();
+const replayBoundary = replayBackpressure.publish("tick", { index: 0 });
+replayBackpressure.publish("tick", { index: 1 });
+replayBackpressure.publish("tick", { index: 2 });
+const replayDrains = [];
+const slowReplay = {
+  chunks: [], blocked: true,
+  write(value) { this.chunks.push(value); return !this.blocked; },
+  once(type, listener) { if (type === "drain") replayDrains.push(listener); },
+  end() {}
+};
+replayBackpressure.subscribe(slowReplay, replayBoundary.id);
+assert.equal(slowReplay.chunks.length, 1, "stream.ready must not bypass buffered replay frames");
+assert.equal(replayDrains.length, 1, "replay backpressure registers exactly one drain listener");
+slowReplay.blocked = false;
+replayDrains.shift()();
+assert.match(slowReplay.chunks[1], /"index":2/);
+assert.match(slowReplay.chunks[2], /stream\.ready/);
 console.log("event stream tests passed");
