@@ -962,6 +962,19 @@ function agentSelectionKey(agent: AgentThread) {
   return agent.identityKey || agent.identity?.key || agent.id;
 }
 
+function agentDetailMatchesSummary(detail: AgentThread | null | undefined, summary: AgentThread | null | undefined) {
+  if (!detail || !summary || detail.id !== summary.id) return false;
+  const detailKey = detail.identityKey || detail.identity?.key;
+  const summaryKey = summary.identityKey || summary.identity?.key;
+  if (detailKey && summaryKey && detailKey === summaryKey) return true;
+  // Native and bridge projections can briefly publish different canonical
+  // keys for the same invocation. The provider-qualified id is still safe to
+  // reuse, while an id-only match could mix Claude and Codex transcripts.
+  const detailProvider = (detail.provider || detail.identity?.providerId || "").trim().toLowerCase();
+  const summaryProvider = (summary.provider || summary.identity?.providerId || "").trim().toLowerCase();
+  return Boolean(detailProvider && summaryProvider && detailProvider === summaryProvider);
+}
+
 function normalizeAgentThreads(value: unknown): AgentThread[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item, threadIndex) => {
@@ -1719,7 +1732,6 @@ function SubagentDrawer({
     const identityKey = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key || agentId;
     const cacheKey = `${sessionId}:${identityKey}`;
     const cached = agentThreadDetailCache.get(cacheKey);
-    setSelectedAgentDetail(cached || null);
     setAgentDetailError("");
     setAgentDetailLoading(!cached);
     let stopped = false;
@@ -1729,6 +1741,7 @@ function SubagentDrawer({
     let timer: number | undefined;
     let controller: AbortController | undefined;
     let lastAppliedSnapshot = cached ? agentThreadsSnapshot([cached]) : "";
+    setSelectedAgentDetail((current) => cached || (agentDetailMatchesSummary(current, selectedAgentSummary) ? current : null));
     const schedule = (delay: number) => {
       if (stopped) return;
       if (timer) window.clearTimeout(timer);
@@ -1757,9 +1770,20 @@ function SubagentDrawer({
       controller = new AbortController();
       let nextDelay: number | null = null;
       try {
+        const detailUrl = `/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`;
         const identityQuery = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key
           ? `?identityKey=${encodeURIComponent(identityKey)}` : "";
-        const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}${identityQuery}`, { signal: controller.signal });
+        let value: unknown;
+        try {
+          value = await api<unknown>(`${detailUrl}${identityQuery}`, { signal: controller.signal });
+        } catch (error) {
+          // If reconciliation rotated the canonical identity between the
+          // summary and detail request, retry by provider and keep the cached
+          // transcript visible while the server converges.
+          const provider = selectedAgentSummary.provider || selectedAgentSummary.identity?.providerId;
+          if (!identityQuery || !provider || !(error instanceof Error) || !/身份不存在|identity/i.test(error.message)) throw error;
+          value = await api<unknown>(`${detailUrl}?provider=${encodeURIComponent(provider)}`, { signal: controller.signal });
+        }
         const agent = normalizeAgentThreads([value])[0];
         if (stopped) return;
         if (!agent || agent.id !== agentId) throw new Error("子 Agent 详情不匹配");
@@ -1814,10 +1838,7 @@ function SubagentDrawer({
   }, [sessionId, selectedAgentSummary?.id, selectedAgentSummary?.identityKey, selectedAgentSummary?.identity?.key, selectedAgentSummary?.provider]);
   // A tab switch renders before its detail effect runs; never show the previous Agent's logs.
   const detailForSelection = selectedAgentDetail;
-  const currentAgentDetail = detailForSelection && detailForSelection.id === selectedAgentSummary?.id
-    && (!selectedAgentSummary?.identityKey || detailForSelection.identityKey === selectedAgentSummary.identityKey)
-    && (!selectedAgentSummary?.provider || !detailForSelection.provider || detailForSelection.provider === selectedAgentSummary.provider)
-    ? detailForSelection : null;
+  const currentAgentDetail = agentDetailMatchesSummary(detailForSelection, selectedAgentSummary) ? detailForSelection : null;
   const selectedAgent = selectAgentDisplaySnapshot(currentAgentDetail, selectedAgentSummary);
   const selectedAgentLogs = useMemo(() => {
     // Summary responses intentionally omit logs. Keep a cached detail stream
@@ -1839,7 +1860,8 @@ function SubagentDrawer({
   const title = selectedAgent?.nickname || info.nickname || info.agentType || "子 Agent";
   const drawerStatus = normalizeAgentDisplayStatus(selectedAgent?.status || info.status);
   const drawerDetailPending = Boolean(selectedAgentSummary && !currentAgentDetail && agentDetailLoading);
-  const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, selectedAgent ? selectedAgentLogs.length : logs.length);
+  const conversationLogs = selectedAgent && selectedAgentLogs.length ? selectedAgentLogs : logs.map(eventActivityLog);
+  const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, conversationLogs.length);
   const selectedIdentityKey = selectedAgent?.identityKey || selectedAgent?.identity?.key || selectedAgent?.id || selectedAgentId;
   const candidateProvider = selectedAgent?.identity?.providerId || selectedAgent?.provider || selectedAgentSummary?.identity?.providerId || selectedAgentSummary?.provider;
   const lockedProvider = providerLockRef.current.get(selectedIdentityKey);
@@ -1848,7 +1870,7 @@ function SubagentDrawer({
   // points at a specific Agent. That is what caused Claude → Codex icon flash.
   const drawerProvider = lockedProvider || candidateProvider || (info.agentIds.length ? undefined : info.provider);
   const drawerProviderControl = providerControls.find((control) => control.providerId === drawerProvider);
-  const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(selectedAgent ? selectedAgentLogs : logs)}`;
+  const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(conversationLogs)}`;
   const followOutput = useAgentOutputFollow(drawerLogVersion, selectedIdentityKey);
   return (
     <AgentDrawer title={title} onClose={onClose} followOutput={followOutput} header={<header>
@@ -1891,7 +1913,7 @@ function SubagentDrawer({
                 scrollRef={followOutput.containerRef}
                 loading={agentThreads === null || (agentDetailLoading && !selectedAgentLogs.length && !logs.length)}
                 error={agentListError || agentDetailError}
-                logs={selectedAgent ? selectedAgentLogs : logs.map(eventActivityLog)}
+                logs={conversationLogs}
                 status={selectedAgent?.status || drawerStatus}
                 provider={drawerProvider || "agent"}
                 providerLabel={agentProviderLabel(selectedAgent?.provider || drawerProvider)}

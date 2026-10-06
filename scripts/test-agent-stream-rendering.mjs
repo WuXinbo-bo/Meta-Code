@@ -170,7 +170,9 @@ assert.match(conversationStyles, /\.activity-timeline\.single-layer \.agent-stre
 assert.match(conversationStyles, /\.activity-timeline\.single-layer \.agent-stream-event > summary time,[\s\S]*display:\s*none/);
 assert.match(planView, /agent-plan-progress/);
 assert.match(app, /useAgentOutputFollow\(/);
-assert.match(app, /logs=\{selectedAgent \? selectedAgentLogs : logs\.map\(eventActivityLog\)\}/);
+assert.match(app, /agentDetailMatchesSummary/);
+assert.match(app, /logs=\{conversationLogs\}/);
+assert.match(app, /provider=\$\{encodeURIComponent\(provider\)\}/);
 assert.match(workflow, /useAgentOutputFollow\(/);
 assert.doesNotMatch(app, /\?\.text\.length/);
 

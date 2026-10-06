@@ -103,6 +103,12 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
       retained.push({ type: "log", log });
     }
   }
+  // A freshly opened Agent can legitimately have only one lifecycle event
+  // (for example, "工作已完成" or "正在运行"). Keep that newest event
+  // visible instead of turning a non-empty transcript into an empty timeline.
+  if (!retained.length && logs.length) {
+    retained.push({ type: "log", log: logs.at(-1)! });
+  }
   return retained;
 }
 
@@ -182,10 +188,13 @@ function CollapsedActivityGroup({ item, status, provider, providerLabel, provide
 
 function minimalActivities(logs: readonly unknown[], provider: string, status: string) {
   const normalized = normalizeActivityLogs(logs);
+  const hasUsefulActivity = normalized.some((log) => !isRoutineActivityStatus(log));
   const latest = [...normalized].reverse().find((log) => !isRoutineActivityStatus(log));
   const visible: ActivityViewLog[] = [];
   for (const log of normalized) {
-    if (isRoutineActivityStatus(log)) continue;
+    // Routine status entries stay out of a busy timeline, but when they are
+    // the only available evidence they are the most useful thing to show.
+    if (hasUsefulActivity && isRoutineActivityStatus(log)) continue;
     const displayLog = log.category === "reasoning"
       ? { ...log, title: "思考", text: "", detail: undefined, transient: isLiveTimeline(status) && log.phase === "running" && latest?.id === log.id }
       : { ...log, title: activityActionLabel(log, provider) };
@@ -306,7 +315,7 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
       {(query || categoryFilter !== "all" || phaseFilter !== "all") && <button type="button" title="清除筛选" aria-label="清除筛选" onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("all"); }}><X size={13} /></button>}
     </div>}
     {hasFilters && <p className="activity-timeline-result-count" role="status">匹配 {filteredLogs.length} / {normalizedLogs.length} 条活动</p>}
-    {!items.length && normalizedLogs.length > 0 && <p className="activity-timeline-no-results" role="status">没有匹配的活动</p>}
+    {!items.length && normalizedLogs.length > 0 && <p className="activity-timeline-no-results" role="status">{hasFilters ? "没有匹配的活动" : "暂无可展示的活动"}</p>}
     <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""} ${externalScrollRef ? "external-scroll" : ""}`} ref={externalScrollRef ? listRef : localScrollRef}>
       {virtualized
         ? <div className="activity-virtual-content" style={{ height: `${virtualizer.getTotalSize()}px` }}>
