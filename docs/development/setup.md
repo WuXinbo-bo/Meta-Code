@@ -2,16 +2,16 @@
 
 ## Requirements
 
-- Windows 10/11（主要支持和发布验证平台）
-- Node.js 22+
+- Windows 10/11、macOS 13+（Apple Silicon 或 Intel）
+- Node.js 24+
 - npm
 - One supported Agent CLI for end-to-end execution tests
 
-macOS 和 Linux 当前支持从源码运行，但属于实验性平台，暂未提供官方安装包或完整的发布验证。macOS 可使用仓库根目录的 `npm run start:macos` 启动脚本；Linux 使用下面的 `npm run dev`。
+macOS 可使用仓库根目录的 `npm run start:macos` 启动脚本，也可以使用 `npm run desktop:package:dir` 生成当前架构的 `.app` 解包目录。Linux 当前支持从源码运行；桌面打包暂不提供 Linux 目标。
 
 ## Start
 
-```powershell
+```bash
 npm install
 npm run dev
 ```

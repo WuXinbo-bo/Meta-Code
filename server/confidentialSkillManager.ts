@@ -37,8 +37,7 @@ export class ConfidentialSkillManager {
   }
 
   private publicKey() {
-    const keyFile = process.env.SKILL_SIGNING_PUBLIC_KEY_FILE ||
-      (process.platform === "win32" ? path.join(this.runtimeDir, "skill-signing-public.pem") : "/etc/meta-workbench/skill-signing-public.pem");
+    const keyFile = process.env.SKILL_SIGNING_PUBLIC_KEY_FILE || path.join(this.runtimeDir, "skill-signing-public.pem");
     if (!fs.existsSync(keyFile)) throw new Error("尚未配置 Skill 签名公钥，不能发布新版本");
     return fs.readFileSync(keyFile, "utf8");
   }

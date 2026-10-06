@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, screen } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
@@ -39,6 +39,74 @@ function runtimeRoot() {
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+}
+
+function windowBounds(saved) {
+  saved = saved && typeof saved === "object" ? saved : {};
+  const width = Math.max(900, Number(saved.width) || 1440);
+  const height = Math.max(640, Number(saved.height) || 900);
+  if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return { width, height };
+  const candidate = { x: Number(saved.x), y: Number(saved.y), width, height };
+  const visible = screen.getAllDisplays().some((display) => {
+    const area = display.workArea;
+    return candidate.x < area.x + area.width && candidate.x + candidate.width > area.x
+      && candidate.y < area.y + area.height && candidate.y + candidate.height > area.y;
+  });
+  if (visible) return candidate;
+  const area = screen.getPrimaryDisplay().workArea;
+  return {
+    width: Math.min(width, area.width),
+    height: Math.min(height, area.height),
+    x: area.x + Math.max(0, Math.floor((area.width - Math.min(width, area.width)) / 2)),
+    y: area.y + Math.max(0, Math.floor((area.height - Math.min(height, area.height)) / 2))
+  };
+}
+
+async function cleanupStaleBackend() {
+  const state = readJson(runtimeStateFile, null);
+  if (!state || state.productId !== PRODUCT_ID || state.launcherPid === process.pid) return;
+  const backendPid = Number(state.backendPid);
+  const runtimeMatches = !state.runtimeRoot || path.resolve(String(state.runtimeRoot)) === path.resolve(runtimeRoot());
+  if (runtimeMatches && Number.isInteger(backendPid) && backendPid > 0 && backendPid !== process.pid) {
+    try {
+      process.kill(backendPid, 0);
+      process.kill(backendPid, "SIGTERM");
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        try { process.kill(backendPid, 0); } catch { break; }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      try { process.kill(backendPid, 0); process.kill(backendPid, "SIGKILL"); } catch { /* Exited after graceful shutdown. */ }
+    } catch { /* The previous backend is already gone or belongs to another process. */ }
+  }
+  await fsp.rm(runtimeStateFile, { force: true }).catch(() => undefined);
+}
+
+function installApplicationMenu() {
+  if (process.platform !== "darwin") {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    {
+      label: PRODUCT_NAME,
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" }
+      ]
+    },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
+    { role: "help", submenu: [{ label: "Meta Code 帮助", click: () => void shell.openExternal("https://github.com/WuXinbo-bo/Meta-Code") }] }
+  ]));
 }
 
 async function writeJsonAtomic(file, value) {
@@ -163,18 +231,17 @@ function recoveryHtml(message) {
 
 function createWindow() {
   const saved = readJson(windowStateFile, {});
+  const iconPath = process.platform === "darwin" ? path.join(runtimeRoot(), "public", "meta-code-mark.png") : path.join(runtimeRoot(), "public", "workbench.ico");
+  const bounds = windowBounds(saved);
   mainWindow = new BrowserWindow({
     title: PRODUCT_NAME,
-    width: Number(saved.width) || 1440,
-    height: Number(saved.height) || 900,
-    x: Number.isFinite(saved.x) ? saved.x : undefined,
-    y: Number.isFinite(saved.y) ? saved.y : undefined,
+    ...bounds,
     minWidth: 980,
     minHeight: 680,
     show: false,
     backgroundColor: "#ffffff",
-    autoHideMenuBar: true,
-    icon: path.join(runtimeRoot(), "public", "workbench.ico"),
+    autoHideMenuBar: process.platform !== "darwin",
+    ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -182,7 +249,8 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs")
     }
   });
-  Menu.setApplicationMenu(null);
+  mainWindow.once("closed", () => { mainWindow = null; });
+  installApplicationMenu();
   mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
     try {
       const target = new URL(details.url);
@@ -423,9 +491,12 @@ async function runHeadlessRestoreTest() {
 }
 
 async function boot() {
-  createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   try {
-    await startBackend();
+    if (!backend || backend.exitCode !== null || !backendPort) {
+      await cleanupStaleBackend();
+      await startBackend();
+    }
     await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`);
     if (!TEST_HEADLESS) mainWindow.show();
     if (TEST_HEADLESS && process.env.METACODE_DESKTOP_TEST_RESTORE === "1") {
@@ -448,13 +519,16 @@ const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 else {
   app.on("second-instance", () => {
-    if (!mainWindow) return;
+    if (!mainWindow) { void boot().catch(showFailure); return; }
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
   });
   app.whenReady().then(boot).catch(showFailure);
-  app.on("activate", () => { if (mainWindow) mainWindow.show(); });
+  app.on("activate", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    else void boot().catch(showFailure);
+  });
   app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
   app.on("before-quit", (event) => {
     if (allowQuit) return;

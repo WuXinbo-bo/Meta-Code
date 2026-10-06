@@ -71,14 +71,26 @@ export async function extractZipSafely(file: string, destination: string) {
   });
 }
 
-export async function extractTarSafely(file: string, destination: string) {
+export async function extractTarSafely(file: string, destination: string, options: { allowSafeSymlinks?: boolean } = {}) {
   const accepted = new Set<string>();
+  const links: Array<{ relative: string; target: string }> = [];
   await tar.t({
     file,
     strict: true,
     onentry: (entry) => {
       const relative = safeArchiveEntryPath(entry.path);
-      if (["SymbolicLink", "Link"].includes(entry.type)) throw new Error(`TAR 不允许链接条目：${entry.path}`);
+      if (["SymbolicLink", "Link"].includes(entry.type)) {
+        if (!options.allowSafeSymlinks) throw new Error(`TAR 不允许链接条目：${entry.path}`);
+        const linkpath = String(entry.linkpath || "");
+        if (!linkpath || linkpath.startsWith("/") || /^[a-z]:/i.test(linkpath)) throw new Error(`TAR 链接目标非法：${entry.path}`);
+        const destinationPathValue = destinationPath(destination, relative);
+        const resolvedTarget = path.resolve(path.dirname(destinationPathValue), linkpath);
+        const boundary = `${path.resolve(destination)}${path.sep}`;
+        if (resolvedTarget !== path.resolve(destination) && !resolvedTarget.startsWith(boundary)) throw new Error(`TAR 链接目标越界：${entry.path}`);
+        links.push({ relative, target: linkpath });
+        accepted.add(relative);
+        return;
+      }
       destinationPath(destination, relative);
       accepted.add(relative);
     }
@@ -94,6 +106,12 @@ export async function extractTarSafely(file: string, destination: string) {
       return accepted.has(relative) && !("type" in entry && ["SymbolicLink", "Link"].includes(entry.type));
     }
   });
+  for (const link of links) {
+    const target = destinationPath(destination, link.relative);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.rm(target, { force: true, recursive: true });
+    await fsp.symlink(link.target, target);
+  }
 }
 
 export function inferredArchiveKind(url: string): "zip" | "tar.gz" | "raw" {

@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import type { CodexLinkThread, CodexLinkThreadRead } from "./types.js";
+import { registerProcessTree, terminateProcessTree } from "../processTree.js";
 
 type JsonObject = Record<string, unknown>;
 export type CodexAppServerInbound =
@@ -80,6 +82,7 @@ export class CodexAppServerClient {
   private requestId = 0;
   private pending = new Map<number, PendingRequest>();
   private initialization: Promise<void> | null = null;
+  private readonly processOwnerId = `codex-app-server:${randomUUID()}`;
 
   constructor(
     private readonly executable: string,
@@ -182,7 +185,10 @@ export class CodexAppServerClient {
     const process = this.process;
     this.process = null;
     this.initialization = null;
-    if (process && !process.killed) process.kill();
+    // The app-server can launch helper processes of its own.  Spawn it as a
+    // detached process group and terminate the group so macOS/Linux do not
+    // leave those helpers behind when the linked client is recreated.
+    if (process && process.exitCode === null) terminateProcessTree(process);
     this.rejectPending(new Error("Codex App Server 已关闭"));
   }
 
@@ -205,9 +211,11 @@ export class CodexAppServerClient {
       cwd: this.codexHome,
       env: { ...process.env, CODEX_HOME: this.codexHome },
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== "win32"
     });
     this.process = child;
+    registerProcessTree(this.processOwnerId, child);
     const lines = readline.createInterface({ input: child.stdout });
     lines.on("line", (line) => this.receive(line));
     child.stderr.resume();
@@ -216,7 +224,12 @@ export class CodexAppServerClient {
       this.initialization = null;
       this.rejectPending(new Error(`Codex App Server 已退出 (${code ?? signal ?? "unknown"})`));
     });
-    child.once("error", (error) => this.rejectPending(error));
+    child.once("error", (error) => {
+      if (this.process === child) this.process = null;
+      this.initialization = null;
+      this.rejectPending(error);
+      terminateProcessTree(child);
+    });
     await this.sendRequest("initialize", {
       clientInfo: {
         name: "meta_code_workbench",

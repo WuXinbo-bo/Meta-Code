@@ -21,6 +21,7 @@
     "dev:server:watch": "node --watch --import tsx scripts/start-dev-server.mjs",
     "dev:web": "vite --host 127.0.0.1",
     "start:macos": "bash scripts/start-workbench-macos.sh",
+    "test:macos-launcher": "node scripts/test-start-workbench-macos.mjs",
     "build": "tsc -b && vite build",
     "start": "node dist-server/index.js",
     "build:folder-picker": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-folder-picker.ps1",

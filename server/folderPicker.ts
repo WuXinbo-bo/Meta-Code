@@ -35,12 +35,19 @@ export async function pickFolder(initialPath = "", title = "选择 Meta Code Age
   }
 
   if (process.platform === "darwin") {
-    const { stdout } = await execFileAsync(
-      "osascript",
-      ["-e", `POSIX path of (choose folder with prompt "${title.replaceAll('"', '\\"')}")`],
-      { encoding: "utf8" }
-    );
-    return stdout.trim() || null;
+    const appleScriptString = (value: string) => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replace(/[\r\n]+/g, " ")}"`;
+    const location = existingInitialPath ? ` default location POSIX file ${appleScriptString(existingInitialPath)}` : "";
+    try {
+      const { stdout } = await execFileAsync(
+        "osascript",
+        ["-e", `POSIX path of (choose folder with prompt ${appleScriptString(title)}${location})`],
+        { encoding: "utf8" }
+      );
+      return stdout.trim() || null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "-128" || /User canceled|用户取消|不允许操作/i.test(String((error as Error).message || ""))) return null;
+      throw error;
+    }
   }
 
   const args = ["--file-selection", "--directory", `--title=${title}`];

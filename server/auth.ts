@@ -245,8 +245,7 @@ export function createAuth(runtimeDir: string) {
   };
 
   const authEncryptionKey = () => {
-    const keyFile = process.env.AUTH_ENCRYPTION_KEY_FILE ||
-      (process.platform === "win32" ? path.join(runtimeDir, "auth-encryption.key") : "/etc/meta-workbench/auth-encryption.key");
+    const keyFile = process.env.AUTH_ENCRYPTION_KEY_FILE || path.join(runtimeDir, "auth-encryption.key");
     const encoded = process.env.AUTH_ENCRYPTION_KEY || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, "utf8").trim() : "");
     const key = Buffer.from(encoded, "base64");
     if (key.length !== 32) throw new Error("管理员二次验证加密密钥尚未配置");

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveClaudeCommand } from "../engines/claude/runtime.js";
@@ -9,6 +10,15 @@ import { assertCodexMcpConfiguration } from "./codexCompatibility.js";
 const execFileAsync = promisify(execFile);
 
 function globalCommandCandidates(command: string) {
+  const home = os.homedir();
+  const nvmVersionBins = (() => {
+    if (process.platform === "win32") return [];
+    try {
+      return fs.readdirSync(path.join(home, ".nvm", "versions", "node"), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(home, ".nvm", "versions", "node", entry.name, "bin"));
+    } catch { return []; }
+  })();
   const prefixes = [
     process.env.npm_config_prefix || "",
     process.env.NPM_CONFIG_PREFIX || "",
@@ -16,14 +26,34 @@ function globalCommandCandidates(command: string) {
     process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "npm") : "",
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".npm-global", "bin") : "",
     process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".local", "bin") : "",
-    process.platform === "win32" ? path.dirname(process.execPath) : ""
+    process.platform === "win32" ? path.dirname(process.execPath) : "",
+    process.platform !== "win32" ? path.join(home, ".local", "bin") : "",
+    process.platform !== "win32" ? path.join(home, "bin") : "",
+    process.platform !== "win32" ? path.join(home, ".npm-global", "bin") : "",
+    process.platform !== "win32" ? path.join(home, ".volta", "bin") : "",
+    process.platform !== "win32" ? path.join(home, ".nvm", "current", "bin") : "",
+    ...nvmVersionBins,
+    process.platform !== "win32" ? path.join(home, ".asdf", "shims") : "",
+    process.platform !== "win32" ? path.join(home, ".local", "share", "mise", "shims") : "",
+    process.platform === "darwin" ? path.join(home, "Library", "pnpm") : "",
+    process.platform === "darwin" ? "/usr/local/bin" : "",
+    process.platform === "darwin" ? "/opt/homebrew/bin" : "",
+    process.platform === "darwin" ? "/opt/homebrew/sbin" : ""
   ].filter(Boolean);
   return prefixes.flatMap((prefix) => process.platform === "win32"
     ? [path.join(prefix, `${command}.exe`), path.join(prefix, `${command}.cmd`)]
     : [path.join(prefix, command)]);
 }
 
-async function commandOnPath(command: string) {
+function macCodexCandidates() {
+  if (process.platform !== "darwin") return [];
+  return [
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    path.join(os.homedir(), "Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+  ];
+}
+
+export async function commandOnPath(command: string) {
   const candidates = globalCommandCandidates(command);
   try {
     const resolver = process.platform === "win32" ? "where.exe" : "which";
@@ -45,7 +75,8 @@ function codexCandidates(root: string) {
   ];
   if (process.platform === "darwin") return [
     path.join(base, "codex-darwin-arm64", "vendor", "aarch64-apple-darwin", "bin", "codex"),
-    path.join(base, "codex-darwin-x64", "vendor", "x86_64-apple-darwin", "bin", "codex")
+    path.join(base, "codex-darwin-x64", "vendor", "x86_64-apple-darwin", "bin", "codex"),
+    path.join(root, "node_modules", ".bin", "codex")
   ];
   return [
     path.join(root, "node_modules", ".bin", "codex"),
@@ -109,7 +140,7 @@ export const CLI_REGISTRY: Record<string, CliDefinition> = {
     distribution: { kind: "npm", packageName: "@openai/codex", defaultVersion: "latest" },
     executableCandidates: codexCandidates,
     bundledRoots: (projectRoot) => [projectRoot],
-    systemCandidates: () => commandOnPath("codex"),
+    systemCandidates: async () => [...await commandOnPath("codex"), ...macCodexCandidates()],
     probe: (candidate) => probeExecutable(candidate),
     validateInstallation: validateCodexInstallation
   },

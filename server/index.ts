@@ -31,7 +31,7 @@ import { classifyClaudeFailure } from "./engines/claude/transport.js";
 import { settleSupersededReasoning } from "./activity/lifecycle.js";
 import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexContextCompactionNotice, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
-import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
+import { assertPathInsideRoot, isPathInside, pathKey } from "./pathBoundary.js";
 import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, isNativeAgentProjection, mergeAgentRuntimeStatus, nativeAgentMessageCanReuse, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
 import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
@@ -7959,7 +7959,7 @@ app.get("/api/admin/audit", staffRead, (req, res) => {
 });
 
 app.get("/api/admin/logs", staffRead, async (_req, res) => {
-  const logPath = process.platform === "win32" ? path.join(RUNTIME_DIR, "server-err.log") : "/var/log/meta-workbench.log";
+  const logPath = [path.join(APP_PATHS.logsDir, "server-err.log"), path.join(APP_PATHS.logsDir, "desktop-backend.log")].find((candidate) => fs.existsSync(candidate)) || path.join(APP_PATHS.logsDir, "server-err.log");
   try {
     const stat = await fsp.stat(logPath);
     const bytes = Math.min(stat.size, 512 * 1024);
@@ -8217,9 +8217,10 @@ app.post("/api/admin/server/:action", adminOnly, async (req, res) => {
       }
       result = { removed };
     } else if (action === "rotate_logs") {
-      const logPath = process.platform === "win32" ? path.join(RUNTIME_DIR, "server-err.log") : "/var/log/meta-workbench.log";
-      const rotated = `${logPath}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
-      if (fs.existsSync(logPath)) { await fsp.copyFile(logPath, rotated); await fsp.truncate(logPath, 0); }
+      const logPath = path.join(APP_PATHS.logsDir, "server-err.log");
+      const existingLogPath = fs.existsSync(logPath) ? logPath : path.join(APP_PATHS.logsDir, "desktop-backend.log");
+      const rotated = `${existingLogPath}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      if (fs.existsSync(existingLogPath)) { await fsp.copyFile(existingLogPath, rotated); await fsp.truncate(existingLogPath, 0); }
       result = { rotated: path.basename(rotated) };
     } else if (action === "restart_app") {
       result = { restarting: true };
@@ -10202,7 +10203,7 @@ async function restoreWorkspaceFromTrash(ownerUserId: string, workspaceTrashId: 
   const workspace = trash.snapshot.workspace as unknown as Workspace;
   if (workspace.id !== trash.workspaceId || workspace.ownerUserId !== ownerUserId) throw new Error("工作区恢复快照归属校验失败");
   const existing = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id === workspace.id);
-  const pathConflict = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id !== workspace.id && path.resolve(item.root).toLowerCase() === path.resolve(workspace.root).toLowerCase());
+  const pathConflict = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id !== workspace.id && pathKey(item.root) === pathKey(workspace.root));
   if (pathConflict) throw new Error(`工作区路径已由“${pathConflict.name}”使用`);
   if (!existing) {
     state.workspaces.unshift(workspace);
@@ -10450,7 +10451,7 @@ function nativeCountForWorkspace(ownerUserId: string, workspace: Workspace) {
   const ids = new Set<string>();
   for (const [key, cached] of sessionNativeInventoryCache) {
     if (!key.startsWith(`${ownerUserId}:`)) continue;
-    for (const item of cached.items) if (item.workspaceId === workspace.id || item.workspacePath && path.resolve(item.workspacePath).toLowerCase() === path.resolve(workspace.root).toLowerCase()) ids.add(item.id);
+    for (const item of cached.items) if (item.workspaceId === workspace.id || item.workspacePath && pathKey(item.workspacePath) === pathKey(workspace.root)) ids.add(item.id);
   }
   return ids.size;
 }
@@ -10555,8 +10556,8 @@ app.post("/api/session-management/native/codex/:threadId/adopt", async (req, res
       const existingSession = sessionById(existingBinding.sessionId, ownerUserId);
       if (existingSession) return res.json({ session: sessionWithMessageWindow(existingSession, 80), created: false });
     }
-    const normalizedCwd = thread.cwd ? path.resolve(thread.cwd).toLowerCase() : "";
-    const workspace = state.workspaces.find((item) => item.ownerUserId === ownerUserId && normalizedCwd && path.resolve(item.root).toLowerCase() === normalizedCwd);
+    const normalizedCwd = thread.cwd ? pathKey(thread.cwd) : "";
+    const workspace = state.workspaces.find((item) => item.ownerUserId === ownerUserId && normalizedCwd && pathKey(item.root) === normalizedCwd);
     if (!workspace) return res.status(409).json({ error: "该官方线程的项目尚未加入工作台，请先添加对应工作区后再接管" });
     const now = new Date().toISOString();
     const session: Session = {
