@@ -121,6 +121,7 @@ import { DataSettings } from "./settings/DataSettings";
 import { HelpCenter } from "./help/HelpCenter";
 import { HelpButton } from "./help/HelpProvider";
 import { CURRENT_GUIDE_VERSION, FirstRunGuide } from "./onboarding/FirstRunGuide";
+import { TASK_TEMPLATES, type TaskTemplateId } from "./onboarding/taskTemplates";
 import { formatRuntimeProgressDuration, runtimeProgressElapsedMs } from "./runtimeProgress";
 import { CapabilityProfileControl } from "./chat/CapabilityProfileControl";
 import { ComposerRuntimeControl } from "./chat/ComposerRuntimeControl";
@@ -2009,26 +2010,34 @@ const PAPER_FORMATS: Array<{ value: PaperFormat; label: string; detail: string; 
   { value: "docx", label: "人工复核", detail: "输出变更摘要、风险与后续清单", prompt: "人工复核" }
 ];
 
+function TaskTemplateIcon({ id }: { id: TaskTemplateId }) {
+  if (id === "code-review") return <FileSearch size={19} />;
+  if (id === "bug-fix") return <Wrench size={19} />;
+  if (id === "test-coverage") return <ListChecks size={19} />;
+  return <RefreshCw size={19} />;
+}
+
 function TaskLaunch({ workspaceName, onPromptSelect, onOpenWorkflow }: { workspaceName: string; onPromptSelect: (prompt: string) => void; onOpenWorkflow: () => void }) {
   return (
     <section className="task-launch">
       <header className="task-launch-heading">
         <div className="task-launch-brand"><ProductLogo className="task-launch-logo" /></div>
         <h1>想在 {workspaceName || "当前工作区"} 中做些什么？</h1>
+        <p className="task-launch-subtitle">从一个可验证的目标开始，完成后你会看到修改、测试和风险说明。</p>
       </header>
 
       <div className="task-launch-actions" aria-label="常用任务">
-        <button type="button" onClick={() => onPromptSelect("请探索并理解当前工作区，梳理项目结构、核心逻辑与值得优先改进的问题。")}>
-          <Search size={19} />
-          <span>探索并理解工作区</span>
-        </button>
-        <button type="button" onClick={() => onPromptSelect("请在当前工作区中设计并实现一个新功能、应用或工具：")}>
-          <Wrench size={19} />
-          <span>构建新功能、应用或工具</span>
-        </button>
+        {TASK_TEMPLATES.map((template) => (
+          <button type="button" key={template.id} onClick={() => onPromptSelect(template.prompt)}>
+            <TaskTemplateIcon id={template.id} />
+            <span>{template.label}</span>
+            <small>{template.description}</small>
+          </button>
+        ))}
         <button type="button" onClick={onOpenWorkflow}>
           <Route size={19} />
           <span>规划复杂任务并协作执行</span>
+          <small>先审查计划，再按依赖执行</small>
         </button>
       </div>
     </section>

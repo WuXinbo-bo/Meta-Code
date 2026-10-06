@@ -13,7 +13,7 @@
     · <a href="#欢迎加入交流与贡献">交流与贡献</a>
   </p>
   <p>
-    <img alt="Version 0.1.4" src="https://img.shields.io/badge/version-0.1.4-24292f?style=flat-square" />
+    <img alt="Version 0.1.6" src="https://img.shields.io/badge/version-0.1.6-24292f?style=flat-square" />
     <img alt="Windows" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078d4?style=flat-square&amp;logo=windows11&amp;logoColor=white" />
     <img alt="Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-6f42c1?style=flat-square" />
   </p>
@@ -106,7 +106,7 @@ flowchart TB
 
 ### 从源码运行
 
-需要 Windows 10/11、Node.js 22 或更高版本以及 npm。
+Windows 10/11 是当前主要支持和发布验证平台。需要 Node.js 22 或更高版本以及 npm。
 
 ```powershell
 git clone https://github.com/WuXinbo-bo/Meta-Code.git
@@ -125,6 +125,8 @@ npm run build
 npm start
 ```
 
+macOS 和 Linux 当前支持从源码运行，属于实验性平台，尚未提供官方安装包或完整的发布验证。macOS 可在安装依赖后运行 `npm run start:macos`；Linux 可运行上面的 `npm run dev`。跨平台反馈请通过 [GitHub Issues](https://github.com/WuXinbo-bo/Meta-Code/issues) 提交，并附上系统版本与 Node.js 版本。
+
 ## 数据、安全与更新
 
 - 个人数据默认位于 `%USERPROFILE%\.metacode`，可通过 `METACODE_HOME` 修改位置。
@@ -138,10 +140,11 @@ npm start
 
 ## 当前状态
 
-Meta Code 当前版本为 `0.1.4`，主要面向 Windows 本地单用户环境。
+Meta Code 当前版本为 `0.1.6`，主要面向 Windows 本地单用户环境。
 
 - Codex 与 Claude 使用原生增强路径。
 - 第三方 Provider 的具体能力取决于其 ACP 实现和运行时能力协商。
+- Windows 10/11 是当前主要支持平台；macOS 和 Linux 支持源码运行，仍处于实验阶段。
 - 应用内更新当前提供检查与发布公告，下载后由用户启动安装程序。
 - 项目仍处于早期版本，接口和交互会继续迭代。
 
@@ -184,6 +187,7 @@ npm run build
 - [贡献指南](./CONTRIBUTING.md)
 - [架构文档](./docs/architecture/)
 - [用户指南](./docs/user-guide/)
+- [产品方向与优化路线](./docs/product-direction.md)
 - [变更记录](./CHANGELOG.md)
 
 ## License
