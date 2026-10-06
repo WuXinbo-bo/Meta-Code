@@ -14,7 +14,9 @@ assert.match(app, /if \(loading\) \{\s*rerunRequested = true;/, "drawer refreshe
 assert.match(app, /\[sessionId, selectedAgentSummary\?\.id, selectedAgentSummary\?\.identityKey, selectedAgentSummary\?\.identity\?\.key, selectedAgentSummary\?\.provider\]/, "session status changes must not abort the active detail request");
 assert.match(app, /hasNonEmptySummaryRef/, "partially written empty snapshots must preserve the last usable summary");
 assert.match(app, /agentOrderRef/, "Agent navigation order must remain stable while timestamps advance");
-assert.match(app, /detailForSelection\.id === selectedAgentSummary\?\.id/, "late detail responses must match the selected Agent identity");
+assert.match(app, /function agentDetailMatchesSummary/, "late detail responses must match the selected Agent identity");
+assert.match(app, /agentDetailMatchesSummary\(detailForSelection, selectedAgentSummary\)/, "late detail responses must match the selected Agent identity");
+assert.match(app, /\?provider=\$\{encodeURIComponent\(provider\)\}/, "identity rotation must have a provider-qualified fallback");
 assert.match(server, /mergeAgentThreads\(nativeWithIdentity, managed, persisted\)/, "agent reads must merge canonical snapshots without write-side effects");
 assert.match(server, /if \(native\.length\) syncNativeAgentMessages\(session, native\);/, "native projection is owned by the background reconciler");
 assert.doesNotMatch(server, /syncNativeAgentMessages\(session, merged\)/);
