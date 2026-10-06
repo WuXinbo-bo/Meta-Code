@@ -14,6 +14,8 @@ type Props = {
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   showProvider?: boolean;
+  showFilters?: boolean;
+  hiddenCategories?: readonly import("./activityModel").ActivityCategory[];
   emptyText?: string;
   className?: string;
   loading?: boolean;
@@ -140,14 +142,14 @@ class AgentConversationBoundary extends Component<{ resetKey: string; children: 
   }
 }
 
-export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, emptyText = "尚无活动日志", className = "", loading = false, error = "", scrollRef }: Props) {
+export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], emptyText = "尚无活动日志", className = "", loading = false, error = "", scrollRef }: Props) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   const version = agentStreamVersion(safeLogs);
   return <div className={`agent-conversation-stream ${className}`.trim()}>
     {error && <p className="agent-conversation-notice" role="status">{error}，正在自动重试。{safeLogs.length > 0 ? "已有日志仍可查看。" : ""}</p>}
     <AgentConversationBoundary resetKey={version}>
       {safeLogs.length
-        ? <ActivityTimeline logs={safeLogs} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} scrollRef={scrollRef} />
+        ? <ActivityTimeline logs={safeLogs} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} showFilters={showFilters} hiddenCategories={hiddenCategories} scrollRef={scrollRef} />
         : !error && <p className="agent-conversation-empty" role="status">{loading ? "正在读取活动日志…" : emptyText}</p>}
     </AgentConversationBoundary>
   </div>;

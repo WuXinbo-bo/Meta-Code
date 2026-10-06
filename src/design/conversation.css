@@ -821,6 +821,8 @@
 .agent-drawer-title strong { color: var(--mc-text); font-size: 13px; }
 .agent-drawer-title small { color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-drawer-body { grid-row: 3; padding: 12px 18px 28px; }
+.agent-drawer-progress { margin-top: 0; }
+.agent-drawer-progress.syncing { border-color: var(--mc-line); background: var(--mc-surface-subtle); color: var(--mc-text-tertiary); }
 .agent-drawer-new-activity { position: absolute; z-index: 4; right: 18px; bottom: 18px; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border: 1px solid var(--mc-line-strong); border-radius: 999px; background: var(--mc-surface); color: var(--mc-text-secondary); box-shadow: 0 4px 14px color-mix(in srgb, var(--mc-shadow) 35%, transparent); font-size: 11px; cursor: pointer; }
 .agent-drawer-navigation { grid-row: 2; min-width: 0; }
 .agent-drawer-navigation:empty { display: none; }

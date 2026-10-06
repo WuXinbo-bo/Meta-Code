@@ -133,6 +133,7 @@ import { GitWorkbench } from "./git/GitWorkbench";
 import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
 import type { AgentProviderDescriptor } from "./agents/types";
+import { normalizeAgentDisplayStatus, selectAgentDisplaySnapshot } from "./agents/agentDisplayState";
 import type { ProviderControlSnapshot } from "./providers/types";
 import { providerMainAgentUnavailableReason } from "./providers/display";
 import {
@@ -706,6 +707,7 @@ type SubagentInfo = {
   isSubagent: boolean;
   action: string;
   agentIds: string[];
+  identityKey?: string;
   nickname?: string;
   agentType?: string;
   provider?: string;
@@ -848,6 +850,10 @@ function subagentInfo(message: Message): SubagentInfo {
     message.eventType === "subagent";
 
   const directAgentId = typeof payload?.agent_id === "string" ? payload.agent_id : typeof payload?.agentId === "string" ? payload.agentId : "";
+  const payloadIdentity = asRecord(payload?.identity);
+  const identityKey = typeof payload?.identityKey === "string" && payload.identityKey.trim()
+    ? payload.identityKey.trim()
+    : typeof payloadIdentity?.key === "string" && payloadIdentity.key.trim() ? payloadIdentity.key.trim() : firstDeepString(message.payload, ["identityKey"]);
   const idValues = [directAgentId, ...collectDeepValues(message.payload, new Set([
     "agent_id",
     "agentId",
@@ -898,6 +904,7 @@ function subagentInfo(message: Message): SubagentInfo {
     isSubagent,
     action,
     agentIds,
+    identityKey,
     nickname,
     agentType,
     provider,
@@ -1560,8 +1567,11 @@ function SubagentDrawer({
   const agentOrderRef = useRef<string[]>([]);
   sessionRunningRef.current = sessionRunning;
 
-  const agentMatchesInfo = useCallback((agent: AgentThread, ids: string[]) => {
-    if (!ids.length) return false;
+  const agentMatchesInfo = useCallback((agent: AgentThread, ids: string[], provider?: string, identityKey?: string) => {
+    const normalizedProvider = provider?.trim().toLowerCase();
+    if (normalizedProvider && agent.provider && agent.provider.toLowerCase() !== normalizedProvider) return false;
+    if (identityKey && identityKey !== agent.identityKey && identityKey !== agent.identity?.key) return false;
+    if (!ids.length) return Boolean(identityKey);
     return ids.includes(agent.id)
       || ids.includes(agent.identityKey || "")
       || ids.includes(agent.identity?.agentId || "");
@@ -1622,7 +1632,7 @@ function SubagentDrawer({
           }
           startTransition(() => {
             setAgentThreads(agents);
-            const preferred = agents.find((agent) => agentMatchesInfo(agent, info.agentIds));
+            const preferred = agents.find((agent) => agentMatchesInfo(agent, info.agentIds, info.provider, info.identityKey));
             // A drawer opened from a message must never silently jump to an
             // unrelated first Agent when the server is still reconciling IDs.
             const preferredId = preferred ? agentSelectionKey(preferred) : agents.length === 1 ? agentSelectionKey(agents[0]) : "";
@@ -1694,10 +1704,10 @@ function SubagentDrawer({
     setSelectedAgentId((current) => orderedAgentThreads.some((agent) => agentSelectionKey(agent) === current)
       ? current
       : (() => {
-        const preferred = orderedAgentThreads.find((agent) => agentMatchesInfo(agent, info.agentIds));
+        const preferred = orderedAgentThreads.find((agent) => agentMatchesInfo(agent, info.agentIds, info.provider, info.identityKey));
         return preferred ? agentSelectionKey(preferred) : orderedAgentThreads.length === 1 ? agentSelectionKey(orderedAgentThreads[0]) : "";
       })());
-  }, [orderedAgentThreads, info.agentIds.join("|"), agentMatchesInfo]);
+  }, [orderedAgentThreads, info.agentIds.join("|"), info.identityKey, info.provider, agentMatchesInfo]);
   const selectedAgentSummary = orderedAgentThreads.find((agent) => agentSelectionKey(agent) === selectedAgentId);
   useEffect(() => {
     if (!selectedAgentSummary) {
@@ -1808,8 +1818,14 @@ function SubagentDrawer({
     && (!selectedAgentSummary?.identityKey || detailForSelection.identityKey === selectedAgentSummary.identityKey)
     && (!selectedAgentSummary?.provider || !detailForSelection.provider || detailForSelection.provider === selectedAgentSummary.provider)
     ? detailForSelection : null;
-  const selectedAgent = currentAgentDetail || selectedAgentSummary;
-  const selectedAgentLogs = useMemo(() => (currentAgentDetail?.logs || selectedAgentSummary?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)), [currentAgentDetail?.logs, selectedAgentSummary?.logs]);
+  const selectedAgent = selectAgentDisplaySnapshot(currentAgentDetail, selectedAgentSummary);
+  const selectedAgentLogs = useMemo(() => {
+    // Summary responses intentionally omit logs. Keep a cached detail stream
+    // available while its status snapshot is being refreshed, but let the
+    // freshest snapshot decide the header state.
+    const source = currentAgentDetail?.logs?.length ? currentAgentDetail.logs : selectedAgentSummary?.logs || [];
+    return source.map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  }, [currentAgentDetail?.logs, selectedAgentSummary?.logs]);
   const related = useMemo(() => messages.filter((candidate) => {
     const candidateInfo = subagentInfo(candidate);
     if (!candidateInfo.isSubagent) return false;
@@ -1821,7 +1837,8 @@ function SubagentDrawer({
     [related, message]
   );
   const title = selectedAgent?.nickname || info.nickname || info.agentType || "子 Agent";
-  const drawerStatus = selectedAgent?.status || info.status;
+  const drawerStatus = normalizeAgentDisplayStatus(selectedAgent?.status || info.status);
+  const drawerDetailPending = Boolean(selectedAgentSummary && !currentAgentDetail && agentDetailLoading);
   const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, selectedAgent ? selectedAgentLogs.length : logs.length);
   const selectedIdentityKey = selectedAgent?.identityKey || selectedAgent?.identity?.key || selectedAgent?.id || selectedAgentId;
   const candidateProvider = selectedAgent?.identity?.providerId || selectedAgent?.provider || selectedAgentSummary?.identity?.providerId || selectedAgentSummary?.provider;
@@ -1839,7 +1856,7 @@ function SubagentDrawer({
             <span className={`subagent-mark ${drawerProvider || "agent"}`}>{drawerProvider ? <ProviderIcon provider={drawerProvider} icon={drawerProviderControl?.identity.icon} accent={drawerProviderControl?.identity.accent} size={18} /> : <Bot size={18} />}</span>
             <span>
               <strong>{title}<em className={`agent-provider-badge ${drawerProvider || "agent"}`}>{agentProviderLabel(drawerProvider)}</em></strong>
-              <small>{subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条活动{selectedAgent ? ` · ${formatTokens(usageTotal(selectedAgent.usage))} tokens` : ""}</small>
+              <small><i className={`agent-live-indicator ${drawerStatus === "running" ? "active" : ""}`} aria-hidden="true" />{subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条活动{selectedAgent ? ` · ${formatTokens(usageTotal(selectedAgent.usage))} tokens` : ""}</small>
             </span>
           </div>
           <IconButton label="关闭子 Agent 日志" onClick={onClose}><X size={18} /></IconButton>
@@ -1861,6 +1878,9 @@ function SubagentDrawer({
               ))}
             </nav>
           )}>
+          {drawerStatus === "running"
+            ? <div className="agent-drawer-progress" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>子 Agent 正在工作，日志实时更新</span></div>
+            : drawerDetailPending && <div className="agent-drawer-progress syncing" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>正在同步子 Agent 日志…</span></div>}
           {(selectedAgent?.task || info.task) && (
             <AgentTaskDescription key={selectedAgentId} title="委派任务" text={selectedAgent?.task || info.task || ""} />
           )}
@@ -1869,7 +1889,7 @@ function SubagentDrawer({
               <AgentConversation
                 key={selectedAgentId}
                 scrollRef={followOutput.containerRef}
-                loading={agentThreads === null || agentDetailLoading || (!!selectedAgent && !currentAgentDetail)}
+                loading={agentThreads === null || (agentDetailLoading && !selectedAgentLogs.length && !logs.length)}
                 error={agentListError || agentDetailError}
                 logs={selectedAgent ? selectedAgentLogs : logs.map(eventActivityLog)}
                 status={selectedAgent?.status || drawerStatus}
@@ -1880,6 +1900,8 @@ function SubagentDrawer({
                 messageLabel="子 Agent"
                 workspaceId={workspaceId}
                 showProvider={false}
+                showFilters={false}
+                hiddenCategories={["search"]}
                 renderMessage={(text: string) => <MarkdownBody text={text} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} />}
               />
             </div>
