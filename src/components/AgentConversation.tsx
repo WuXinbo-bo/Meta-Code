@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useLayoutEffect, useRef, type ErrorInfo, type ReactNode, type UIEvent } from "react";
+import { Component, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode, type UIEvent } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { ActivityTimeline } from "./ActivityTimeline";
 import { agentStreamVersion } from "./activityModel";
@@ -26,19 +26,26 @@ export function useAgentOutputFollow(version: string, identity = "") {
   const contentRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const scrollIntentRef = useRef(0);
+  const [following, setFollowing] = useState(true);
+  const [pendingCount, setPendingCount] = useState(0);
   const scrollToBottom = useCallback(() => {
     const container = containerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
   }, []);
 
   useLayoutEffect(() => {
-    if (!followingRef.current) return;
+    if (!followingRef.current) {
+      setPendingCount((count) => count + 1);
+      return;
+    }
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
   }, [version, scrollToBottom]);
 
   useEffect(() => {
     followingRef.current = true;
+    setFollowing(true);
+    setPendingCount(0);
     scrollIntentRef.current = 0;
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
@@ -48,11 +55,20 @@ export function useAgentOutputFollow(version: string, identity = "") {
     const container = containerRef.current;
     if (!container) return;
     const markIntent = () => { scrollIntentRef.current = performance.now(); };
-    const onWheel = (event: WheelEvent) => { markIntent(); if (event.deltaY < 0) followingRef.current = false; };
+    const onWheel = (event: WheelEvent) => {
+      markIntent();
+      if (event.deltaY < 0) {
+        followingRef.current = false;
+        setFollowing(false);
+      }
+    };
     const onPointer = (event: PointerEvent) => {
       if (event.target === container || event.pointerType === "touch") markIntent();
       // Expanding details is reading history, not a request to jump to the end.
-      if ((event.target as Element).closest?.("summary")) followingRef.current = false;
+      if ((event.target as Element).closest?.("summary")) {
+        followingRef.current = false;
+        setFollowing(false);
+      }
     };
     const onKey = (event: KeyboardEvent) => {
       if (["Enter", " "].includes(event.key) && (event.target as Element).closest?.("summary")) followingRef.current = false;
@@ -89,9 +105,18 @@ export function useAgentOutputFollow(version: string, identity = "") {
     // Only user navigation may disable following; layout must not do so.
     if (!scrollIntentRef.current || performance.now() - scrollIntentRef.current > 1_500) return;
     const target = event.currentTarget;
-    followingRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
+    const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
+    followingRef.current = nearBottom;
+    setFollowing(nearBottom);
+    if (nearBottom) setPendingCount(0);
   }, []);
-  return { containerRef, contentRef, onScroll };
+  const jumpToLatest = useCallback(() => {
+    followingRef.current = true;
+    setFollowing(true);
+    setPendingCount(0);
+    scrollToBottom();
+  }, [scrollToBottom]);
+  return { containerRef, contentRef, onScroll, following, pendingCount, jumpToLatest };
 }
 
 class AgentConversationBoundary extends Component<{ resetKey: string; children: ReactNode }, { error: string }> {

@@ -15,6 +15,7 @@ export type ActivityRendererProps = {
   workspaceId?: string;
   expanded?: boolean;
   showProvider?: boolean;
+  showReasoning?: boolean;
 };
 
 function GenericActivityRenderer({ log, expanded = false }: ActivityRendererProps) {

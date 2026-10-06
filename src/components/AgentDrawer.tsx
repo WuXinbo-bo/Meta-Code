@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { ArrowDown } from "lucide-react";
 import type { useAgentOutputFollow } from "./AgentConversation";
 
 /** Shared shell; each caller retains its own execution state and controls. */
@@ -30,6 +31,9 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
     }}>
       {header}
       <div className="agent-drawer-navigation">{navigation}</div>
+      {!followOutput.following && followOutput.pendingCount > 0 && <button type="button" className="agent-drawer-new-activity" onClick={followOutput.jumpToLatest}>
+        <ArrowDown size={13} /> 新增 {followOutput.pendingCount > 99 ? "99+" : followOutput.pendingCount} 条活动
+      </button>}
       <div className="agent-drawer-body" ref={followOutput.containerRef} onScroll={followOutput.onScroll}>
         <div className="agent-drawer-content" ref={followOutput.contentRef}>{children}</div>
       </div>

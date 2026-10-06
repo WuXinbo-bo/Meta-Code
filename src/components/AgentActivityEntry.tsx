@@ -1,4 +1,4 @@
-import { Activity, Brain, Check, ChevronRight, Eye, FileCode2, PlugZap, Search, TerminalSquare, Wrench, X } from "lucide-react";
+import { Activity, Brain, Check, ChevronRight, Copy, Eye, FileCode2, PlugZap, Search, TerminalSquare, Wrench, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { AssistantReply } from "./AssistantReply";
 import { ProviderIcon } from "../branding/ProviderIcon";
@@ -9,6 +9,30 @@ export { AgentReplyContent } from "./AssistantReply";
 
 type FileDiffPreview = { path: string; available: boolean; reason: string; additions: number; deletions: number; lines: string[]; truncated: boolean; binary: boolean; scope?: "event" | "turn" | "workspace"; artifactId?: string };
 type CommandPreviewData = { command: string; cwd: string; output: string; exitCode: number | null; durationMs: number | null; status: string };
+
+type CachedFileDiff = { value: FileDiffPreview; cachedAt: number };
+const fileDiffCache = new Map<string, CachedFileDiff>();
+const FILE_DIFF_CACHE_TTL = 15_000;
+const FILE_DIFF_CACHE_LIMIT = 256;
+
+function cachedFileDiff(key: string) {
+  const entry = fileDiffCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.cachedAt > FILE_DIFF_CACHE_TTL) {
+    fileDiffCache.delete(key);
+    return undefined;
+  }
+  // Promote frequently opened files so the cap behaves as a small LRU.
+  fileDiffCache.delete(key);
+  fileDiffCache.set(key, entry);
+  return entry.value;
+}
+
+function storeFileDiff(key: string, value: FileDiffPreview) {
+  fileDiffCache.delete(key);
+  fileDiffCache.set(key, { value, cachedAt: Date.now() });
+  while (fileDiffCache.size > FILE_DIFF_CACHE_LIMIT) fileDiffCache.delete(fileDiffCache.keys().next().value!);
+}
 
 const COMMAND_OUTPUT_CHAR_LIMIT = 12_000;
 const COMMAND_OUTPUT_LINE_LIMIT = 220;
@@ -101,19 +125,26 @@ function FileChangePreview({ workspaceId, paths, eventDiffs }: { workspaceId: st
   const [artifactLoading, setArtifactLoading] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all(paths.map(async (filePath) => {
+    const cachePrefix = `${workspaceId}:`;
+    const pending = paths.map(async (filePath) => {
       const eventDiff = eventDiffs?.[filePath];
       if (eventDiff) return { path: filePath, ...eventDiff, available: eventDiff.available !== false, reason: eventDiff.reason || "" } satisfies FileDiffPreview;
+      const cacheKey = `${cachePrefix}${filePath}`;
+      const cached = cachedFileDiff(cacheKey);
+      if (cached) return cached;
       const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/file-diff?path=${encodeURIComponent(filePath)}`, { credentials: "same-origin", cache: "no-store", signal: controller.signal });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(body?.error || `无法读取 ${filePath} 的变更`);
-      return body as FileDiffPreview;
-    })).then(setPreviews).catch((reason) => {
+      const value = body as FileDiffPreview;
+      storeFileDiff(cacheKey, value);
+      return value;
+    });
+    Promise.all(pending).then(setPreviews).catch((reason) => {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
       setError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => controller.abort();
-  }, [paths.join("\n"), workspaceId, eventDiffs]);
+  }, [paths.join("\n"), workspaceId, JSON.stringify(eventDiffs || {})]);
   const loadArtifact = async (preview: FileDiffPreview) => {
     if (!preview.artifactId || artifactLoading) return;
     setArtifactLoading(preview.artifactId);
@@ -154,6 +185,7 @@ export function AgentActivityEntry({
   renderMessage,
   workspaceId,
   showProvider = true,
+  showReasoning = false,
   expanded = false
 }: {
   log: SharedAgentLog;
@@ -166,10 +198,16 @@ export function AgentActivityEntry({
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   showProvider?: boolean;
+  showReasoning?: boolean;
   expanded?: boolean;
 }) {
   const [open, setOpen] = useState(expanded);
+  const [copied, setCopied] = useState(false);
   const time = new Date(log.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const eventProvider = log.provider || log.activity?.provider || provider;
+  const eventProviderIcon = eventProvider === provider ? providerIcon : undefined;
+  const eventProviderAccent = eventProvider === provider ? providerAccent : undefined;
+  const eventProviderLabel = eventProvider === provider ? providerLabel : eventProvider === "codex" ? "Codex" : eventProvider === "claude" ? "Claude" : eventProvider;
   if (log.transient) {
     return <div className="agent-thinking-line" role="status">
       <Brain size={13} />
@@ -177,13 +215,13 @@ export function AgentActivityEntry({
       <i aria-hidden="true"><b /><b /><b /></i>
     </div>;
   }
-  if (log.kind === "reasoning" || log.category === "reasoning") {
+  if (!showReasoning && (log.kind === "reasoning" || log.category === "reasoning")) {
     return <div className="agent-thinking-line settled"><Brain size={13} /><span>思考</span></div>;
   }
   if (log.kind === "message") {
     return <AssistantReply text={log.text} renderMessage={renderMessage}
-      avatar={<ProviderIcon provider={provider} icon={providerIcon} accent={providerAccent} size={18} />}
-      heading={showProvider ? <><strong>{messageLabel || providerLabel || provider}</strong><time>{time}</time></> : undefined}
+      avatar={<ProviderIcon provider={eventProvider} icon={eventProviderIcon} accent={eventProviderAccent} size={18} />}
+      heading={showProvider ? <><strong>{messageLabel || eventProviderLabel || eventProvider}</strong><time>{time}</time></> : undefined}
     />;
   }
   const isError = log.kind === "error";
@@ -199,6 +237,7 @@ export function AgentActivityEntry({
         ? "running"
         : status;
   const icon = isError ? <X size={13} />
+    : log.category === "reasoning" ? <Brain size={13} />
     : log.category === "command" ? <TerminalSquare size={13} />
         : log.category === "file" ? <FileCode2 size={13} />
           : log.category === "read" ? <Eye size={13} />
@@ -213,6 +252,31 @@ export function AgentActivityEntry({
   const eventDiffs = log.detail && typeof log.detail === "object" && !Array.isArray(log.detail)
     ? (log.detail as Record<string, unknown>).eventDiffs as Record<string, Omit<FileDiffPreview, "path">> | undefined
     : undefined;
+  const copyEventId = async () => {
+    const eventId = log.activity?.id || log.id;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(eventId);
+      } else {
+        const input = document.createElement("textarea");
+        input.value = eventId;
+        input.setAttribute("readonly", "true");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        try {
+          input.select();
+          if (!document.execCommand("copy")) throw new Error("copy failed");
+        } finally {
+          input.remove();
+        }
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      setCopied(false);
+    }
+  };
   return <details className={`agent-stream-event activity-visual-${visualTier} ${log.kind} category-${log.category || "status"} phase-${phase}`} open={expanded || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>
       <span className={`agent-event-icon ${entryStatus}`}>{icon}</span>
@@ -225,6 +289,7 @@ export function AgentActivityEntry({
         : <p>{log.text || "状态已更新"}</p>}
       {workspaceId && changedPaths.length > 0 && <FileChangePreview workspaceId={workspaceId} paths={changedPaths} eventDiffs={eventDiffs} />}
       {!command && log.detail !== undefined && <details><summary>技术详情</summary><pre>{JSON.stringify(log.detail, null, 2)}</pre></details>}
+      <button type="button" className="agent-event-copy-link" onClick={() => void copyEventId()}><Copy size={12} />{copied ? "已复制事件 ID" : "复制事件 ID"}</button>
     </div>}
   </details>;
 }

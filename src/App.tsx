@@ -722,6 +722,7 @@ type AgentLog = {
   category?: string;
   phase?: "started" | "running" | "completed" | "failed";
   detail?: unknown;
+  provider?: string;
   activity?: SharedAgentLog["activity"];
 };
 type AgentThread = {
@@ -734,6 +735,16 @@ type AgentThread = {
   usage: Usage;
   logs: AgentLog[];
   provider?: string;
+  /** Canonical identity is assigned by the server when the run is created. */
+  identityKey?: string;
+  identity?: {
+    key: string;
+    agentId?: string;
+    providerId?: string;
+    sourceKind?: "native" | "bridge" | "acp" | string;
+    parentSessionId?: string;
+    identityVersion?: number;
+  };
   mode?: "analysis" | "review" | "implementation";
   task?: string;
   logCount?: number;
@@ -934,9 +945,14 @@ function agentModeLabel(mode?: AgentThread["mode"]) {
 
 function agentThreadsSnapshot(agents: AgentThread[]) {
   return agents.map((agent) => {
-    const latest = agent.logs[0];
-    return [agent.id, agent.status, agent.revision || 0, agent.updatedAt, agent.logCount ?? agent.logs.length, latest?.id || "", String(latest?.text || "").length].join(":");
+    const first = agent.logs[0];
+    const latest = agent.logs.at(-1) || first;
+    return [agent.identityKey || agent.identity?.key || agent.id, agent.status, agent.revision || 0, agent.updatedAt, agent.logCount ?? agent.logs.length, first?.id || "", latest?.id || "", String(first?.text || "").length, String(latest?.text || "").length].join(":");
   }).join("|");
+}
+
+function agentSelectionKey(agent: AgentThread) {
+  return agent.identityKey || agent.identity?.key || agent.id;
 }
 
 function normalizeAgentThreads(value: unknown): AgentThread[] {
@@ -949,14 +965,26 @@ function normalizeAgentThreads(value: unknown): AgentThread[] {
     const status: AgentThread["status"] = ["running", "completed", "failed", "interrupted"].includes(statusValue) ? statusValue as AgentThread["status"] : "interrupted";
     const providerValue = String(source.provider || "");
     const provider: AgentThread["provider"] = /^[a-z][a-z0-9._-]{0,63}$/.test(providerValue) ? providerValue : undefined;
+    const rawIdentity = asRecord(source.identity);
+    const identityKey = typeof source.identityKey === "string" && source.identityKey.trim()
+      ? source.identityKey.trim()
+      : typeof rawIdentity?.key === "string" && rawIdentity.key.trim() ? rawIdentity.key.trim() : undefined;
+    const identity = identityKey ? {
+      key: identityKey,
+      agentId: typeof rawIdentity?.agentId === "string" ? rawIdentity.agentId : undefined,
+      providerId: typeof rawIdentity?.providerId === "string" ? rawIdentity.providerId : undefined,
+      sourceKind: typeof rawIdentity?.sourceKind === "string" ? rawIdentity.sourceKind : undefined,
+      parentSessionId: typeof rawIdentity?.parentSessionId === "string" ? rawIdentity.parentSessionId : undefined,
+      identityVersion: typeof rawIdentity?.identityVersion === "number" ? rawIdentity.identityVersion : undefined
+    } : undefined;
     const modeValue = String(source.mode || "");
     const mode = ["analysis", "review", "implementation"].includes(modeValue) ? modeValue as AgentThread["mode"] : undefined;
     const logs = (Array.isArray(source.logs) ? source.logs : []).map((log, index) => normalizeAgentStreamLog(log, index));
     return [{
-      id: String(source.id || `legacy-agent-${threadIndex}`), parentThreadId: String(source.parentThreadId || ""), nickname: String(source.nickname || `子 Agent ${threadIndex + 1}`), path: String(source.path || ""), status,
+      id: String(source.id || identity?.agentId || `legacy-agent-${threadIndex}`), parentThreadId: String(source.parentThreadId || identity?.parentSessionId || ""), nickname: String(source.nickname || `子 Agent ${threadIndex + 1}`), path: String(source.path || ""), status,
       updatedAt: typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt)) ? source.updatedAt : logs.at(-1)?.createdAt || new Date(0).toISOString(),
       usage: { input_tokens: Number(usage?.input_tokens) || 0, cached_input_tokens: Number(usage?.cached_input_tokens) || 0, output_tokens: Number(usage?.output_tokens) || 0, reasoning_output_tokens: Number(usage?.reasoning_output_tokens) || 0 },
-      logs, provider, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length,
+      logs, provider: provider || identity?.providerId, identityKey, identity, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length,
       revision: Math.max(0, Number(source.revision) || 0)
     }];
   }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -1107,7 +1135,10 @@ function eventActivityLog(message: Message): AgentLog {
     : eventType === "tool_call" || eventType === "skill_call" ? "tool"
     : "status");
   const phase = failed ? "failed" : message.activityPhase || (message.eventPhase === "completed" ? "completed" : message.eventPhase === "updated" ? "running" : "started");
-  return { id: message.id, createdAt: message.createdAt, kind, title, text, category, phase, detail: message.activityDetail ?? message.payload, activity: message.activity };
+  const payload = asRecord(message.payload);
+  const provider = message.activity?.provider
+    || (typeof payload?.provider === "string" ? payload.provider : undefined);
+  return { id: message.id, createdAt: message.createdAt, kind, title, text, category, phase, detail: message.activityDetail ?? message.payload, provider, activity: message.activity };
 }
 
 function activityGroupStatus(messages: Message[]) {
@@ -1124,8 +1155,21 @@ function ActivityMessageGroupView({ group, engine, providerLabel, providerContro
 
 type ApiRequestInit = RequestInit & { timeoutMs?: number };
 
+type ConditionalApiEntry = { etag: string; data: unknown; touchedAt: number };
+const conditionalApiCache = new Map<string, ConditionalApiEntry>();
+const CONDITIONAL_CACHE_LIMIT = 64;
+
+function conditionalCacheKey(url: string, method: string) {
+  return method === "GET" && /^\/api\/sessions\/[^/]+\/agents(?:\/|$)/.test(url) ? url : "";
+}
+
 const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
   const { timeoutMs = 60_000, signal: parentSignal, ...request } = options || {};
+  const method = (request.method || "GET").toUpperCase();
+  const conditionalKey = conditionalCacheKey(url, method);
+  const cachedConditional = conditionalKey ? conditionalApiCache.get(conditionalKey) : undefined;
+  const requestHeaders = new Headers(request.headers || {});
+  if (cachedConditional && !requestHeaders.has("If-None-Match")) requestHeaders.set("If-None-Match", cachedConditional.etag);
   const controller = new AbortController();
   let timedOut = false;
   let timer: number | undefined;
@@ -1143,10 +1187,14 @@ const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
   try {
     const response = await fetch(url, {
       ...request,
-      cache: request.cache ?? ((request.method || "GET").toUpperCase() === "GET" ? "no-store" : undefined),
+      cache: request.cache ?? (method === "GET" ? "no-store" : undefined),
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...request.headers }
+      headers: { "Content-Type": "application/json", ...Object.fromEntries(requestHeaders.entries()) }
     });
+    if (response.status === 304 && cachedConditional) {
+      cachedConditional.touchedAt = Date.now();
+      return cachedConditional.data as T;
+    }
     const contentType = response.headers.get("content-type") || "";
     let body = "";
     let data: any = null;
@@ -1161,6 +1209,17 @@ const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
         ? `服务端处理请求失败（HTTP ${response.status}）`
         : body.slice(0, 500) || `请求失败（HTTP ${response.status}）`;
       throw new Error(data?.error || fallback);
+    }
+    if (conditionalKey && response.ok) {
+      const etag = response.headers.get("etag");
+      if (etag && data !== null) {
+        conditionalApiCache.set(conditionalKey, { etag, data, touchedAt: Date.now() });
+        while (conditionalApiCache.size > CONDITIONAL_CACHE_LIMIT) {
+          const oldest = [...conditionalApiCache.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0]?.[0];
+          if (!oldest) break;
+          conditionalApiCache.delete(oldest);
+        }
+      }
     }
     return data as T;
   } catch (error) {
@@ -1487,7 +1546,7 @@ function SubagentDrawer({
   onClose: () => void;
 }) {
   const info = subagentInfo(message);
-  const [agentThreads, setAgentThreads] = useState<AgentThread[] | null>(null);
+  const [agentThreads, setAgentThreads] = useState<AgentThread[] | null>(() => agentThreadSummaryCache.get(sessionId) || null);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedAgentDetail, setSelectedAgentDetail] = useState<AgentThread | null>(null);
   const [agentDetailLoading, setAgentDetailLoading] = useState(false);
@@ -1495,6 +1554,19 @@ function SubagentDrawer({
   const [agentListError, setAgentListError] = useState("");
   const agentLoadedRef = useRef(false);
   const agentSnapshotRef = useRef("");
+  const sessionRunningRef = useRef(sessionRunning);
+  const providerLockRef = useRef(new Map<string, string>());
+  const hasNonEmptySummaryRef = useRef(Boolean(agentThreadSummaryCache.get(sessionId)?.length));
+  const agentOrderRef = useRef<string[]>([]);
+  sessionRunningRef.current = sessionRunning;
+
+  const agentMatchesInfo = useCallback((agent: AgentThread, ids: string[]) => {
+    if (!ids.length) return false;
+    return ids.includes(agent.id)
+      || ids.includes(agent.identityKey || "")
+      || ids.includes(agent.identity?.agentId || "");
+  }, []);
+
   useEffect(() => {
     let stopped = false;
     let emptyRetries = 0;
@@ -1536,15 +1608,31 @@ function SubagentDrawer({
           quietPolls = 0;
           agentSnapshotRef.current = snapshot;
           agentLoadedRef.current = true;
-          agentThreadSummaryCache.set(sessionId, agents);
+          if (agents.length > 0) {
+            hasNonEmptySummaryRef.current = true;
+            agentThreadSummaryCache.set(sessionId, agents);
+          }
+          // A partially written transcript can briefly produce an empty
+          // snapshot. Keep the last usable list instead of flashing to the
+          // parent-message fallback.
+          if (!agents.length && hasNonEmptySummaryRef.current) {
+            quietPolls += 1;
+            if (sessionRunningRef.current || emptyRetries < 3) nextDelay = 1_000;
+            return;
+          }
           startTransition(() => {
             setAgentThreads(agents);
-            const preferredId = info.agentIds.find((id) => agents.some((agent) => agent.id === id)) || agents[0]?.id || "";
-            setSelectedAgentId((current) => agents.some((agent) => agent.id === current) ? current : preferredId);
+            const preferred = agents.find((agent) => agentMatchesInfo(agent, info.agentIds));
+            // A drawer opened from a message must never silently jump to an
+            // unrelated first Agent when the server is still reconciling IDs.
+            const preferredId = preferred ? agentSelectionKey(preferred) : agents.length === 1 ? agentSelectionKey(agents[0]) : "";
+            setSelectedAgentId((current) => agents.some((agent) => agentSelectionKey(agent) === current)
+              ? current
+              : preferredId);
           });
         } else quietPolls += 1;
         const hasRunningAgent = agents.some((agent) => agent.status === "running");
-        if (sessionRunning || hasRunningAgent || emptyRetries < 3) nextDelay = emptyRetries < 3 ? 1_000 : Math.min(5_000, 1_000 + quietPolls * 500);
+        if (sessionRunningRef.current || hasRunningAgent || emptyRetries < 3) nextDelay = emptyRetries < 3 ? 1_000 : Math.min(5_000, 1_000 + quietPolls * 500);
       } catch (error) {
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
@@ -1570,8 +1658,9 @@ function SubagentDrawer({
     const onAgentsChanged = (detail: Record<string, unknown>) => {
       const changedSessionId = String(detail.sessionId || "");
       if (changedSessionId === sessionId) {
-        if (timer) window.clearTimeout(timer);
-        requestLoad();
+        // Coalesce the burst of events emitted while a transcript is being
+        // appended. The next poll still verifies the complete snapshot.
+        schedule(120);
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -1585,15 +1674,31 @@ function SubagentDrawer({
       unsubscribeAgents();
       unsubscribeReconcile();
     };
-  }, [sessionId, sessionRunning, info.agentIds.join("|")]);
-  const orderedAgentThreads = useMemo(() => normalizeAgentThreads(agentThreads || []), [agentThreads]);
+  }, [sessionId, info.agentIds.join("|"), agentMatchesInfo]);
+  const orderedAgentThreads = useMemo(() => {
+    const normalized = normalizeAgentThreads(agentThreads || []);
+    const byKey = new Map(normalized.map((agent) => [agent.identityKey || agent.identity?.key || agent.id, agent]));
+    const nextOrder = agentOrderRef.current.filter((key) => byKey.has(key));
+    for (const agent of normalized) {
+      const key = agent.identityKey || agent.identity?.key || agent.id;
+      if (!nextOrder.includes(key)) nextOrder.push(key);
+    }
+    agentOrderRef.current = nextOrder;
+    return nextOrder.flatMap((key) => {
+      const agent = byKey.get(key);
+      return agent ? [agent] : [];
+    });
+  }, [agentThreads]);
   useEffect(() => {
     if (!orderedAgentThreads.length) return;
-    setSelectedAgentId((current) => orderedAgentThreads.some((agent) => agent.id === current)
+    setSelectedAgentId((current) => orderedAgentThreads.some((agent) => agentSelectionKey(agent) === current)
       ? current
-      : info.agentIds.find((id) => orderedAgentThreads.some((agent) => agent.id === id)) || orderedAgentThreads[0].id);
-  }, [orderedAgentThreads, info.agentIds.join("|")]);
-  const selectedAgentSummary = orderedAgentThreads.find((agent) => agent.id === selectedAgentId);
+      : (() => {
+        const preferred = orderedAgentThreads.find((agent) => agentMatchesInfo(agent, info.agentIds));
+        return preferred ? agentSelectionKey(preferred) : orderedAgentThreads.length === 1 ? agentSelectionKey(orderedAgentThreads[0]) : "";
+      })());
+  }, [orderedAgentThreads, info.agentIds.join("|"), agentMatchesInfo]);
+  const selectedAgentSummary = orderedAgentThreads.find((agent) => agentSelectionKey(agent) === selectedAgentId);
   useEffect(() => {
     if (!selectedAgentSummary) {
       setSelectedAgentDetail(null);
@@ -1601,7 +1706,8 @@ function SubagentDrawer({
       return;
     }
     const agentId = selectedAgentSummary.id;
-    const cacheKey = `${sessionId}:${agentId}`;
+    const identityKey = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key || agentId;
+    const cacheKey = `${sessionId}:${identityKey}`;
     const cached = agentThreadDetailCache.get(cacheKey);
     setSelectedAgentDetail(cached || null);
     setAgentDetailError("");
@@ -1612,6 +1718,7 @@ function SubagentDrawer({
     let failures = 0;
     let timer: number | undefined;
     let controller: AbortController | undefined;
+    let lastAppliedSnapshot = cached ? agentThreadsSnapshot([cached]) : "";
     const schedule = (delay: number) => {
       if (stopped) return;
       if (timer) window.clearTimeout(timer);
@@ -1634,19 +1741,35 @@ function SubagentDrawer({
         return;
       }
       loading = true;
-      setAgentDetailLoading(true);
+      // Polling an already hydrated Agent is a background refresh; keep the
+      // timeline interactive instead of toggling its loading state every tick.
+      if (!agentThreadDetailCache.has(cacheKey)) setAgentDetailLoading(true);
       controller = new AbortController();
       let nextDelay: number | null = null;
       try {
-        const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, { signal: controller.signal });
+        const identityQuery = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key
+          ? `?identityKey=${encodeURIComponent(identityKey)}` : "";
+        const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}${identityQuery}`, { signal: controller.signal });
         const agent = normalizeAgentThreads([value])[0];
         if (stopped) return;
         if (!agent || agent.id !== agentId) throw new Error("子 Agent 详情不匹配");
         failures = 0;
-        agentThreadDetailCache.set(cacheKey, agent);
-        setSelectedAgentDetail(agent);
+        const previous = agentThreadDetailCache.get(cacheKey);
+        // A transient empty detail response must not erase useful summary
+        // logs. Keep the latest non-empty snapshot until the server advances
+        // its revision.
+        const merged = previous && agent.logs.length === 0 && previous.logs.length > 0
+          && (agent.revision || 0) <= (previous.revision || 0)
+          ? { ...agent, logs: previous.logs, logCount: Math.max(agent.logCount || 0, previous.logCount || 0) }
+          : agent;
+        const snapshot = agentThreadsSnapshot([merged]);
+        agentThreadDetailCache.set(cacheKey, merged);
+        if (snapshot !== lastAppliedSnapshot) {
+          lastAppliedSnapshot = snapshot;
+          setSelectedAgentDetail(merged);
+        }
         setAgentDetailError("");
-        if (sessionRunning || agent.status === "running") nextDelay = 1_000;
+        if (sessionRunningRef.current || agent.status === "running") nextDelay = 1_000;
       } catch (error) {
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
@@ -1663,13 +1786,13 @@ function SubagentDrawer({
       }
     };
     const onAgentsChanged = (detail: Record<string, unknown>) => {
-      if (agentChangeTargets(detail, sessionId, agentId)) requestLoad();
+      if (agentChangeTargets(detail, sessionId, agentId, identityKey)) schedule(120);
     };
     const onVisibilityChange = () => { if (!document.hidden) requestLoad(); };
     requestLoad();
     document.addEventListener("visibilitychange", onVisibilityChange);
     const unsubscribeAgents = realtimeCoordinator.subscribe("agents.changed", onAgentsChanged);
-    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => requestLoad());
+    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => schedule(120));
     return () => {
       stopped = true;
       controller?.abort();
@@ -1678,11 +1801,15 @@ function SubagentDrawer({
       unsubscribeAgents();
       unsubscribeReconcile();
     };
-  }, [sessionId, selectedAgentSummary?.id, sessionRunning]);
+  }, [sessionId, selectedAgentSummary?.id, selectedAgentSummary?.identityKey, selectedAgentSummary?.identity?.key, selectedAgentSummary?.provider]);
   // A tab switch renders before its detail effect runs; never show the previous Agent's logs.
-  const currentAgentDetail = selectedAgentDetail?.id === selectedAgentSummary?.id ? selectedAgentDetail : null;
+  const detailForSelection = selectedAgentDetail;
+  const currentAgentDetail = detailForSelection && detailForSelection.id === selectedAgentSummary?.id
+    && (!selectedAgentSummary?.identityKey || detailForSelection.identityKey === selectedAgentSummary.identityKey)
+    && (!selectedAgentSummary?.provider || !detailForSelection.provider || detailForSelection.provider === selectedAgentSummary.provider)
+    ? detailForSelection : null;
   const selectedAgent = currentAgentDetail || selectedAgentSummary;
-  const selectedAgentLogs = useMemo(() => (currentAgentDetail?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => left.createdAt.localeCompare(right.createdAt)), [currentAgentDetail?.logs]);
+  const selectedAgentLogs = useMemo(() => (currentAgentDetail?.logs || selectedAgentSummary?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)), [currentAgentDetail?.logs, selectedAgentSummary?.logs]);
   const related = useMemo(() => messages.filter((candidate) => {
     const candidateInfo = subagentInfo(candidate);
     if (!candidateInfo.isSubagent) return false;
@@ -1696,10 +1823,16 @@ function SubagentDrawer({
   const title = selectedAgent?.nickname || info.nickname || info.agentType || "子 Agent";
   const drawerStatus = selectedAgent?.status || info.status;
   const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, selectedAgent ? selectedAgentLogs.length : logs.length);
-  const drawerProvider = selectedAgent?.provider || info.provider;
+  const selectedIdentityKey = selectedAgent?.identityKey || selectedAgent?.identity?.key || selectedAgent?.id || selectedAgentId;
+  const candidateProvider = selectedAgent?.identity?.providerId || selectedAgent?.provider || selectedAgentSummary?.identity?.providerId || selectedAgentSummary?.provider;
+  const lockedProvider = providerLockRef.current.get(selectedIdentityKey);
+  if (candidateProvider && !lockedProvider) providerLockRef.current.set(selectedIdentityKey, candidateProvider);
+  // Do not render a speculative parent/provider inference while a message
+  // points at a specific Agent. That is what caused Claude → Codex icon flash.
+  const drawerProvider = lockedProvider || candidateProvider || (info.agentIds.length ? undefined : info.provider);
   const drawerProviderControl = providerControls.find((control) => control.providerId === drawerProvider);
   const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(selectedAgent ? selectedAgentLogs : logs)}`;
-  const followOutput = useAgentOutputFollow(drawerLogVersion, selectedAgentId);
+  const followOutput = useAgentOutputFollow(drawerLogVersion, selectedIdentityKey);
   return (
     <AgentDrawer title={title} onClose={onClose} followOutput={followOutput} header={<header>
           <div className="agent-drawer-title">
@@ -1714,10 +1847,10 @@ function SubagentDrawer({
             <nav className="agent-thread-tabs" aria-label="切换子 Agent">
               {orderedAgentThreads.map((agent) => (
                 <button
-                  className={agent.id === selectedAgentId ? "active" : ""}
-                  key={agent.id}
-                  aria-pressed={agent.id === selectedAgentId}
-                  onClick={() => setSelectedAgentId(agent.id)}
+                  className={agentSelectionKey(agent) === selectedAgentId ? "active" : ""}
+                  key={agentSelectionKey(agent)}
+                  aria-pressed={agentSelectionKey(agent) === selectedAgentId}
+                  onClick={() => setSelectedAgentId(agentSelectionKey(agent))}
                 >
                   <span className={`agent-status-dot ${agent.status}`} />
                   <span>
@@ -1740,7 +1873,7 @@ function SubagentDrawer({
                 error={agentListError || agentDetailError}
                 logs={selectedAgent ? selectedAgentLogs : logs.map(eventActivityLog)}
                 status={selectedAgent?.status || drawerStatus}
-                provider={selectedAgent?.provider || drawerProvider || "agent"}
+                provider={drawerProvider || "agent"}
                 providerLabel={agentProviderLabel(selectedAgent?.provider || drawerProvider)}
                 providerIcon={drawerProviderControl?.identity.icon}
                 providerAccent={drawerProviderControl?.identity.accent}
@@ -1866,7 +1999,10 @@ function EventMessage({
     return <ClaudeQuestionCard message={message} onSubmit={onAnswerQuestion} />;
   }
   if (agent.isSubagent) {
-    const provider = agent.provider || engine;
+    // Parent engine is not a reliable child identity. Only use it for legacy
+    // events that do not identify a concrete Agent; otherwise keep the neutral
+    // mark until the canonical Agent snapshot resolves.
+    const provider = agent.provider || (agent.agentIds.length ? undefined : engine);
     const providerControl = providerControls.find((control) => control.providerId === provider);
     return (
       <div className="event-row subagent-row">

@@ -706,6 +706,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-drawer-title small { margin-top: 3px; color: #778079; font-size: 11px; }
 .agent-drawer-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 18px 24px; }
 .agent-drawer-content { min-width: 0; }
+.agent-drawer-new-activity { position: absolute; z-index: 4; right: 18px; bottom: 18px; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border: 1px solid #9ab2a0; border-radius: 999px; background: #eef6f0; color: #2d5d3d; box-shadow: 0 4px 14px rgba(35, 60, 43, .16); font-size: 11px; cursor: pointer; }
+.agent-drawer-new-activity:hover { background: #e2f0e6; }
 .agent-loading { display: flex; align-items: center; gap: 7px; min-height: 42px; margin-bottom: 14px; color: #747b75; font-size: 11px; }
 .agent-thread-tabs { position: sticky; z-index: 2; top: -14px; display: flex; gap: 6px; margin: 0 -4px 12px; overflow-x: auto; padding: 14px 4px 7px; background: rgba(251, 251, 249, .97); border-bottom: 1px solid #e5e6e2; scrollbar-width: thin; }
 .agent-thread-tabs button { display: grid; grid-template-columns: 8px minmax(92px, 1fr); align-items: center; gap: 8px; min-width: 138px; min-height: 44px; padding: 6px 9px; border: 1px solid #dcdeda; border-radius: 6px; background: white; text-align: left; cursor: pointer; }
@@ -723,6 +725,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-task p { max-height: 132px; overflow: auto; margin: 0; padding: 9px 11px; border-left: 2px solid #9db2a5; background: #f3f6f3; color: #59605b; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .workflow-result-view { display: grid; gap: 13px; margin-top: 14px; }.workflow-result-view > section { min-width: 0; }.workflow-result-view > section > span { display: block; margin: 0 0 6px 3px; color: var(--muted); font-size: 11px; font-weight: 700; }.workflow-result-view code { display: block; overflow: hidden; padding: 7px 9px; border-left: 2px solid var(--border); color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.workflow-result-list { display: grid; gap: 1px; border-left: 2px solid #9db2a5; }.workflow-result-list > div { display: grid; gap: 2px; padding: 6px 9px; background: color-mix(in srgb, var(--panel-bg) 88%, var(--border)); }.workflow-result-list strong { color: var(--text); font-size: 11px; font-weight: 600; line-height: 1.4; }.workflow-result-list small { overflow-wrap: anywhere; color: var(--muted); font-size: 11px; line-height: 1.4; }.workflow-result-list.warnings { border-left-color: var(--danger, #c95757); }.workflow-check-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--muted); }.workflow-check-dot.passed { background: var(--accent); }.workflow-check-dot.failed { background: var(--danger, #c95757); }
 .agent-conversation { display: grid; gap: 5px; contain: layout paint; }
+.activity-timeline-controls { display: flex; align-items: center; gap: 5px; margin: 0 0 7px; padding: 3px 6px; border: 1px solid #e0e4e0; border-radius: 6px; background: #f7f9f7; color: #7b847d; }
+.activity-timeline-controls input, .activity-timeline-controls select { min-width: 0; height: 24px; padding: 0 5px; border: 0; background: transparent; color: inherit; font-size: 11px; }
+.activity-timeline-controls input { flex: 1; }
+.activity-timeline-controls input:focus, .activity-timeline-controls select:focus { outline: none; }
+.activity-timeline-controls button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.activity-timeline-controls .activity-failure-filter { width: auto; padding: 0 6px; border: 1px solid #dfb7ad; border-radius: 999px; color: #a45142; }
+.activity-timeline-no-results { margin: 12px 8px; color: #929791; font-size: 11px; text-align: center; }
+.activity-timeline-result-count { margin: -3px 0 6px; color: #8a918b; font-size: 11px; }
 .activity-timeline { min-width: 0; }
 .activity-timeline.minimal { padding: 1px 0; }
 .activity-timeline-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 28px; margin-bottom: 4px; padding: 0 6px 0 8px; color: #969b96; font-size: 9.5px; }
@@ -767,6 +777,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-conversation-fallback strong { color: #80483d; font-size: 11px; }
 .agent-conversation-fallback small { overflow: hidden; color: #a1756c; font: 9px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .agent-conversation-fallback button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 1px solid #dfc7c1; border-radius: 5px; background: white; color: #945949; cursor: pointer; }
+.agent-event-copy-link { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 3px 6px; border: 1px solid #dfe3df; border-radius: 4px; background: transparent; color: #7b847d; font-size: 11px; cursor: pointer; }
+.agent-event-copy-link:hover { background: #f4f7f4; color: #4e6655; }
 .agent-plan-view { margin: 6px 0 8px; overflow: hidden; border: 1px solid #dce4dd; border-radius: 7px; background: #fafcf9; color: #566159; }
 .agent-plan-view > summary { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto 14px; align-items: center; gap: 8px; min-height: 42px; padding: 5px 9px; cursor: pointer; list-style: none; }
 .agent-plan-view > summary::-webkit-details-marker { display: none; }
@@ -2108,6 +2120,9 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .agent-thread-tabs button { background: #303030; border-color: #424242; }
 :root[data-theme="dark"] .agent-thread-tabs button:hover,
 :root[data-theme="dark"] .agent-thread-tabs button.active { background: #393939; border-color: #555; box-shadow: none; }
+:root[data-theme="dark"] .agent-drawer-new-activity { border-color: #587561; background: #273b2d; color: #c8e3ce; box-shadow: 0 4px 14px rgba(0, 0, 0, .32); }
+:root[data-theme="dark"] .activity-timeline-controls { border-color: #464a46; background: #303330; color: #b7beb8; }
+:root[data-theme="dark"] .activity-timeline-controls .activity-failure-filter { border-color: #754d46; color: #e0a092; }
 :root[data-theme="dark"] .agent-task p,
 :root[data-theme="dark"] .agent-event-icon,
 :root[data-theme="dark"] .agent-event-icon.running,
@@ -2124,6 +2139,8 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .agent-conversation-fallback { border-color: #684940; background: #3a2f2c; color: #dc9d8f; }
 :root[data-theme="dark"] .agent-conversation-fallback strong { color: #e0a092; }
 :root[data-theme="dark"] .agent-conversation-fallback small { color: #b98276; }
+:root[data-theme="dark"] .agent-event-copy-link { border-color: #4a4e4a; color: #aeb6af; }
+:root[data-theme="dark"] .agent-event-copy-link:hover { background: #363a36; color: #d0ddd3; }
 :root[data-theme="dark"] .agent-conversation-fallback button { border-color: #704f46; background: #302b29; color: #d99a8d; }
 :root[data-theme="dark"] .agent-plan-view { border-color: #414942; background: #2d312e; color: #bbc3bd; }
 :root[data-theme="dark"] .agent-plan-view > summary:hover { background: #343a35; }

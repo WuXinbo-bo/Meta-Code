@@ -46,10 +46,12 @@ console.log("agent terminal status reconciliation contracts OK");
 const bridgePayload = { type: "codex_subagent", action: "spawn_agent", agent_id: "worker-1", logs: [{ id: "live-1" }] };
 assert.equal(isNativeAgentProjection(bridgePayload), false);
 assert.equal(nativeAgentMessageCanReuse(bridgePayload, "worker-1"), false, "native projection must not overwrite live bridge logs");
-const nativePayload = { type: "codex_subagent", native: true, agent_id: "thread-1" };
+const nativePayload = { type: "codex_subagent", native: true, provider: "codex", identityKey: "codex:agent:thread-1", agent_id: "thread-1" };
 assert.equal(isNativeAgentProjection(nativePayload), true);
 assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-1"), true);
 assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-2"), false);
+assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-1", "codex", "codex:agent:thread-1"), true);
+assert.equal(nativeAgentMessageCanReuse(nativePayload, "thread-1", "claude", "claude:agent:thread-1"), false, "same raw agent id across providers must not reuse a native card");
 console.log("agent message ownership contracts OK");
 
 const terminalStream = {
