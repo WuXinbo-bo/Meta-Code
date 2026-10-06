@@ -238,7 +238,7 @@ function WorkflowAgentDrawer({ title, provider, status, task, logs, result, erro
         </div>}
         <AgentTaskDescription key={title} text={task} />
         {error && <div className="workflow-error"><AlertTriangle size={14} />{error}</div>}
-        <section className="agent-log-section"><AgentConversation key={title} scrollRef={followOutput.containerRef} className="agent-conversation workflow-drawer-logs" logs={logs} status={status} provider={provider === "auto" ? "agent" : provider} providerLabel={providerLabel(provider)} messageLabel={title} workspaceId={workspaceId} renderMessage={renderMessage} showProvider={false} emptyText="尚无活动日志" /></section>
+        <section className="agent-log-section"><AgentConversation key={title} scrollRef={followOutput.containerRef} className="agent-conversation workflow-drawer-logs" logs={logs} status={status} provider={provider === "auto" ? "agent" : provider} providerLabel={providerLabel(provider)} messageLabel={title} workspaceId={workspaceId} renderMessage={renderMessage} showProvider={false} showFilters={false} hiddenCategories={["search"]} emptyText="尚无活动日志" /></section>
         {onOpenFolder && <button type="button" className="workflow-open-result-folder" onClick={onOpenFolder}><FolderOpen size={14} />打开成果目录</button>}
   </AgentDrawer>;
 }

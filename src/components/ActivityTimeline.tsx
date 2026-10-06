@@ -4,7 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { commandActivitySummary } from "./AgentActivityEntry";
 import { ActivityRenderer } from "./ActivityRenderer";
 import { AgentPlanView } from "./AgentPlanView";
-import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPlanSnapshot, isRoutineActivityStatus, normalizeActivityLogs, type AgentPlanSnapshot, type ActivityViewLog } from "./activityModel";
+import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPlanSnapshot, isRoutineActivityStatus, normalizeActivityLogs, type ActivityCategory, type AgentPlanSnapshot, type ActivityViewLog } from "./activityModel";
 
 type ActivityItem =
   | { type: "log"; log: ActivityViewLog }
@@ -107,16 +107,18 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
 }
 
 function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityItem[] {
-  // Only the open activity segment rotates. Earlier replies and their tool
-  // summaries remain in chronological order while a later segment streams.
+  // Keep the completed portion of every open turn. The old implementation
+  // retained only the newest operational event, which made earlier commands
+  // and file changes disappear while a later tool was running. Build the
+  // current segment with the same grouping rules as the settled timeline, then
+  // mark the newest active event as the live focus without removing its peers.
   const boundary = logs.findLastIndex((log) => log.category === "message" || log.category === "result");
   const history = settledActivityItems(logs.slice(0, boundary + 1));
-  const currentLogs = logs.slice(boundary + 1);
-  const latestOperational = [...currentLogs].reverse().find((log) => !["message", "result", "error"].includes(log.category));
-  const retained = currentLogs.filter((log) => log.category === "error" || log.kind === "error");
-  if (latestOperational && !retained.some((log) => log.id === latestOperational.id)) retained.push(latestOperational);
-  retained.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  return [...history, ...planAwareActivities(retained, provider).map((item): ActivityItem => item.type === "log" && item.log.id === latestOperational?.id
+  const currentLogs = logs.slice(boundary + 1).filter((log) => log.category !== "message" && log.category !== "result");
+  const latestOperational = [...currentLogs].reverse().find((log) => log.category !== "error");
+  const latestActive = [...currentLogs].reverse().find((log) => log.phase === "running" || log.phase === "started") || latestOperational;
+  const currentItems = planAwareActivities(currentLogs, provider);
+  return [...history, ...currentItems.map((item): ActivityItem => item.type === "log" && item.log.id === latestActive?.id
     ? { type: "current", log: item.log }
     : item)];
 }
@@ -164,7 +166,7 @@ function CollapsedActivityGroup({ item, status, provider, providerLabel, provide
   const latestStatus = latest.phase === "failed" || latest.kind === "error" ? "failed" : latest.phase === "completed" ? "completed" : latest.phase === "running" ? "running" : status;
   const categoryLabel = activityCategoryLabel(latest.category);
   const groupLabel = activityGroupLabel(latest.category, item.logs.length);
-  return <details className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category} phase-${latestStatus}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
       <span className={`agent-event-icon ${latestStatus}`}>{categoryIcon(latest.category)}</span>
       <span className="agent-stream-copy"><strong>{groupLabel}</strong><small>{summary}</small></span>
@@ -193,7 +195,7 @@ function minimalActivities(logs: readonly unknown[], provider: string, status: s
   return isLiveTimeline(status) ? liveActivityItems(visible, provider) : settledActivityItems(visible);
 }
 
-export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, scrollRef: externalScrollRef }: {
+export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], scrollRef: externalScrollRef }: {
   logs: readonly unknown[];
   status: string;
   provider: string;
@@ -204,6 +206,8 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   showProvider?: boolean;
+  showFilters?: boolean;
+  hiddenCategories?: readonly ActivityCategory[];
   scrollRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const localScrollRef = useRef<HTMLDivElement>(null);
@@ -211,8 +215,8 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [phaseFilter, setPhaseFilter] = useState("all");
-  const normalizedLogs = useMemo(() => normalizeActivityLogs(logs), [logs]);
-  const hasFilters = Boolean(query.trim() || categoryFilter !== "all" || phaseFilter !== "all");
+  const normalizedLogs = useMemo(() => normalizeActivityLogs(logs).filter((log) => !hiddenCategories.includes(log.category)), [logs, hiddenCategories]);
+  const hasFilters = showFilters && Boolean(query.trim() || categoryFilter !== "all" || phaseFilter !== "all");
   const failureCount = useMemo(() => normalizedLogs.filter((log) => log.phase === "failed").length, [normalizedLogs]);
   const categories = useMemo(() => [...new Set(normalizedLogs.map((log) => log.category))].sort(), [normalizedLogs]);
   const filteredLogs = useMemo(() => {
@@ -288,7 +292,7 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
   return <div className="activity-timeline single-layer">
-    {(normalizedLogs.length > 3 || hasFilters || failureCount > 0) && <div className="activity-timeline-controls" role="search" aria-label="筛选活动">
+    {showFilters && (normalizedLogs.length > 3 || hasFilters || failureCount > 0) && <div className="activity-timeline-controls" role="search" aria-label="筛选活动">
       <Search size={13} aria-hidden="true" />
       <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索活动" aria-label="搜索活动" />
       <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="活动类型">

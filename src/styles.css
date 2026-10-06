@@ -704,8 +704,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-drawer-title strong { display: flex; align-items: center; font-size: 13px; }
 .agent-drawer-title strong .agent-provider-badge { order: -1; }
 .agent-drawer-title small { margin-top: 3px; color: #778079; font-size: 11px; }
+.agent-live-indicator { display: inline-block; width: 6px; height: 6px; margin: 0 5px 1px 0; border-radius: 50%; background: #a4aaa5; vertical-align: middle; }
+.agent-live-indicator.active { background: #3c9a62; box-shadow: 0 0 0 3px #e3f1e8; animation: agent-live-pulse 1.4s ease-in-out infinite; }
 .agent-drawer-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 18px 24px; }
 .agent-drawer-content { min-width: 0; }
+.agent-drawer-progress { display: flex; align-items: center; gap: 7px; margin: 0 0 10px; padding: 8px 10px; border: 1px solid #d6e5d9; border-radius: 7px; background: #f2f8f3; color: #39704c; font-size: 11px; }
+.agent-drawer-progress.syncing { border-color: #d9e0e5; background: #f4f7f8; color: #687883; }
 .agent-drawer-new-activity { position: absolute; z-index: 4; right: 18px; bottom: 18px; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border: 1px solid #9ab2a0; border-radius: 999px; background: #eef6f0; color: #2d5d3d; box-shadow: 0 4px 14px rgba(35, 60, 43, .16); font-size: 11px; cursor: pointer; }
 .agent-drawer-new-activity:hover { background: #e2f0e6; }
 .agent-loading { display: flex; align-items: center; gap: 7px; min-height: 42px; margin-bottom: 14px; color: #747b75; font-size: 11px; }
@@ -841,6 +845,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-stream-event.activity-visual-external .agent-event-icon,
 .agent-stream-cluster.activity-visual-external .agent-event-icon { background: #eef0f3; color: #68758a; }
 .agent-stream-event.activity-visual-response .agent-event-icon { background: #edf4ef; color: #4f795e; }
+.agent-stream-event.phase-running .agent-event-icon { animation: agent-log-pulse 1.2s ease-in-out infinite; }
+.agent-stream-cluster.phase-running .agent-event-icon { animation: agent-log-pulse 1.2s ease-in-out infinite; }
+@keyframes agent-live-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@keyframes agent-log-pulse { 0%, 100% { transform: scale(.92); opacity: .65; } 50% { transform: scale(1.08); opacity: 1; } }
 .agent-stream-event.phase-failed .agent-event-icon,
 .agent-stream-event.error .agent-event-icon,
 .agent-stream-cluster.phase-failed .agent-event-icon { background: #f7e6e1; color: #a14b38; }

@@ -30,11 +30,15 @@ for (const provider of ["codex", "claude", "gemini", "codebuddy"]) {
 const live = render({ status: "running" });
 assert.match(live, /运行 2 个命令/, "historical commands remain visible during a later segment");
 assert.ok(live.indexOf("运行 2 个命令") < live.indexOf("第二条回复"));
-assert.match(live, /git diff/, "latest command rotates in the open segment");
-assert.doesNotMatch(live, /git status/, "earlier current-segment commands do not crowd the live preview");
+assert.match(live, /git diff/, "latest command remains visible in the open segment");
+assert.match(live, /git status/, "completed commands remain visible while a later activity streams");
+assert.match(live, /file.ts/, "completed file activity remains visible in the open segment");
 const resumed = render({ status: "running", logs: [...logs, log(8, "message", "完成检查")] });
 assert.doesNotMatch(resumed, /activity-live-current/, "a reply closes the previous rotating segment");
 assert.equal((resumed.match(/运行 1 个命令/g) || []).length, 2);
+const consecutive = render({ status: "running", logs: [...logs.slice(0, 4), log(9, "command", "first current"), { ...log(10, "command", "second current"), phase: "running" }] });
+assert.match(consecutive, /运行 2 个命令/, "same-turn completed and running tools stay in one collapsed group");
+assert.match(consecutive, /phase-running/, "the current grouped tool remains visibly active");
 assert.match(render({ showProvider: true }), /assistant-reply-heading/);
 assert.match(render({ logs: [], loading: true }), /正在读取活动日志/);
 assert.doesNotMatch(render({ logs: [], loading: true }), /尚无活动日志/);
