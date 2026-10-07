@@ -5736,7 +5736,7 @@ function TaskEngineDialog({ runtime, providers, providerControls, hasWorkspace, 
   const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" && workflowReady : engineReady(selected);
   const taskTypes = [...engines.map((item) => ({ ...item, engine: item.engine as EngineName | "workflow" })), { engine: "workflow" as const, title: "Meta 任务编排", description: "先规划审批，再并行调度多个子 Agent", detail: "适合可拆分的大任务；会在当前工作区创建独立任务文件夹。" }];
   return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
-    <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务选择对话协议；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
+    <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务请先选择本次使用的 Agent；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
     <div className="task-scope-control" role="group" aria-label="任务位置">
       <button type="button" className={scopeKind === "standalone" ? "selected" : ""} onClick={() => { setScopeKind("standalone"); if (selected === "workflow") setSelected(""); }}>临时任务</button>
       <button type="button" className={scopeKind === "workspace" ? "selected" : ""} disabled={!hasWorkspace} onClick={() => setScopeKind("workspace")}>当前工作区</button>
