@@ -3,18 +3,18 @@
   display: flex;
   align-items: stretch;
   min-width: 0;
-  height: 43px;
+  height: 36px;
   border-bottom: 1px solid var(--mc-line, #deded9);
   background: var(--mc-surface, #fff);
   overflow: hidden;
 }
 
 .main-panel.has-workspace-browser-tabs {
-  grid-template-rows: 56px 43px minmax(0, 1fr);
+  grid-template-rows: 56px 36px minmax(0, 1fr);
 }
 
 .main-panel.has-workspace-browser-tabs .conversation-switch-state {
-  inset: 99px 0 0;
+  inset: 92px 0 0;
 }
 
 .workspace-browser-preview {
@@ -159,11 +159,9 @@
 .workspace-browser-tab {
   position: relative;
   display: flex;
-  /* Tabs must remain readable when several resources are open.  Let the
-     track scroll instead of shrinking every title down to a few characters. */
-  flex: 0 0 220px;
-  min-width: 180px;
-  max-width: 260px;
+  flex: 0 0 168px;
+  min-width: 128px;
+  max-width: 210px;
   height: 100%;
   border-right: 1px solid var(--mc-line, #deded9);
   color: var(--mc-text-secondary, #5f625f);
@@ -243,11 +241,11 @@
 .workspace-browser-tab__main {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
   flex: 1;
   height: 100%;
-  padding: 0 5px 0 11px;
+  padding: 0 4px 0 8px;
   border: 0;
   color: inherit;
   background: transparent;
@@ -313,7 +311,7 @@
 }
 
 .workspace-browser-tab__title {
-  font-size: 13px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
@@ -323,7 +321,7 @@
 
 .workspace-browser-tab__detail {
   color: var(--mc-text-tertiary, #8b8e8a);
-  font-size: 11px;
+  font-size: 9px;
 }
 
 .workspace-browser-tab__status.is-loading {
@@ -351,8 +349,8 @@
 
 .workspace-browser-tab__action {
   display: inline-flex;
-  width: 23px;
-  height: 23px;
+  width: 21px;
+  height: 21px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -521,7 +519,7 @@
 
 @media (max-width: 760px) {
   .workspace-browser-tab {
-    flex-basis: 180px;
+    flex-basis: 148px;
     min-width: 104px;
   }
 

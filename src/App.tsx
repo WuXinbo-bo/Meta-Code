@@ -1168,7 +1168,7 @@ function activityGroupStatus(messages: Message[]) {
 }
 
 function ActivityMessageGroupView({ group, engine, providerLabel, providerControl, workspaceId }: { group: ActivityMessageGroup; engine: EngineName; providerLabel: string; providerControl?: ProviderControlSnapshot; workspaceId?: string }) {
-  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} /></div>;
+  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} showFilters={false} /></div>;
 }
 
 type ApiRequestInit = RequestInit & { timeoutMs?: number };
@@ -2103,6 +2103,84 @@ function EventMessage({
           </div>)}
     </div>
   );
+}
+
+type AgentActivityRailItem = {
+  key: string;
+  messageId: string;
+  name: string;
+  provider?: string;
+  status: SubagentInfo["status"];
+  count: number;
+  updatedAt: string;
+};
+
+function SubagentActivityRail({
+  messages,
+  providerControls,
+  onOpenAgent
+}: {
+  messages: Message[];
+  providerControls: ProviderControlSnapshot[];
+  onOpenAgent: (messageId: string) => void;
+}) {
+  const providerLocksRef = useRef(new Map<string, string>());
+  const items = useMemo<AgentActivityRailItem[]>(() => {
+    const grouped = new Map<string, AgentActivityRailItem>();
+    for (const message of messages) {
+      const info = subagentInfo(message);
+      if (!info.isSubagent) continue;
+      const key = info.identityKey || info.agentIds[0] || `${info.nickname || info.agentType || "agent"}:${info.provider || ""}`;
+      const previous = grouped.get(key);
+      const candidateProvider = info.provider?.trim().toLowerCase();
+      const lockedProvider = providerLocksRef.current.get(key);
+      if (candidateProvider && !lockedProvider) providerLocksRef.current.set(key, candidateProvider);
+      const provider = lockedProvider || candidateProvider || previous?.provider;
+      const next: AgentActivityRailItem = {
+        key,
+        messageId: message.id,
+        name: info.nickname || info.agentType || "子 Agent",
+        provider,
+        status: info.status === "unknown" ? previous?.status || "running" : info.status,
+        count: (previous?.count || 0) + 1,
+        updatedAt: message.createdAt
+      };
+      if (!previous || Date.parse(message.createdAt) >= Date.parse(previous.updatedAt)) grouped.set(key, next);
+      else grouped.set(key, { ...previous, count: next.count });
+    }
+    return [...grouped.values()]
+      .sort((left, right) => {
+        const live = (value: AgentActivityRailItem) => value.status === "running" || value.status === "waiting" ? 0 : 1;
+        return live(left) - live(right) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+      });
+  }, [messages]);
+  if (!items.length) return null;
+  const visible = items.slice(0, 5);
+  const overflow = items.length - visible.length;
+  return <aside className="agent-activity-rail" aria-label="子 Agent 活动">
+    <span className="agent-activity-rail-label">Agent</span>
+    <div className="agent-activity-rail-items">
+      {visible.map((item) => {
+        const control = providerControls.find((candidate) => candidate.providerId === item.provider);
+        const live = item.status === "running" || item.status === "waiting";
+        const statusLabel = subagentStatusLabel(item.status);
+        return <button
+          type="button"
+          key={item.key}
+          className={`agent-activity-orb ${live ? "is-live" : `is-${item.status}`}`}
+          title={`${item.name} · ${statusLabel}`}
+          aria-label={`打开 ${item.name}，${statusLabel}，${item.count} 条活动`}
+          onClick={() => onOpenAgent(item.messageId)}
+        >
+          <span className="agent-activity-orb-icon">
+            {item.provider ? <ProviderIcon provider={item.provider} icon={control?.identity.icon} accent={control?.identity.accent} size={16} /> : <Bot size={16} />}
+          </span>
+          <span className="agent-activity-orb-dot" aria-hidden="true" />
+        </button>;
+      })}
+      {overflow > 0 && <span className="agent-activity-overflow" title={`${overflow} 个其他 Agent`}>+{overflow}</span>}
+    </div>
+  </aside>;
 }
 
 async function copyText(text: string) {
@@ -5201,6 +5279,7 @@ export function App() {
 
           {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeWorkspaceId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
+            <SubagentActivityRail messages={activeMessages} providerControls={data.providerControls} onOpenAgent={setAgentDrawerMessageId} />
             <div
               className="messages"
               ref={messagesRef}
