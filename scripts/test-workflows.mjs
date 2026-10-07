@@ -22,6 +22,7 @@ import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPla
 const execFileAsync = promisify(execFile);
 
 const serverSource = await fs.readFile(new URL("../server/index.ts", import.meta.url), "utf8");
+const controllerSource = await fs.readFile(new URL("../server/plugins/orchestration/controller.ts", import.meta.url), "utf8");
 const transactionFileSource = await fs.readFile(new URL("../server/plugins/orchestration/transactionFile.ts", import.meta.url), "utf8");
 assert.match(
   serverSource,
@@ -29,9 +30,9 @@ assert.match(
   "工作流系统验收必须在独立任务目录执行，不能误用父工作区根目录"
 );
 assert.match(serverSource, /const readiness = await providerReadiness\(descriptor\.id, ownerUserId, workspace\)/, "工作流 Provider 可用性必须统一检查 CLI、连接和工作区权限");
-assert.match(serverSource, /app\.post\("\/api\/workflows", async[\s\S]*?providerReadiness\(plannerEngine, req\.authUser!\.id, workspace\)/, "创建工作流前必须验证规划 Agent 已就绪");
-assert.match(serverSource, /app\.post\("\/api\/workflows\/:id\/plan", async[\s\S]*?providerReadiness\(workflow\.plannerEngine, req\.authUser!\.id, workspace\)/, "启动规划前必须重新验证规划 Agent 已就绪");
-assert.match(serverSource, /app\.post\("\/api\/workflows\/:id\/approve", async[\s\S]*?assertWorkflowExecutionReady\(workflow, req\.authUser!\.id\)/, "批准计划前必须复查节点 Agent 和工作区能力");
+assert.match(controllerSource, /app\.post\("\/api\/workflows", async[\s\S]*?providerReadiness\(plannerEngine, req\.authUser!\.id, workspace\)/, "创建工作流前必须验证规划 Agent 已就绪");
+assert.match(controllerSource, /app\.post\("\/api\/workflows\/:id\/plan", async[\s\S]*?providerReadiness\(workflow\.plannerEngine, req\.authUser!\.id, workspace\)/, "启动规划前必须重新验证规划 Agent 已就绪");
+assert.match(controllerSource, /app\.post\("\/api\/workflows\/:id\/approve", async[\s\S]*?assertWorkflowExecutionReady\(workflow, req\.authUser!\.id\)/, "批准计划前必须复查节点 Agent 和工作区能力");
 assert.match(serverSource, /new WorkflowNodeStageRetryError\("snapshot"/, "快照异常必须进入阶段重试，不能重跑整个 Agent");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /并行产物一致性契约/, "规划官必须约束并行生产节点的共享数据口径");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /共享合同必须逐字可比/, "规划官必须逐字核对共享 schema 和枚举");
@@ -1149,5 +1150,5 @@ assert.match(serverSource, /不要扫描插件内部事件文件/, "Validator �
 assert.match(serverSource, /最多执行一次合并的只读验收命令/, "Validator 必须限制重复验收命令");
 assert.match(serverSource, /省略 workdir\/cwd 参数，或只使用相对目录“\.”/, "执行 Agent 不得复制超长绝对工作目录到工具调用");
 assert.match(serverSource, /执行结果路径越出任务目录/, "节点产物必须由任务目录边界校验");
-assert.match(serverSource, /slice\(0, 48\)\.replace\(\/\[ \.\]\+\$\/g, ""\)/, "Windows 工作流目录截断后不得保留尾随空格或点");
+assert.match(controllerSource, /slice\(0, 48\)\.replace\(\/\[ \.\]\+\$\/g, ""\)/, "Windows 工作流目录截断后不得保留尾随空格或点");
 console.log("workflow plan validation and approval gate OK");
