@@ -15,6 +15,7 @@ export class PluginHost {
   private readonly registryFile: string;
   private started = false;
   private readonly bound = new Set<string>();
+  private readonly admissions = new Map<string, number>();
 
   constructor(private readonly paths: WorkbenchPaths, plugins: MetaCodePlugin[] = []) {
     this.registryFile = path.join(paths.pluginsDir, "registry.json");
@@ -32,10 +33,12 @@ export class PluginHost {
   bind(id: string, lifecycle: PluginLifecycle) {
     const plugin = this.require(id);
     if (this.bound.has(id)) throw new Error(`插件 ${id} 已绑定运行实例`);
+    if (plugin.activate || this.cleanup.has(id)) throw new Error(`插件 ${id} 已有运行实例，不能替换生命周期`);
+    const previous = { ...plugin };
     Object.assign(plugin, lifecycle);
     this.bound.add(id);
     try { if (this.isEnabled(id)) this.activate(id); }
-    catch (error) { this.bound.delete(id); throw error; }
+    catch (error) { this.plugins.set(id, previous); this.bound.delete(id); throw error; }
   }
 
   private require(id: string) {
@@ -51,7 +54,10 @@ export class PluginHost {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { schemaVersion: 1, enabled: {} };
       throw error;
     }
-    const value = JSON.parse(text) as Registry;
+    let value: Registry;
+    try { value = JSON.parse(text) as Registry; }
+    catch { throw new Error("插件启停配置损坏，已保留原文件，请恢复配置后重试"); }
+    if (!value) throw new Error("插件启停配置损坏，已保留原文件，请恢复配置后重试");
     if (value.schemaVersion !== 1 || !value.enabled || Array.isArray(value.enabled) || typeof value.enabled !== "object" || Object.values(value.enabled).some((item) => typeof item !== "boolean")) {
       throw new Error("插件启停配置损坏，已保留原文件，请恢复配置后重试");
     }
@@ -106,6 +112,7 @@ export class PluginHost {
   }
 
   stop() {
+    this.started = false;
     const errors: unknown[] = [];
     for (const cleanup of [...this.cleanup.values()].reverse()) { try { cleanup(); } catch (error) { errors.push(error); } }
     this.cleanup.clear(); this.started = false;
@@ -113,6 +120,19 @@ export class PluginHost {
   }
 
   has(id: string) { return this.plugins.has(id); }
+  /** Hold admission across awaits until a host request has settled. */
+  acquire(id: string) {
+    this.require(id);
+    if (!this.isEnabled(id)) throw new Error(`插件 ${id} 当前已停用`);
+    this.admissions.set(id, (this.admissions.get(id) || 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.admissions.get(id) || 1) - 1;
+      if (remaining) this.admissions.set(id, remaining); else this.admissions.delete(id);
+    };
+  }
   isEnabled(id: string) { return this.started && this.enabled.get(id) === true; }
   manifest(id: string) { return this.plugins.has(id) ? structuredClone(this.require(id).manifest) : null; }
 
@@ -127,7 +147,10 @@ export class PluginHost {
     if (this.isEnabled(id) === enabled) return this.snapshot(id);
     const next = new Map(this.enabled).set(id, enabled);
     for (const [candidate, active] of next) if (active) this.checkDependencies(candidate, next);
-    if (!enabled) plugin.beforeDisable?.();
+    if (!enabled) {
+      if (this.admissions.get(id)) throw new Error("插件请求仍在处理中，请稍后再停用");
+      plugin.beforeDisable?.();
+    }
     // Admission is synchronous. No request can observe a partial transition.
     if (enabled) this.activate(id);
     try { this.persist(next); }
@@ -136,7 +159,13 @@ export class PluginHost {
       throw error;
     }
     this.enabled.set(id, enabled);
-    if (!enabled) { this.cleanup.get(id)?.(); this.cleanup.delete(id); }
+    if (!enabled) {
+      const cleanup = this.cleanup.get(id);
+      this.cleanup.delete(id);
+      // The durable state is already disabled; do not report a failed toggle
+      // that leaves clients believing the plugin is still enabled.
+      try { cleanup?.(); } catch (error) { console.error(`Plugin ${id} cleanup failed`, error); }
+    }
     return this.snapshot(id);
   }
 

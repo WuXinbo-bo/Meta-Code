@@ -48,6 +48,22 @@ export function workflowAuthorizedWriteScopes(scopes: string[]) {
 
 export function createOrchestrationScheduler(ports: OrchestrationSchedulerPorts) {
   const { workflowTicks, workspaceById, syncWorkflowProtocolFiles, appendWorkflowProtocolEvent, workflowEvent, activeWorkflowNodes, activeWorkflowIntegrations, activeDelegationTasks, integrateWorkflow, currentWorkflowProviderCapabilities, runtimeBindingForProvider, WORKFLOW_RUNNER_ID, workflowNodeIntents, skillProjectionManager, workspaceTreeIndex, executeWorkflowNode, workflowResultDigest, workflowRepository, workflowStateFiles, isEnabled } = ports;
+const retryTimers = new Map<string, NodeJS.Timeout>();
+function scheduleTick(workflowId: string, ownerUserId: string, delay: number) {
+  if (!isEnabled()) return;
+  const previous = retryTimers.get(workflowId);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    retryTimers.delete(workflowId);
+    queueWorkflowTick(workflowId, ownerUserId);
+  }, delay);
+  timer.unref();
+  retryTimers.set(workflowId, timer);
+}
+function dispose() {
+  for (const timer of retryTimers.values()) clearTimeout(timer);
+  retryTimers.clear();
+}
 function scopesOverlap(left: string[], right: string[]) {
   if (!left.length || !right.length) return true;
   const clean = (value: string) => value.replaceAll("\\", "/").replace(/\/\*\*?$/, "").replace(/\/$/, "");
@@ -92,8 +108,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
     } else nextRetryDelay = nextRetryDelay === null ? dueAt - nowMs : Math.min(nextRetryDelay, dueAt - nowMs);
   }
   if (nextRetryDelay !== null) {
-    const timer = setTimeout(() => queueWorkflowTick(workflowId, ownerUserId), Math.max(50, nextRetryDelay));
-    timer.unref();
+    scheduleTick(workflowId, ownerUserId, Math.max(50, nextRetryDelay));
   }
   let propagated = true;
   while (propagated) {
@@ -124,8 +139,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
   if (workflow.nodes.length && workflow.nodes.every((node) => node.status === "completed" || (!node.required && ["failed", "blocked", "skipped", "canceled"].includes(node.status)))) {
     const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + activeDelegationTasks.size;
     if (globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
-      const timer = setTimeout(() => queueWorkflowTick(workflowId, ownerUserId), 1_000);
-      timer.unref();
+      scheduleTick(workflowId, ownerUserId, 1_000);
       return;
     }
     await integrateWorkflow(workflowId, ownerUserId);
@@ -248,14 +262,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
       syncWorkflowProtocolFiles(workflowId, ownerUserId);
       appendWorkflowProtocolEvent(workflowId, ownerUserId, retry ? "node.retry_wait" : "node.failed", { error: latest.error, category, retry, stage: stageRetryError?.stage || null }, node.id, latest.attempt);
       workflowEvent(workflowId, "workflow.node.failed", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-      if (retry) {
-        const timer = setTimeout(() => {
-          const retryNode = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id);
-          if (!retryNode || retryNode.status !== "retry_wait") return;
-          queueWorkflowTick(workflowId, ownerUserId);
-        }, delay);
-        timer.unref();
-      }
+      if (retry) scheduleTick(workflowId, ownerUserId, delay);
     }).finally(() => {
       releaseSkillProjection();
       workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
@@ -267,5 +274,5 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
   }
 }
 
-return { queueWorkflowTick, reopenRecoveredWorkflowDependents };
+return { queueWorkflowTick, reopenRecoveredWorkflowDependents, dispose };
 }

@@ -136,6 +136,7 @@ async function handleDelegatedExecutionFailure(taskId: string, error: unknown) {
   }
   try { await saveState(); }
   catch (error) { await interrupt(retryTask); return; }
+  if (!canRun(retryTask)) { await interrupt(retryTask); return; }
   const timer = setTimeout(() => {
     timers.delete(timer);
     const current = getState().delegatedTasks.find((item) => item.id === retryTaskId);

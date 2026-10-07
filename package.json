@@ -132,8 +132,8 @@
     "desktop:package": "node scripts/build-desktop-package.mjs",
     "desktop:package:dir": "node scripts/build-desktop-package.mjs --dir-only",
     "install:blender-mcp": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-blender-mcp.ps1",
-    "skill:seal": "node scripts/seal-builtin-skill.mjs",
-    "skill:sign": "node scripts/sign-skill-release.mjs"
+    "test:plugin-lifecycle": "node --import tsx scripts/test-plugin-lifecycle.mjs",
+    "test:plugin-api": "node scripts/test-plugin-api.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
