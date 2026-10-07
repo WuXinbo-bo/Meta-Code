@@ -321,7 +321,7 @@
 
 .workspace-browser-tab__detail {
   color: var(--mc-text-tertiary, #8b8e8a);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .workspace-browser-tab__status.is-loading {
