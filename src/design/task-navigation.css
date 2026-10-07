@@ -1,0 +1,32 @@
+.sidebar-scope-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 12px 6px;
+  color: var(--mc-text-secondary);
+}
+.sidebar-scope-filter select {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+.task-location-label { overflow: hidden; text-overflow: ellipsis; }
+.task-launch-dialog { width: min(440px, calc(100vw - 32px)); }
+.task-launch-fields { display: grid; gap: 12px; padding: 16px 20px 12px; }
+.task-launch-fields > label { display: grid; grid-template-columns: 70px minmax(0, 1fr); align-items: center; gap: 12px; }
+.task-launch-fields > label > span { color: var(--mc-text-secondary); font-size: 12px; }
+.task-launch-fields select { width: 100%; min-width: 0; height: 34px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-md); color: var(--mc-text); background: var(--mc-control); padding: 0 8px; font-size: 13px; }
+.task-launch-location { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.task-launch-location > select { flex: 1; width: 0; }
+.task-launch-location > button { display: flex; align-items: center; gap: 5px; white-space: nowrap; height: 34px; padding: 0 8px; font-size: 12px; }
+.task-launch-hint { margin: -5px 0 0 82px; color: var(--mc-text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-launch-dialog .dialog-actions > :first-child { margin-right: auto; }
+@media (max-width: 480px) {
+  .task-launch-fields > label { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
+  .task-launch-hint { margin-left: 62px; }
+}
