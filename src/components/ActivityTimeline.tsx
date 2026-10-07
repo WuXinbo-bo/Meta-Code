@@ -1,8 +1,8 @@
 import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { commandActivitySummary } from "./AgentActivityEntry";
-import { ActivityRenderer } from "./ActivityRenderer";
+import { ActivityRenderer, type ActivityRendererProps } from "./ActivityRenderer";
 import { AgentPlanView } from "./AgentPlanView";
 import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPlanSnapshot, isRoutineActivityStatus, normalizeActivityLogs, type ActivityCategory, type AgentPlanSnapshot, type ActivityViewLog } from "./activityModel";
 
@@ -112,6 +112,15 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
   return retained;
 }
 
+function activityDisclosureKey(item: Extract<ActivityItem, { type: "group" | "summary" }>) {
+  const first = item.logs[0];
+  return `${first.category}:${first.id}`;
+}
+
+function activityItemHasFailure(item: Extract<ActivityItem, { type: "group" | "summary" }>) {
+  return item.logs.some((log) => log.phase === "failed" || log.kind === "error");
+}
+
 function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityItem[] {
   // Keep the completed portion of every open turn. The old implementation
   // retained only the newest operational event, which made earlier commands
@@ -129,50 +138,59 @@ function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityI
     : item)];
 }
 
-function CompletedActivitySummary({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
-  item: Extract<ActivityItem, { type: "summary" }>;
-  status: string;
-  provider: string;
-  providerLabel?: string;
-  providerIcon?: string;
-  providerAccent?: string;
-  messageLabel?: string;
-  renderMessage?: (text: string) => ReactNode;
-  workspaceId?: string;
+function PreservedActivityRenderer({ open, onOpenChange, ...props }: ActivityRendererProps & {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Native toggle does not bubble. Capture only the entry's root disclosure,
+  // keeping nested technical-detail toggles independent of the timeline row.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const recordToggle = (event: Event) => {
+      if (event.target === root.firstElementChild && event.target instanceof HTMLDetailsElement) onOpenChange(event.target.open);
+    };
+    root.addEventListener("toggle", recordToggle, true);
+    return () => root.removeEventListener("toggle", recordToggle, true);
+  }, [onOpenChange]);
+  return <div ref={rootRef} className="activity-log-disclosure" style={{ display: "contents" }}><ActivityRenderer {...props} expanded={open} /></div>;
+}
+
+function CompletedActivitySummary({ item, open, onOpenChange, renderLog }: {
+  item: Extract<ActivityItem, { type: "summary" }>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  renderLog: (log: ActivityViewLog) => ReactNode;
+}) {
   const categoryLabel = activityCategoryLabel(item.category);
-  return <details className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  const failed = activityItemHasFailure(item);
+  return <details open={open} className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category}${failed ? " phase-failed" : ""}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
-      <span className="agent-event-icon completed">{categoryIcon(item.category)}</span>
+      <span className={`agent-event-icon ${failed ? "failed" : "completed"}`}>{categoryIcon(item.category)}</span>
       <strong>{activityGroupLabel(item.category, item.logs.length)}</strong>
       <ChevronRight className="agent-event-chevron" size={14} />
     </summary>
     {open && <div className="activity-summary-details">
-      {item.logs.map((log) => <ActivityRenderer key={log.id} log={log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />)}
+      {item.logs.map(renderLog)}
     </div>}
   </details>;
 }
 
-function CollapsedActivityGroup({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
+function CollapsedActivityGroup({ item, status, open, onOpenChange, renderLog }: {
   item: Extract<ActivityItem, { type: "group" }>;
   status: string;
-  provider: string;
-  providerLabel?: string;
-  providerIcon?: string;
-  providerAccent?: string;
-  messageLabel?: string;
-  renderMessage?: (text: string) => ReactNode;
-  workspaceId?: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  renderLog: (log: ActivityViewLog) => ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   const latest = item.logs.at(-1)!;
   const time = new Date(latest.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const summary = (latest.category === "command" ? commandActivitySummary(latest) : latest.text || "状态已更新").replace(/\s+/g, " ").trim();
-  const latestStatus = latest.phase === "failed" || latest.kind === "error" ? "failed" : latest.phase === "completed" ? "completed" : latest.phase === "running" ? "running" : status;
+  const latestStatus = activityItemHasFailure(item) ? "failed" : latest.phase === "completed" ? "completed" : latest.phase === "running" ? "running" : status;
   const categoryLabel = activityCategoryLabel(latest.category);
   const groupLabel = activityGroupLabel(latest.category, item.logs.length);
-  return <details className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category} phase-${latestStatus}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details open={open} className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category} phase-${latestStatus}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
       <span className={`agent-event-icon ${latestStatus}`}>{categoryIcon(latest.category)}</span>
       <span className="agent-stream-copy"><strong>{groupLabel}</strong><small>{summary}</small></span>
@@ -181,7 +199,7 @@ function CollapsedActivityGroup({ item, status, provider, providerLabel, provide
       <ChevronRight className="agent-event-chevron" size={14} />
     </summary>
     {open && <div className="agent-stream-cluster-items">
-      {item.logs.map((log) => <ActivityRenderer key={log.id} log={log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />)}
+      {item.logs.map(renderLog)}
     </div>}
   </details>;
 }
@@ -224,6 +242,12 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [phaseFilter, setPhaseFilter] = useState("all");
+  // Presentation keys outlive group -> completed-summary transitions and
+  // virtualized row remounts. Logs and their grouping remain unchanged.
+  const [disclosures, setDisclosures] = useState<Record<string, boolean>>({});
+  const recordDisclosure = useCallback((key: string, open: boolean) => {
+    setDisclosures((current) => current[key] === open ? current : { ...current, [key]: open });
+  }, []);
   const normalizedLogs = useMemo(() => normalizeActivityLogs(logs).filter((log) => !hiddenCategories.includes(log.category)), [logs, hiddenCategories]);
   const hasFilters = showFilters && Boolean(query.trim() || categoryFilter !== "all" || phaseFilter !== "all");
   const failureCount = useMemo(() => normalizedLogs.filter((log) => log.phase === "failed").length, [normalizedLogs]);
@@ -243,6 +267,22 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   const items = useMemo<ActivityItem[]>(() => hasFilters
     ? filteredLogs.map((log) => ({ type: "log", log: { ...log, transient: false } }))
     : minimalActivities(filteredLogs, provider, status), [filteredLogs, provider, status, hasFilters]);
+  const observedFailuresRef = useRef(new Set<string>());
+  useEffect(() => {
+    const revealed: Record<string, boolean> = {};
+    for (const item of items) {
+      const logs = item.type === "group" || item.type === "summary" ? item.logs : item.type === "log" || item.type === "current" ? [item.log] : [];
+      for (const log of logs) {
+        if ((log.phase !== "failed" && log.kind !== "error") || observedFailuresRef.current.has(log.id)) continue;
+        observedFailuresRef.current.add(log.id);
+        revealed[`log:${log.id}`] = true;
+        if (item.type === "group" || item.type === "summary") revealed[activityDisclosureKey(item)] = true;
+      }
+    }
+    // A new failure must become visible even if its live group was previously
+    // closed. Once inspected, the user's subsequent manual close is retained.
+    if (Object.keys(revealed).length) setDisclosures((current) => ({ ...current, ...revealed }));
+  }, [items]);
   const virtualized = items.length > 40;
   const [scrollMargin, setScrollMargin] = useState(0);
   const [externalScrollElement, setExternalScrollElement] = useState<HTMLDivElement | null>(null);
@@ -289,15 +329,21 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
     scrollMargin
   });
 
+  const renderLog = (log: ActivityViewLog) => {
+    const props = { log, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider, showReasoning: hasFilters };
+    if (log.kind === "message") return <ActivityRenderer key={log.id} {...props} />;
+    const key = `log:${log.id}`;
+    return <PreservedActivityRenderer key={log.id} {...props} open={disclosures[key] ?? (log.phase === "failed" || log.kind === "error")} onOpenChange={(open) => recordDisclosure(key, open)} />;
+  };
   const renderItem = (item: ActivityItem) => item.type === "group"
-    ? <CollapsedActivityGroup key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+    ? <CollapsedActivityGroup key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "summary"
-      ? <CompletedActivitySummary key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "current"
-      ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} /></div>
+      ? <div className="activity-live-current" key={`current-${item.log.id}`}>{renderLog(item.log)}</div>
     : item.type === "plan"
       ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
-    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} showReasoning={hasFilters} />;
+    : renderLog(item.log);
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
   return <div className="activity-timeline single-layer">

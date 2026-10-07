@@ -123,7 +123,7 @@ assert.match(app, /<InstalledProviderConnections/);
 assert.match(app, /settings-provider-config-grid/);
 assert.match(app, /<SettingsNavigation/);
 assert.doesNotMatch(app, /value=\{form\.defaultEngine\}/, "Agent 总览不再暴露全局默认主脑选择");
-assert.match(app, /useState<EngineName \| "workflow" \| "">\(""\)/, "新建任务必须先明确选择 Provider");
+assert.match(app, /useState<EngineName \| "">\(""\)/, "新建任务必须先明确选择 Provider");
 assert.match(app, /const fallbackEngine = data\?\.providerControls/, "旧会话和工作流保留稳定的内部 Provider 回退");
 assert.match(app, /control \? control\.operations\.setDefault/);
 assert.match(app, /disabled=\{busy \|\| !selectedAvailable\}/);

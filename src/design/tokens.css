@@ -2,10 +2,10 @@
   color-scheme: light;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
   --mc-canvas: #ffffff;
-  --mc-canvas-subtle: #f6f8fa;
+  --mc-canvas-subtle: #f6f7f8;
   --mc-control: #ffffff;
-  --mc-hover: rgba(208, 215, 222, .32);
-  --mc-selected: #f6f8fa;
+  --mc-hover: rgba(208, 215, 222, .24);
+  --mc-selected: #edf0f3;
   --mc-backdrop: rgba(31, 35, 40, .32);
   --mc-bg: var(--mc-canvas);
   --mc-surface: #ffffff;
@@ -15,8 +15,8 @@
   --mc-text: #1f2328;
   --mc-text-secondary: #59636e;
   --mc-text-tertiary: #818b98;
-  --mc-line: #d0d7de;
-  --mc-line-strong: #afb8c1;
+  --mc-line: #e1e5e9;
+  --mc-line-strong: #bfc7d0;
   --mc-brand: #1f2328;
   --mc-brand-inverse: #ffffff;
   --mc-success: #2f7d4d;
@@ -30,20 +30,19 @@
   --mc-r-md: 6px;
   --mc-r-lg: 8px;
   --mc-space-1: 4px;
-  --mc-reply-font-size: 15px;
-  --mc-reply-line-height: 1.7;
-  --mc-reply-paragraph-gap: 14px;
-  --mc-reply-row-gap: 5px;
+  --mc-reply-font-size: 14.5px;
+  --mc-reply-line-height: 1.68;
+  --mc-reply-paragraph-gap: 12px;
+  --mc-reply-row-gap: 6px;
+  --mc-chrome-height: 46px;
+  --mc-agent-rail-width: 38px;
   --mc-space-2: 8px;
   --mc-space-3: 12px;
   --mc-space-4: 16px;
   --mc-space-6: 24px;
   --mc-space-8: 32px;
-  /* Reading width shared by messages, composer and task launch surfaces. */
-  /* Keep the transcript visually focused on wide workspaces.  The shell can
-     still grow, but conversation content should retain a comfortable reading
-     measure instead of stretching across the entire center pane. */
-  --mc-content: 900px;
+  /* Transcript and composer share the same reading column. */
+  --mc-content: 820px;
   --mc-fast: 140ms;
   --mc-normal: 200ms;
 
@@ -64,24 +63,24 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --mc-canvas: #181918;
-  --mc-canvas-subtle: #1c1d1c;
-  --mc-control: #202120;
-  --mc-hover: #292a29;
-  --mc-selected: #292a29;
+  --mc-canvas: #18191b;
+  --mc-canvas-subtle: #1c1e21;
+  --mc-control: #222428;
+  --mc-hover: #2a2d31;
+  --mc-selected: #2a2d31;
   --mc-backdrop: rgba(0, 0, 0, .5);
-  --mc-bg: #181918;
-  --mc-surface: #202120;
-  --mc-surface-subtle: #1c1d1c;
-  --mc-surface-muted: #292a29;
-  --mc-overlay: rgba(32, 33, 32, .96);
+  --mc-bg: #18191b;
+  --mc-surface: #202226;
+  --mc-surface-subtle: #1c1e21;
+  --mc-surface-muted: #2a2d31;
+  --mc-overlay: rgba(32, 34, 38, .98);
   --mc-text: #f0f0ed;
   --mc-text-secondary: #b2b4af;
   --mc-text-tertiary: #7e817c;
-  --mc-line: #343633;
-  --mc-line-strong: #484a46;
+  --mc-line: #35383d;
+  --mc-line-strong: #4b5057;
   --mc-brand: #f0f0ed;
-  --mc-brand-inverse: #181918;
+  --mc-brand-inverse: #18191b;
   --mc-success: #69a77d;
   --mc-warning: #c59a58;
   --mc-danger: #d2786f;
