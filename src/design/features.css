@@ -169,7 +169,6 @@ button.primary { border-color: var(--mc-brand); color: var(--mc-brand-inverse); 
 .settings-save-actions { display: flex; align-items: center; gap: 10px; }
 .settings-save-actions > span { max-width: 320px; color: var(--mc-danger); font-size: 11px; line-height: 1.35; text-align: right; }
 .settings-save-actions > button:disabled { opacity: .5; cursor: default; }
-.settings-default-engine > div > small { color: var(--mc-warning); font-size: 11px; line-height: 1.4; }
 .settings-shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); gap: 30px; width: min(1120px, calc(100% - 32px)); margin: 0 auto; align-items: start; }
 .settings-shell > .settings-navigation { position: sticky; top: 78px; display: block; max-width: none; margin: 0; padding: 4px 18px 12px 0; border: 0; border-right: 1px solid var(--mc-line); }
 .settings-section-list { display: grid; gap: 3px; }
