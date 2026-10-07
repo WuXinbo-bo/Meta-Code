@@ -25,7 +25,23 @@
 .task-launch-location > select { flex: 1; width: 0; }
 .task-launch-location > button { display: flex; align-items: center; gap: 5px; white-space: nowrap; height: 34px; padding: 0 8px; font-size: 12px; }
 .task-launch-hint { margin: -5px 0 0 82px; color: var(--mc-text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
-.task-launch-dialog .dialog-actions > :first-child { margin-right: auto; }
+.task-more-menu { position: relative; }
+.task-more-menu > summary { display: grid; place-items: center; width: 30px; height: 30px; cursor: pointer; border-radius: var(--mc-r-md); list-style: none; color: var(--mc-text-secondary); }
+.task-more-menu > summary::-webkit-details-marker { display: none; }
+.task-more-menu > summary:hover { background: var(--mc-hover); }
+.task-more-content { position: absolute; z-index: 65; right: 0; top: calc(100% + 6px); width: min(300px, calc(100vw - 28px)); padding: 10px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-lg); background: var(--mc-overlay); box-shadow: var(--mc-shadow-menu); }
+.task-more-content > button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 6px 8px; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text-secondary); background: transparent; text-align: left; font-size: 12px; }
+.task-more-content > button:hover { background: var(--mc-hover); }
+.task-usage-details { padding: 12px 8px 2px; border-top: 1px solid var(--mc-line); margin-top: 8px; font-size: 12px; }
+.task-usage-details header { display: flex; align-items: center; gap: 6px; }
+.task-usage-details header > span { margin-left: auto; font-size: 11px; color: var(--mc-text-secondary); }
+.task-usage-details dl { margin: 10px 0 0; display: grid; gap: 8px; }
+.task-usage-details dl > div { display: flex; justify-content: space-between; gap: 12px; }
+.task-usage-details dt { color: var(--mc-text-secondary); }
+.task-usage-details dd { margin: 0; font-variant-numeric: tabular-nums; }
+.inspector[hidden] { display: none !important; }
+.inspector .tree-search { display: none; }
+.inspector:hover .tree-search, .inspector:focus-within .tree-search, .inspector .tree-search.is-expanded { display: flex; }
 @media (max-width: 480px) {
   .task-launch-fields > label { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
   .task-launch-hint { margin-left: 62px; }
