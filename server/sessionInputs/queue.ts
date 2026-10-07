@@ -50,6 +50,7 @@ export function normalizePendingInput<TAttachment = unknown, TSkillPolicies = Re
     ...(source.skillPolicies && typeof source.skillPolicies === "object" && !Array.isArray(source.skillPolicies)
       ? { skillPolicies: source.skillPolicies as TSkillPolicies }
       : {}),
+    ...(source.executionMode === "native" || source.executionMode === "collaborative" ? { executionMode: source.executionMode } : {}),
     ...(Array.isArray(source.attachments) ? { attachments: source.attachments as TAttachment[] } : {})
   };
 }

@@ -46,6 +46,8 @@
     "test:delegation-bridge": "node scripts/test-delegate-agent-cli.mjs",
     "test:agent-sdk": "node --import tsx scripts/test-agent-sdk-v1.mjs",
     "test:provider-host": "node --import tsx scripts/test-provider-host.mjs",
+    "test:plugin-boundaries": "node --import tsx scripts/test-plugin-boundaries.mjs",
+    "test:plugin-host": "node --import tsx scripts/test-plugin-host.mjs",
     "test:acp": "node --import tsx scripts/test-acp-stdio-backend.mjs",
     "test:acp-events": "node --import tsx scripts/test-acp-event-normalization.mjs",
     "test:acp-registry": "node --import tsx scripts/test-acp-registry.mjs",

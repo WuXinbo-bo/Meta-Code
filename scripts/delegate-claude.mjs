@@ -7,7 +7,7 @@ function help() {
     "Claude-Codex Claude 独立子任务桥接",
     "",
     "用法：",
-    "  node scripts/delegate-claude.mjs --file .claude-codex/tasks/review-001.json",
+    "  node scripts/delegate-claude.mjs --file review-001.json",
     "  node scripts/delegate-claude.mjs --task \"审查当前架构\" --mode review --cwd .",
     "",
     "JSON 字段：taskId、nickname、mode、prompt、cwd、acceptance（字符串数组）"

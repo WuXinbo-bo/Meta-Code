@@ -21,6 +21,10 @@ export type WorkbenchPaths = {
   claudeRuntimeDir: string;
   mcpConfigDir: string;
   managedSkillsDir: string;
+  /** Registry and per-plugin user data. Never points into a workspace. */
+  pluginsDir: string;
+  /** Runtime snapshots, event logs and checkpoints owned by plugins. */
+  pluginRuntimeDir: string;
   standaloneSessionsDir: string;
   workflowTransactionsDir: string;
   appUpdateStateFile: string;
@@ -59,6 +63,8 @@ export function resolveWorkbenchPaths(projectRoot: string): WorkbenchPaths {
     claudeRuntimeDir: path.join(runtimesDir, "claude"),
     mcpConfigDir: path.join(dataDir, "mcp"),
     managedSkillsDir: path.join(dataDir, "skills"),
+    pluginsDir: path.join(dataDir, "plugins"),
+    pluginRuntimeDir: path.join(dataDir, "runtime", "plugins"),
     standaloneSessionsDir: path.join(dataDir, "sessions", "standalone"),
     workflowTransactionsDir: path.join(dataDir, "transactions", "workflow-plans"),
     appUpdateStateFile: path.join(dataDir, "updates", "state.json"),
