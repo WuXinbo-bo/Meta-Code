@@ -1286,6 +1286,7 @@ type SidebarTaskRowProps = {
   delegationEnabled: boolean;
   providerControl?: ProviderControlSnapshot;
   relativeTimeNow: number;
+  locationLabel: string;
   onSelect: (item: SidebarTaskItem) => void;
   onPrefetch: (id: string) => void;
   onCancelPrefetch: () => void;
@@ -1303,6 +1304,7 @@ function sameSidebarTaskRow(previous: SidebarTaskRowProps, next: SidebarTaskRowP
     || left.task.updatedAt !== right.task.updatedAt
     || left.task.pinned !== right.task.pinned
     || left.task.archivedAt !== right.task.archivedAt
+    || previous.locationLabel !== next.locationLabel
     || previous.active !== next.active
     || previous.delegationEnabled !== next.delegationEnabled
     || previous.providerControl?.identity.icon !== next.providerControl?.identity.icon
@@ -1324,6 +1326,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   delegationEnabled,
   providerControl,
   relativeTimeNow,
+  locationLabel,
   onSelect,
   onPrefetch,
   onCancelPrefetch,
@@ -1347,7 +1350,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   >
     <button className="session-select" onClick={() => onSelect(item)}>
       <ProviderIcon provider={item.kind === "workflow" ? item.task.plannerEngine : item.task.engine} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={15} />
-      <span><strong>{item.task.pinned && <Pin size={11} />}{item.task.title}</strong><small>{item.kind === "workflow" ? `编排 · ${workflowStatusLabel(item.task.status)}` : `${delegationEnabled ? "协作" : "原生"} · ${sessionStatusLabel(item.task.status)}`} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
+      <span><strong>{item.task.pinned && <Pin size={11} />}{item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
     </button>
     <IconButton label="管理任务" onClick={() => onOpenContextMenu(item.task.id, 210, Math.min(window.innerHeight - 330, 130))}><MoreHorizontal size={15} /></IconButton>
   </div>;
@@ -1371,6 +1374,7 @@ const SidebarTaskList = memo(function SidebarTaskList({
   activeWorkflowId,
   delegationEnabled,
   providerControls,
+  workspaceNames,
   onSelect,
   onPrefetch,
   onCancelPrefetch,
@@ -1396,6 +1400,7 @@ const SidebarTaskList = memo(function SidebarTaskList({
   activeWorkflowId: string;
   delegationEnabled: boolean;
   providerControls: ProviderControlSnapshot[];
+  workspaceNames: Record<string, string>;
   onSelect: (item: SidebarTaskItem) => void;
   onPrefetch: (id: string) => void;
   onCancelPrefetch: () => void;
@@ -1426,6 +1431,7 @@ const SidebarTaskList = memo(function SidebarTaskList({
     delegationEnabled={delegationEnabled}
     providerControl={providerControls.find((control) => control.providerId === (item.kind === "workflow" ? item.task.plannerEngine : item.task.engine))}
     relativeTimeNow={relativeTimeNow}
+    locationLabel={item.kind === "chat" && item.task.scopeKind === "standalone" ? "临时对话" : workspaceNames[item.task.workspaceId] || "工作区"}
     onSelect={onSelect}
     onPrefetch={onPrefetch}
     onCancelPrefetch={onCancelPrefetch}
@@ -2373,6 +2379,8 @@ export function App() {
   const [workspaceArchiveOpen, setWorkspaceArchiveOpen] = useState(false);
   const [sidebarSection, setSidebarSection] = useState<SidebarSection>("tasks");
   const [sidebarQuery, setSidebarQuery] = useState("");
+  // Browsing a workspace never changes a new task's execution target.
+  const [sidebarWorkspaceFilter, setSidebarWorkspaceFilter] = useState("");
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(readLayoutWidths);
   const [resizingPane, setResizingPane] = useState<ResizingPane | null>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -3371,12 +3379,12 @@ export function App() {
     ? !activeScopeBrowserResource.workspaceId
     : standaloneScope || activeSession?.scopeKind === "standalone";
   const sessions = useMemo(
-    () => (data?.sessions || []).filter((item) => (standaloneActive ? item.scopeKind === "standalone" : item.scopeKind !== "standalone" && item.workspaceId === activeWorkspaceId) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
-    [data?.sessions, activeWorkspaceId, standaloneActive]
+    () => (data?.sessions || []).filter((item) => (!sidebarWorkspaceFilter || item.scopeKind !== "standalone" && item.workspaceId === sidebarWorkspaceFilter) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+    [data?.sessions, sidebarWorkspaceFilter]
   );
   const workflows = useMemo(
-    () => (data?.workflows || []).filter((item) => item.workspaceId === activeWorkspaceId && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
-    [data?.workflows, activeWorkspaceId]
+    () => (data?.workflows || []).filter((item) => (!sidebarWorkspaceFilter || item.workspaceId === sidebarWorkspaceFilter) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+    [data?.workflows, sidebarWorkspaceFilter]
   );
   const browserConversationProviders = useMemo(() => {
     const controlsById = new Map((data?.providerControls || []).map((control) => [control.providerId, control]));
@@ -3461,7 +3469,12 @@ export function App() {
     });
     if (next !== workspaceBrowser) dispatchWorkspaceBrowser({ type: "replace", state: next });
   }, [data, workspaceBrowser]);
-  const taskFolders = useMemo(() => workspace?.taskFolders || [], [workspace?.taskFolders]);
+  const sidebarWorkspace = data?.workspaces.find((item) => item.id === sidebarWorkspaceFilter);
+  const workspaceNames = useMemo(() => Object.fromEntries((data?.workspaces || []).map((item) => [item.id, item.name])), [data?.workspaces]);
+  const taskFolders = useMemo(() => sidebarWorkspace?.taskFolders || [], [sidebarWorkspace?.taskFolders]);
+  useEffect(() => {
+    if (sidebarWorkspaceFilter && data && !data.workspaces.some((item) => item.id === sidebarWorkspaceFilter && !item.archivedAt)) setSidebarWorkspaceFilter("");
+  }, [data?.workspaces, sidebarWorkspaceFilter]);
   const taskItems = useMemo<SidebarTaskItem[]>(() => [
     ...sessions.map((task) => ({ kind: "chat" as const, task })),
     ...workflows.map((task) => ({ kind: "workflow" as const, task }))
@@ -3482,7 +3495,7 @@ export function App() {
       if (isActive) active.push(item);
       else if (item.task.pinned) pinned.push(item);
       if (!item.task.pinned && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
-      if (item.task.folderId) byFolder.get(item.task.folderId)?.push(item);
+      if (item.task.folderId && !isActive && !item.task.pinned) byFolder.get(item.task.folderId)?.push(item);
     }
 
     return {
@@ -3493,8 +3506,8 @@ export function App() {
       folderTaskItems: byFolder
     };
   }, [taskItems, taskFolders, deferredSidebarQuery]);
-  const archivedSessions = useMemo(() => (data?.sessions || []).filter((item) => (standaloneScope ? item.scopeKind === "standalone" : item.scopeKind !== "standalone" && item.workspaceId === activeWorkspaceId) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.sessions, activeWorkspaceId, standaloneScope]);
-  const archivedWorkflows = useMemo(() => (data?.workflows || []).filter((item) => item.workspaceId === activeWorkspaceId && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.workflows, activeWorkspaceId]);
+  const archivedSessions = useMemo(() => (data?.sessions || []).filter((item) => (!sidebarWorkspaceFilter || item.scopeKind !== "standalone" && item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.sessions, sidebarWorkspaceFilter]);
+  const archivedWorkflows = useMemo(() => (data?.workflows || []).filter((item) => (!sidebarWorkspaceFilter || item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.workflows, sidebarWorkspaceFilter]);
   const archivedTasks = useMemo<SidebarTaskItem[]>(() => [
     ...archivedSessions.map((task) => ({ kind: "chat" as const, task })),
     ...archivedWorkflows.map((task) => ({ kind: "workflow" as const, task }))
@@ -4002,7 +4015,11 @@ export function App() {
     setDialog("task-mode");
   };
 
-  const openWorkflowDraft = async () => {
+  const openWorkflowDraft = async (workspaceId = activeWorkspaceId) => {
+    if (!workspaceId) throw new Error("任务编排需要选择工作区");
+    setActiveWorkspaceId(workspaceId);
+    sessionStorage.setItem(ACTIVE_WORKSPACE_KEY, workspaceId);
+    activateStandaloneScope(false);
     activateTaskKind("workflow-draft");
     dispatchWorkspaceBrowser({ type: "deactivate" });
     previewActivationRef.current = "";
@@ -4043,12 +4060,12 @@ export function App() {
     return created;
   };
 
-  const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone") => {
-    if (scopeKind === "workspace" && !activeWorkspaceId) throw new Error("请先选择工作区");
+  const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone", targetWorkspaceId: string) => {
+    if (scopeKind === "workspace" && !targetWorkspaceId) throw new Error("请先选择工作区");
     const initialPrompt = pendingNewTaskPrompt.trim();
     const initialSkills = pendingNewTaskSkills;
     const initialAttachments = pendingNewTaskAttachments;
-    const scopeKey = scopeKind === "standalone" ? "__standalone__" : activeWorkspaceId;
+    const scopeKey = scopeKind === "standalone" ? "__standalone__" : targetWorkspaceId;
     const creationRequest: PendingSessionCreation = {
       requestId: `session-create:${crypto.randomUUID()}`,
       scopeKey,
@@ -4081,7 +4098,7 @@ export function App() {
       createdSession = await api<Session>(`/api/sessions?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
         method: "POST",
         body: JSON.stringify({
-          workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined,
+          workspaceId: scopeKind === "workspace" ? targetWorkspaceId : undefined,
           scopeKind,
           engine,
           skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined,
@@ -4242,21 +4259,21 @@ export function App() {
   };
 
   const createTaskFolder = useCallback(async () => {
-    if (!activeWorkspaceId) return;
+    if (!sidebarWorkspaceFilter) return;
     const name = window.prompt("新建任务文件夹")?.trim();
     if (!name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setSessionAreaMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
-  }, [activeWorkspaceId, setNotice]);
+  }, [sidebarWorkspaceFilter, setNotice]);
 
   const renameTaskFolder = async (folder: TaskFolder) => {
     const name = window.prompt("重命名任务文件夹", folder.name)?.trim();
     if (!name || name === folder.name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
@@ -4265,7 +4282,7 @@ export function App() {
   const deleteTaskFolder = async (folder: TaskFolder) => {
     if (!await confirmAction(`删除任务文件夹「${folder.name}」？\n其中的任务会移回最近任务，不会被删除。`, { destructive: true })) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
@@ -5097,9 +5114,8 @@ export function App() {
       <nav className="activity-rail" aria-label="工作台导航">
         <button type="button" className="activity-brand" title="返回 Meta Code 工作台" aria-label="返回 Meta Code 工作台" onClick={() => { cancelSessionNavigation(); setView("chat"); }}><ProductLogo variant="mark" /></button>
         <div className="activity-primary">
-          <button type="button" className={sidebarOpen && sidebarSection === "tasks" && !standaloneActive ? "active" : ""} aria-label="任务" title="工作区任务" onClick={() => openTaskScope("workspace")}><MessagesSquare size={20} /></button>
-          <button type="button" className={sidebarOpen && sidebarSection === "tasks" && standaloneActive ? "active" : ""} aria-label="临时任务" title="临时任务" onClick={() => openTaskScope("standalone")}><Clock3 size={19} /></button>
-          <button type="button" className={sidebarOpen && sidebarSection === "workspaces" ? "active" : ""} aria-label="工作区" title="工作区" onClick={() => showSidebarSection("workspaces")}><FolderOpen size={20} /></button>
+          <button type="button" className={sidebarOpen && sidebarSection === "tasks" ? "active" : ""} aria-label="任务" title="全部任务" onClick={() => showSidebarSection("tasks")}><MessagesSquare size={20} /></button>
+          <button type="button" aria-label="新任务" title="新任务" onClick={createSession}><MessageSquarePlus size={20} /></button>
         </div>
         <div className="activity-secondary">
           <button type="button" className={view === "agents" ? "active" : ""} aria-label="Skill 中心" title="Skill 中心" onClick={() => { cancelSessionNavigation(); setView("agents"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Sparkles size={19} /></button>
@@ -5110,15 +5126,12 @@ export function App() {
       </nav>
       <aside className="sidebar">
         <header className="sidebar-pane-header">
-          <span><strong>{sidebarSection === "tasks" ? standaloneActive ? "临时任务" : "任务" : "工作区"}</strong><small>{sidebarSection === "tasks" ? standaloneActive ? "不绑定项目目录" : workspace?.name || "尚未选择工作区" : `${activeWorkspaces.length} 个可用工作区`}</small></span>
+          <span><strong>{sidebarSection === "tasks" ? "任务" : "工作区"}</strong></span>
           <IconButton label="收起导航面板" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={16} /></IconButton>
         </header>
         {sidebarSection === "tasks" ? <>
-          {!standaloneActive && <div className="sidebar-workspace-row">
-            <button type="button" className="sidebar-workspace-current" onClick={() => showSidebarSection("workspaces")} title={workspace?.root || "选择工作区"}><FolderOpen size={15} /><span><strong>{workspace?.name || "选择工作区"}</strong><small>{workspace?.root || "添加工作区后开始"}</small></span><ChevronRight size={14} /></button>
-            <IconButton label="添加工作区" onClick={() => setDialog("workspace")}><Plus size={15} /></IconButton>
-          </div>}
           <div className="sidebar-task-actions"><button className="new-task" onClick={createSession}><MessageSquarePlus size={16} /><span>新任务</span></button></div>
+          <div className="sidebar-scope-filter"><FolderOpen size={14} /><select aria-label="筛选任务工作区" value={sidebarWorkspaceFilter} onChange={(event) => setSidebarWorkspaceFilter(event.target.value)}><option value="">全部任务</option>{activeWorkspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><IconButton label="管理工作区" onClick={() => showSidebarSection("workspaces")}><MoreHorizontal size={15} /></IconButton></div>
           <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />{sidebarQuery && <button type="button" aria-label="清除搜索" onClick={() => setSidebarQuery("")}><X size={13} /></button>}</label>
           <SidebarTaskList
             query={deferredSidebarQuery}
@@ -5130,14 +5143,15 @@ export function App() {
             archivedTasks={archivedTasks}
             taskFolders={taskFolders}
             taskCount={taskItems.length}
-            standaloneActive={standaloneActive}
+            standaloneActive={!sidebarWorkspaceFilter}
             visible={sidebarVisible && sidebarSection === "tasks"}
             searchStale={normalizedSidebarQuery !== deferredSidebarQuery}
-            scopeKey={standaloneActive ? "__standalone__" : activeWorkspaceId}
+            scopeKey={sidebarWorkspaceFilter || "__all_tasks__"}
             activeChatId={activeBrowserConversationResource?.conversationId || navigationSummary?.id || activeSession?.id || ""}
             activeWorkflowId={activeWorkflowId}
             delegationEnabled={delegationEnabled}
             providerControls={data.providerControls}
+            workspaceNames={workspaceNames}
             onSelect={handleSidebarTaskSelection}
             onPrefetch={scheduleSessionPrefetch}
             onCancelPrefetch={cancelSessionPrefetch}
@@ -5147,7 +5161,7 @@ export function App() {
             onCreateFolder={createTaskFolder}
           />
         </> : <div className="workspace-panel">
-          <div className="workspace-panel-actions"><button type="button" className="primary" onClick={() => setDialog("workspace")}><Plus size={15} />添加工作区</button></div>
+          <div className="workspace-panel-actions"><button type="button" onClick={() => showSidebarSection("tasks")}><ArrowLeft size={15} />全部任务</button><button type="button" className="primary" onClick={() => setDialog("workspace")}><Plus size={15} />添加工作区</button></div>
           <div className="workspace-panel-list">
             {pinnedWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedWorkspaces.length}</small></div>{pinnedWorkspaces.map(renderWorkspaceItem)}</section>}
             {recentWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>最近使用</span><small>{recentWorkspaces.length}</small></div>{recentWorkspaces.map(renderWorkspaceItem)}</section>}
@@ -5160,6 +5174,7 @@ export function App() {
         const session = data.sessions.find((item) => item.id === sessionContextMenu.id);
         const workflow = data.workflows.find((item) => item.id === sessionContextMenu.id);
         const task = session || workflow;
+        const taskFolders = data.workspaces.find((item) => item.id === task?.workspaceId)?.taskFolders || [];
         if (!task) return null;
         const isWorkflow = Boolean(workflow);
         const isStandaloneTask = Boolean(session?.scopeKind === "standalone");
@@ -5181,7 +5196,7 @@ export function App() {
           <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || ""} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除" : "停止并删除" : "删除任务"}</button>
         </div></>;
       })()}
-      {!navigationPending && sessionAreaMenu && !standaloneActive && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
+      {!navigationPending && sessionAreaMenu && sidebarWorkspaceFilter && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
       {!navigationPending && taskFolderMenu && (() => { const folder = taskFolders.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
       {sidebarVisible && <button className="mobile-sidebar-backdrop" aria-label="关闭侧栏" onClick={() => setSidebarOpen(false)} />}
       {sidebarVisible && <button className="pane-resizer pane-resizer-sidebar" type="button" role="separator" aria-label="调整任务区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.sidebar} onPointerDown={(event) => beginPaneResize("sidebar", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("sidebar")} onKeyDown={(event) => handlePaneResizeKeyDown("sidebar", event)}><GripVertical size={14} /></button>}
@@ -5710,7 +5725,8 @@ export function App() {
         runtime={data.runtime}
         providers={agentProviders}
         providerControls={data.providerControls}
-        hasWorkspace={Boolean(activeWorkspaceId)}
+        workspaces={activeWorkspaces}
+        onWorkspaceAdded={(item) => setData((current) => current ? { ...current, workspaces: [...current.workspaces.filter((workspace) => workspace.id !== item.id), item] } : current)}
         onClose={() => { setPendingNewTaskPrompt(""); setPendingNewTaskSkills([]); setDialog(null); }}
         onSelect={createSessionForEngine}
         onSelectWorkflow={openWorkflowDraft}
@@ -5807,53 +5823,39 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   </Dialog>;
 }
 
-function TaskEngineDialog({ orchestrationEnabled, runtime, providers, providerControls, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
-  const engines = providers.filter((provider) => provider.capabilities.sessions.create).map((provider) => ({
-    engine: provider.id,
-    title: provider.shortName,
-    description: provider.description,
-    detail: provider.capabilities.delegation.nativeSubagents
-      ? "原生模式保留 CLI 自身的 Agent 能力；协作模式使用工作台统一委派。"
-      : "协作模式通过工作台统一委派；不假定该 CLI 具备原生子 Agent。"
-  }));
+function TaskEngineDialog({ orchestrationEnabled, runtime, providers, providerControls, workspaces, onWorkspaceAdded, onClose, onSelect, onSelectWorkflow }: { orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; workspaces: Workspace[]; onWorkspaceAdded: (workspace: Workspace) => void; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone", workspaceId: string) => Promise<void>; onSelectWorkflow: (workspaceId: string) => Promise<void> }) {
+  const engines = providers.filter((provider) => provider.capabilities.sessions.create);
   const engineReady = (engine: EngineName) => {
     const control = providerControls.find((candidate) => candidate.providerId === engine);
     return control ? control.operations.setDefault : Boolean(runtime.providers[engine]?.available);
   };
-  // Do not carry a global main-agent preference into a new task. The user
-  // explicitly chooses the provider for every task, which avoids stale or
-  // unavailable defaults silently selecting the wrong runtime.
-  const [selected, setSelected] = useState<EngineName | "workflow" | "">("");
-  const [scopeKind, setScopeKind] = useState<"workspace" | "standalone">(hasWorkspace ? "workspace" : "standalone");
+  // No global main-agent or implicit workspace preference is carried into a draft.
+  const [selected, setSelected] = useState<EngineName | "">("");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [taskKind, setTaskKind] = useState<"conversation" | "workflow">("conversation");
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const scopeKind = workspaceId ? "workspace" : "standalone";
   const workflowReady = orchestrationEnabled && providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
-  const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" && workflowReady : engineReady(selected);
-  const taskTypes = [...engines.map((item) => ({ ...item, engine: item.engine as EngineName | "workflow" })), { engine: "workflow" as const, title: "Meta 任务编排", description: "先规划审批，再并行调度多个子 Agent", detail: "适合可拆分的大任务；会在当前工作区创建独立任务文件夹。" }];
-  return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
-    <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务请先选择本次使用的 Agent；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
-    <div className="task-scope-control" role="group" aria-label="任务位置">
-      <button type="button" className={scopeKind === "standalone" ? "selected" : ""} onClick={() => { setScopeKind("standalone"); if (selected === "workflow") setSelected(""); }}>临时任务</button>
-      <button type="button" className={scopeKind === "workspace" ? "selected" : ""} disabled={!hasWorkspace} onClick={() => setScopeKind("workspace")}>当前工作区</button>
+  const selectedAvailable = taskKind === "workflow" ? Boolean(workspaceId) && workflowReady : Boolean(selected) && engineReady(selected);
+  const selectedControl = providerControls.find((control) => control.providerId === selected);
+  if (addingWorkspace) return <WorkspaceDialog onClose={() => setAddingWorkspace(false)} onCreated={(item) => { onWorkspaceAdded(item); setWorkspaceId(item.id); setAddingWorkspace(false); }} />;
+  return <Dialog title="新任务" className="task-launch-dialog" onClose={busy ? () => undefined : onClose}>
+    <div className="task-launch-fields">
+      <label><span>位置</span><div className="task-launch-location"><select aria-label="新任务位置" value={workspaceId} disabled={busy} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">临时对话</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select><button type="button" disabled={busy} onClick={() => setAddingWorkspace(true)} title="选择本地目录并添加工作区"><FolderOpen size={15} />选择目录</button></div></label>
+      <p className="task-launch-hint">{workspaceId ? workspaces.find((workspace) => workspace.id === workspaceId)?.root : "独立任务目录"}</p>
+      <label><span>任务类型</span><select aria-label="任务类型" value={taskKind} disabled={busy} onChange={(event) => setTaskKind(event.target.value as "conversation" | "workflow")}><option value="conversation">对话任务</option><option value="workflow" disabled={!workflowReady}>任务编排{!workflowReady ? "（暂不可用）" : ""}</option></select></label>
+      {taskKind === "conversation" && <label><span>主 Agent</span><select aria-label="本次任务主 Agent" value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="" disabled>请选择本次使用的 Agent</option>{engines.map((provider) => <option key={provider.id} value={provider.id} disabled={!engineReady(provider.id)}>{provider.shortName}{!engineReady(provider.id) ? "（未就绪）" : ""}</option>)}</select></label>}
+      {taskKind === "conversation" && selected && !engineReady(selected) && <p className="task-launch-hint">{providerMainAgentUnavailableReason(selectedControl)}</p>}
+      {taskKind === "workflow" && !workspaceId && <p className="task-launch-hint">任务编排需要工作区</p>}
     </div>
-    <div className="task-mode-grid">
-      {taskTypes.map((item) => {
-        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone" || !workflowReady} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : !workflowReady ? (orchestrationEnabled ? "请先连接支持规划的 Agent" : "请在设置中启用任务编排插件") : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : !workflowReady ? (orchestrationEnabled ? "请先连接支持规划的 Agent" : "请在设置中启用任务编排插件") : item.detail}</p></span><i>{workflowReady && selected === "workflow" ? <Check size={15} /> : !workflowReady ? "不可用" : null}</i></button>;
-        const control = providerControls.find((candidate) => candidate.providerId === item.engine);
-        const available = engineReady(item.engine);
-        return <button type="button" key={item.engine} className={`task-mode-card ${selected === item.engine ? "selected" : ""}`} disabled={!available || busy} onClick={() => setSelected(item.engine)}>
-          <span className="task-mode-icon"><ProviderIcon provider={item.engine} icon={control?.identity.icon} accent={control?.identity.accent} size={21} /></span>
-          <span><strong>{item.title}</strong><small>{control?.identity.transport === "acp" ? "ACP 标准接入" : "原生增强"} · {item.description}</small><p>{available ? control?.identity.transport === "acp" && !control.capabilities.tools.shell ? "支持原生任务；该 Agent 未声明终端能力，因此不开放工作台协作模式。" : item.detail : providerMainAgentUnavailableReason(control)}</p></span>
-          <i>{available ? selected === item.engine ? <Check size={15} /> : null : "不可用"}</i>
-        </button>;
-      })}
-    </div>
-    {error && <p className="form-error">{error}</p>}
+    {error && <p className="form-error" role="alert">{error}</p>}
     <div className="dialog-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="button" className="primary" disabled={busy || !selectedAvailable} onClick={async () => {
       setBusy(true); setError("");
-      try { if (selected === "workflow") await onSelectWorkflow(); else await onSelect(selected, scopeKind); }
+      try { if (taskKind === "workflow") await onSelectWorkflow(workspaceId); else await onSelect(selected, scopeKind, workspaceId); }
       catch (err) { setError(err instanceof Error ? err.message : String(err)); setBusy(false); }
-    }}>{busy ? <LoaderCircle className="spin" size={16} /> : selected === "workflow" ? <Route size={16} /> : <Check size={16} />}{busy ? selected === "workflow" ? "正在准备画布" : "正在创建并确认任务" : selected === "workflow" ? "进入画布" : "创建任务"}</button></div>
+    }}>{busy ? <LoaderCircle className="spin" size={16} /> : taskKind === "workflow" ? <Route size={16} /> : <Plus size={16} />}{busy ? "正在准备任务" : taskKind === "workflow" ? "进入画布" : "创建任务"}</button></div>
   </Dialog>;
 }
 

@@ -11,6 +11,7 @@ import "./design/shell.css";
 import "./design/conversation.css";
 import "./design/features.css";
 import "./design/workflow.css";
+import "./design/task-navigation.css";
 
 applyTheme(getInitialTheme());
 
