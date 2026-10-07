@@ -1661,7 +1661,7 @@ function redactLog(text: string) {
 }
 
 function publicSettings() {
-  const { apiKey, codexPath: _codexPath, claude, ...rest } = state.settings;
+  const { apiKey, codexPath: _codexPath, defaultEngine: _defaultEngine, claude, ...rest } = state.settings;
   const { apiKey: claudeApiKey, claudePath: _claudePath, ...publicClaude } = claude;
   return {
     ...rest,
@@ -8524,7 +8524,10 @@ async function providerControlSnapshotFor(providerId: string, ownerUserId: strin
     runtime,
     profiles,
     selection: agentAdapterRegistry.modelAdapter(provider.id)?.getSelection() || null,
-    defaultProviderId: state.settings.defaultEngine,
+    // There is no user-facing global main-agent selection anymore. Provider
+    // cards remain independently selectable and do not advertise one as the
+    // default; the persisted value is retained only for legacy API fallback.
+    defaultProviderId: undefined,
     marketIcon: marketAgent?.icon,
     updating: Boolean(marketInstallStates.get(provider.id)?.active),
     operations: providerControlOperations(provider.id)
@@ -9205,15 +9208,14 @@ app.post("/api/runtime/claude/test", auth.requireRoles("owner", "admin"), async 
 app.put("/api/settings", auth.requireRoles("owner", "admin"), async (req, res) => {
   const input = req.body as Partial<Settings> & { clearApiKey?: boolean; claude?: Partial<ClaudeSettings> & { clearApiKey?: boolean } };
   const claudeInput: Partial<ClaudeSettings> & { clearApiKey?: boolean } = input.claude || {};
-  const defaultEngine = normalizeProviderId(input.defaultEngine || state.settings.defaultEngine);
-  const defaultProvider = agentAdapterRegistry.descriptor(defaultEngine);
-  if (!defaultProvider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(defaultEngine)) return res.status(400).json({ error: "默认主脑 Provider 未注册或不可创建会话" });
-  const defaultControl = await providerControlSnapshotFor(defaultEngine, req.authUser!.id);
-  if (!defaultControl.operations.setDefault) return res.status(400).json({ error: `默认主脑「${defaultControl.identity.shortName}」尚未安装或连接未验证` });
+  // The UI no longer exposes a global main-agent preference. Keep the stored
+  // value only as a legacy fallback for older clients that omit `engine` when
+  // creating a session; settings saves must never validate or mutate it.
+  const { defaultEngine: _ignoredDefaultEngine, ...settingsInput } = input;
   state.settings = {
     ...state.settings,
-    ...input,
-    defaultEngine,
+    ...settingsInput,
+    defaultEngine: state.settings.defaultEngine,
     apiKey: input.clearApiKey ? "" : input.apiKey || state.settings.apiKey,
     claude: {
       ...state.settings.claude,

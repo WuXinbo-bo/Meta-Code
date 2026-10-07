@@ -159,7 +159,6 @@ const MESSAGE_HISTORY_CHUNK = 20;
 const MESSAGE_VIRTUALIZE_THRESHOLD = 40;
 
 type SettingsData = {
-  defaultEngine: EngineName;
   baseUrl: string;
   apiKeyConfigured: boolean;
   model: string;
@@ -199,7 +198,6 @@ function settingsFormData(settings: SettingsData): SettingsFormData {
 
 function settingsSavePayload(form: SettingsFormData) {
   return {
-    defaultEngine: form.defaultEngine,
     baseUrl: form.baseUrl,
     apiKey: form.apiKey,
     clearApiKey: form.clearApiKey,
@@ -3318,6 +3316,9 @@ export function App() {
   const displayedSession = activeBrowserConversationResource
     ? activeSession?.id === activeBrowserConversationResource.conversationId ? activeSession : null
     : activeWorkspaceBrowserTab ? null : activeSession;
+  const fallbackEngine = data?.providerControls.find((control) => control.operations.setDefault)?.providerId
+    || data?.agentProviders.find((provider) => provider.capabilities.sessions.create)?.id
+    || "claude";
   const displayedWorkflowId = activeBrowserWorkflowResource?.workflowId || (!activeWorkspaceBrowserTab ? activeWorkflowId : "");
   const showWorkflowBrowserContent = !activeBrowserFileResource && !activeBrowserToolResource && (
     Boolean(activeBrowserWorkflowResource)
@@ -5129,7 +5130,7 @@ export function App() {
               )}
             </div>
           )}
-          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || data.settings.defaultEngine} onSelect={openModelSettings} />}
+          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} />}
           {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <IconButton disabled={displayedDeletionBusy} label={displayedDeletionPolicy?.requiresTermination ? displayedDeletionKind === "workflow" ? "取消并删除当前编排任务" : "停止并删除当前任务" : "删除当前任务"} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}</IconButton>}
           <ThemeToggle />
           {view === "chat" && !activeBrowserToolResource && <IconButton label={inspectorOpen ? "关闭检查器" : "打开检查器"} onClick={() => setInspectorOpen((value) => !value)}><Menu size={18} /></IconButton>}
@@ -5198,7 +5199,7 @@ export function App() {
           </section>
         )}
 
-        {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={data.settings.defaultEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeWorkspaceId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
+          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeWorkspaceId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
             <div
               className="messages"
@@ -5464,12 +5465,12 @@ export function App() {
                     onManage={() => { setSkillQuickConfigOpen(false); setView("agents"); }}
                   />
                   <ComposerRuntimeControl
-                    provider={activeSession?.engine || data.settings.defaultEngine}
-                    descriptor={agentProviders.find((provider) => provider.id === (activeSession?.engine || data.settings.defaultEngine))}
-                    control={data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))}
+                    provider={activeSession?.engine || fallbackEngine}
+                    descriptor={agentProviders.find((provider) => provider.id === (activeSession?.engine || fallbackEngine))}
+                    control={data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))}
                     sessionId={activeSession?.id}
-                    model={data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))?.configuration.model || ""}
-                    effort={String(data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))?.configuration.reasoningValue ?? "")}
+                    model={data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.model || ""}
+                    effort={String(data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.reasoningValue ?? "")}
                     executionMode={currentExecutionMode}
                     loadModels={loadComposerModels}
                     onModelChange={saveComposerModel}
@@ -5556,7 +5557,7 @@ export function App() {
           onSettingsChanged={(settings) => setData((current) => current ? {
             ...current,
             settings,
-            providerControls: current.providerControls.map((control) => ({ ...control, isDefault: control.providerId === settings.defaultEngine }))
+            providerControls: current.providerControls
           } : current)}
           onResetTabs={async () => {
             if (!await confirmAction("关闭全部工作区页面？任务、文件和对话不会被删除。")) return;
@@ -5614,7 +5615,6 @@ export function App() {
         runtime={data.runtime}
         providers={agentProviders}
         providerControls={data.providerControls}
-        defaultEngine={data.settings.defaultEngine}
         hasWorkspace={Boolean(activeWorkspaceId)}
         onClose={() => { setPendingNewTaskPrompt(""); setPendingNewTaskSkills([]); setDialog(null); }}
         onSelect={createSessionForEngine}
@@ -5712,7 +5712,7 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   </Dialog>;
 }
 
-function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; defaultEngine: EngineName; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
+function TaskEngineDialog({ runtime, providers, providerControls, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
   const engines = providers.filter((provider) => provider.capabilities.sessions.create).map((provider) => ({
     engine: provider.id,
     title: provider.shortName,
@@ -5725,8 +5725,10 @@ function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine,
     const control = providerControls.find((candidate) => candidate.providerId === engine);
     return control ? control.operations.setDefault : Boolean(runtime.providers[engine]?.available);
   };
-  const initialEngine = engineReady(defaultEngine) ? defaultEngine : engines.find((item) => engineReady(item.engine))?.engine || defaultEngine;
-  const [selected, setSelected] = useState<EngineName | "workflow">(initialEngine);
+  // Do not carry a global main-agent preference into a new task. The user
+  // explicitly chooses the provider for every task, which avoids stale or
+  // unavailable defaults silently selecting the wrong runtime.
+  const [selected, setSelected] = useState<EngineName | "workflow" | "">("");
   const [scopeKind, setScopeKind] = useState<"workspace" | "standalone">(hasWorkspace ? "workspace" : "standalone");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -5736,7 +5738,7 @@ function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine,
   return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
     <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务选择对话协议；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
     <div className="task-scope-control" role="group" aria-label="任务位置">
-      <button type="button" className={scopeKind === "standalone" ? "selected" : ""} onClick={() => { setScopeKind("standalone"); if (selected === "workflow") setSelected(initialEngine); }}>临时任务</button>
+      <button type="button" className={scopeKind === "standalone" ? "selected" : ""} onClick={() => { setScopeKind("standalone"); if (selected === "workflow") setSelected(""); }}>临时任务</button>
       <button type="button" className={scopeKind === "workspace" ? "selected" : ""} disabled={!hasWorkspace} onClick={() => setScopeKind("workspace")}>当前工作区</button>
     </div>
     <div className="task-mode-grid">
@@ -6662,9 +6664,6 @@ function SettingsView({
     </section>;
   };
   const displayedRuntimeCatalog = runtimeCatalog.map((item) => ({ ...item, status: item.id === "claude" ? claudeRuntimeState : item.id === "codex" ? runtime : item.status }));
-  const selectedDefaultControl = providerControls.find((control) => control.providerId === form.defaultEngine);
-  const eligibleDefaultControls = providerControls.filter((control) => control.operations.setDefault);
-  const selectedDefaultEligible = eligibleDefaultControls.some((control) => control.providerId === form.defaultEngine);
   const claudeProviderControl = providerControls.find((control) => control.providerId === "claude");
   const codexProviderControl = providerControls.find((control) => control.providerId === "codex");
   const saveLabel = saveState === "saving" ? "保存中" : saveState === "saved" ? "已保存" : saveState === "error" ? "重试保存" : "保存设置";
@@ -6688,8 +6687,7 @@ function SettingsView({
     {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
     {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId, runtime) => { onProviderChange(providerId); setAiSettingsPage(runtime ? "runtime" : "providers"); }} /></div>}
     {settingsSection === "ai" && aiSettingsPage === "overview" && <div className="settings-section settings-agent-overview">
-      <div className="settings-page-heading"><h2>Agent 总览</h2><p>设置默认主脑，并查看所有已连接 Agent 的运行状态。</p></div>
-      <div className="settings-default-engine"><div><strong>默认主脑</strong><span>新任务默认使用的 Agent；任务内仍可随时切换，协作模式由工作区 Skill 管理。</span>{selectedDefaultControl && !selectedDefaultEligible && <small>{selectedDefaultControl.connection.message}</small>}</div><select value={form.defaultEngine} onChange={(event) => update("defaultEngine", event.target.value)}>{selectedDefaultControl && !selectedDefaultEligible && <option value={selectedDefaultControl.providerId} disabled>{selectedDefaultControl.identity.shortName}（待连接）</option>}{eligibleDefaultControls.map((control) => <option key={control.providerId} value={control.providerId}>{control.identity.shortName}</option>)}</select></div>
+      <div className="settings-page-heading"><h2>Agent 总览</h2><p>查看已连接 Agent 的运行状态；创建任务时会由你明确选择 Claude、Codex 或其他可用 Agent。</p></div>
       <div className="settings-provider-overview-grid">{providerControls.map((control) => <button type="button" key={control.providerId} className={`settings-provider-summary ${providerTab === control.providerId ? "focused" : ""}`} onClick={() => { onProviderChange(control.providerId); setAiSettingsPage("providers"); }}><ProviderIcon provider={control.providerId} icon={control.identity.icon} accent={control.identity.accent} size={24} /><span><strong>{control.identity.shortName}</strong><small>{control.lifecycle.version || "未检测版本"} · {control.identity.transport === "native" ? "原生增强" : "ACP"}</small></span><i className={control.connection.status === "ready" ? "ready" : "attention"}>{control.connection.status === "ready" ? "已连接" : control.connection.status === "checking" ? "检测中" : control.connection.status === "attention" ? "待配置" : "不可用"}</i></button>)}</div>
     </div>}
     {settingsSection === "ai" && aiSettingsPage === "providers" && <div id="native-provider-settings" className="settings-section settings-ai-models">

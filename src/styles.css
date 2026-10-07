@@ -1241,14 +1241,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 .settings-section { max-width: 1000px; margin: 0 auto 28px; padding-bottom: 24px; border-bottom: 1px solid #e2e2dd; }
 .settings-navigation { display: grid; max-width: 1000px; margin: 0 auto 24px; border-bottom: 1px solid #e2e4e0; }
 .provider-tabs { display: inline-flex; justify-self: start; gap: 4px; margin: 0 0 14px; padding: 3px; border: 1px solid #d4d7d2; border-radius: 7px; background: #eff0ed; }
-.settings-default-engine { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid #d9dcd7; border-radius: 7px; background: #f7f8f6; }
-.settings-default-engine div { display: grid; gap: 3px; }
-.settings-default-engine strong { font-size: 13px; }
-.settings-default-engine span { color: #747973; font-size: 11px; }
-.settings-default-engine select { min-width: 132px; }
-.settings-default-engine .settings-architecture-badge { flex: none; padding: 5px 9px; border-radius: 999px; background: #e7efe9; color: #4f7560; font-size: 11px; font-weight: 700; }
-:root[data-theme="dark"] .settings-default-engine .settings-architecture-badge { background: #39463d; color: #c0d3c5; }
-@media (max-width: 620px) { .settings-default-engine { align-items: stretch; flex-direction: column; gap: 10px; } .settings-default-engine select { width: 100%; } }
 .provider-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 112px; height: 38px; padding: 0 14px; border: 0; border-radius: 5px; background: transparent; color: #747973; cursor: pointer; font-size: 11px; }
 .provider-tabs button.active { background: white; color: #343632; box-shadow: 0 1px 4px rgba(30, 33, 30, .1); }
 .settings-section-tabs { display: flex; gap: 20px; overflow-x: auto; }
@@ -1780,8 +1772,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
 :root[data-theme="dark"] .agent-mode-select { background: #2b2b2b; border-color: #454545; color: #aaa; }
 :root[data-theme="dark"] .agent-mode-select select { background: #2b2b2b; color: #bbb; }
 :root[data-theme="dark"] .provider-tabs { background: #2b2b2b; border-color: #454545; }
-:root[data-theme="dark"] .settings-default-engine { background: #292929; border-color: #454545; }
-:root[data-theme="dark"] .settings-default-engine span { color: #999; }
 :root[data-theme="dark"] .provider-tabs button { color: #999; }
 :root[data-theme="dark"] .provider-tabs button.active { background: #414141; color: #ddd; box-shadow: none; }
 :root[data-theme="dark"] .settings-inline-actions button { background: var(--panel-bg); color: var(--text); border-color: var(--border); }
@@ -1884,7 +1874,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
   background: #fff;
 }
 
-:root:not([data-theme="dark"]) .settings-default-engine,
 :root:not([data-theme="dark"]) .settings-provider-summary,
 :root:not([data-theme="dark"]) .settings-provider-summary.focused,
 :root:not([data-theme="dark"]) .settings-provider-panel,
@@ -1893,7 +1882,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
   box-shadow: none;
 }
 
-:root:not([data-theme="dark"]) .settings-default-engine,
 :root:not([data-theme="dark"]) .settings-provider-summary,
 :root:not([data-theme="dark"]) .settings-provider-summary.focused,
 :root:not([data-theme="dark"]) .settings-provider-panel,
@@ -1902,7 +1890,6 @@ button.primary { border-color: #252724; background: #252724; color: white; }
   background: #fff;
 }
 
-:root:not([data-theme="dark"]) .settings-default-engine,
 :root:not([data-theme="dark"]) .settings-provider-summary,
 :root:not([data-theme="dark"]) .settings-provider-panel,
 :root:not([data-theme="dark"]) .settings-overview-grid button {
