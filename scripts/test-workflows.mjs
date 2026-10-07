@@ -22,7 +22,7 @@ import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPla
 const execFileAsync = promisify(execFile);
 
 const serverSource = await fs.readFile(new URL("../server/index.ts", import.meta.url), "utf8");
-const transactionFileSource = await fs.readFile(new URL("../server/workflows/transactionFile.ts", import.meta.url), "utf8");
+const transactionFileSource = await fs.readFile(new URL("../server/plugins/orchestration/transactionFile.ts", import.meta.url), "utf8");
 assert.match(
   serverSource,
   /runVerificationCommands\(current\.verificationCommands, workflow\.workDirectory,/,
@@ -42,7 +42,9 @@ assert.match(serverSource, /合同优先级固定为/, "执行提示必须声明
 assert.match(serverSource, /changedFiles: result\?\.changedFiles \|\| \[\]/, "最终 Validator 必须接收节点已验证的 changedFiles，不能把真实登记误判为缺失");
 assert.match(transactionFileSource, /retryableCodes = new Set\(\["EACCES", "EBUSY", "EEXIST", "EPERM"\]\)/, "Windows 事务锁竞争必须识别 EPERM/EBUSY/EACCES");
 assert.match(transactionFileSource, /if \(!retryableCodes\.has\(errorCode\(error\)\)\) throw error;/, "事务锁获取必须使用跨平台可重试错误集合，不能只识别 EEXIST");
-assert.match(serverSource, /workflowNodeCheckpointRoot\(workflow\.workDirectory, node\.id, node\.planVersion\)/, "节点检查点必须按计划版本隔离");
+const schedulerSource = await fs.readFile(new URL("../server/plugins/orchestration/scheduler.ts", import.meta.url), "utf8");
+assert.match(schedulerSource, /stateFiles|workflowStateFiles/, "调度器必须使用插件状态目录");
+assert.match(schedulerSource, /String\(node\.planVersion\)/, "节点检查点必须按计划版本隔离");
 const planOneCheckpoint = workflowNodeCheckpointRoot("C:/workspace/task", "implement", 1);
 const planTwoCheckpoint = workflowNodeCheckpointRoot("C:/workspace/task", "implement", 2);
 assert.notEqual(planOneCheckpoint, planTwoCheckpoint, "不同计划版本不能复用同一节点结果事务目录");
@@ -1143,7 +1145,7 @@ assert.equal(maintenanceResumed.status, "awaiting_approval", "维护规划恢复
 assert.equal(maintenancePausePlanned.activePlanVersion, maintenanceResumed.activePlanVersion);
 
 assert.match(serverSource, /workbench-workflow-result 与 workbench-workflow-plan 是 Workbench 系统控制面/, "Validator 必须区分系统控制面 MCP 与业务 MCP");
-assert.match(serverSource, /不要扫描 \.workflow\/events\.jsonl/, "Validator 不得默认重扫完整事件日志");
+assert.match(serverSource, /不要扫描插件内部事件文件/, "Validator 不得默认重扫完整事件日志");
 assert.match(serverSource, /最多执行一次合并的只读验收命令/, "Validator 必须限制重复验收命令");
 assert.match(serverSource, /省略 workdir\/cwd 参数，或只使用相对目录“\.”/, "执行 Agent 不得复制超长绝对工作目录到工具调用");
 assert.match(serverSource, /执行结果路径越出任务目录/, "节点产物必须由任务目录边界校验");

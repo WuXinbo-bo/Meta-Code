@@ -1,3 +1,4 @@
+import { PluginSettings } from "./settings/PluginSettings";
 import { Component, Suspense, lazy, memo, startTransition, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { runtimeInstallationAction, type InstallationRuntime } from "./runtimeInstallation";
@@ -438,6 +439,17 @@ type Bootstrap = {
   skillFolders: SkillFolder[];
   skillOrganizations: SkillOrganization[];
   capabilityProfiles: CapabilityProfile[];
+  plugins: Array<{
+    id: string;
+    version: string;
+    apiVersion: number;
+    displayName: string;
+    description: string;
+    capabilities: string[];
+    requires?: Record<string, string>;
+    enabled: boolean;
+    health: "healthy" | "disabled" | "degraded";
+  }>;
   mcpServers: McpServer[];
   agentProviders: AgentProviderDescriptor[];
   providerControls: ProviderControlSnapshot[];
@@ -478,6 +490,7 @@ function normalizeBootstrap(value: Bootstrap): Bootstrap {
   return {
     ...value,
     skills: value.skills.map(normalizeSkillProfile),
+    plugins: value.plugins || [],
     agentProviders: value.agentProviders || [],
     providerControls: value.providerControls || [],
     runtime: {
@@ -518,7 +531,7 @@ function readLayoutWidths(): LayoutWidths {
 }
 const BUILTIN_DELEGATION_SKILL_NAME = "claude-codex-planner";
 const BUILTIN_SKILL_MANAGER_NAME = "metacode-manager";
-const PINNED_BUILTIN_SKILL_ORDER = [BUILTIN_SKILL_MANAGER_NAME, BUILTIN_DELEGATION_SKILL_NAME] as const;
+const PINNED_BUILTIN_SKILL_ORDER = [BUILTIN_SKILL_MANAGER_NAME] as const;
 
 function normalizeSkillProfile(skill: AgentProfile): AgentProfile {
   return skill.name === BUILTIN_SKILL_MANAGER_NAME ? { ...skill, title: "Meta Code 管家" } : skill;
@@ -2827,7 +2840,7 @@ export function App() {
       }, 120);
     };
     const unsubscribers = [
-      ...["settings.changed", "mcp.changed", "skills.changed", "agent-market.changed"]
+      ...["settings.changed", "mcp.changed", "skills.changed", "agent-market.changed", "plugins.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, refreshBootstrap)),
       ...["runtime.changed", "agent-market.changed", "provider-control.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, () => refreshProviderSnapshot(true))),
@@ -3490,7 +3503,7 @@ export function App() {
   const activeCapabilityProfile = useMemo(() => data?.capabilityProfiles?.find((profile) => profile.id === activeCapabilityProfileId) || null, [data?.capabilityProfiles, activeCapabilityProfileId]);
   const currentExecutionMode: ExecutionMode = activeSession?.scopeKind === "standalone"
     ? activeSession.standaloneExecutionMode || "native"
-    : workspace?.agentExecutionMode || ((skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "auto" || skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "always") ? "collaborative" : "native");
+    : workspace?.agentExecutionMode || "native";
   const recentCapabilityProfiles = useMemo(() => [...(data?.capabilityProfiles || [])].sort((left, right) => (right.lastUsedAt || right.updatedAt).localeCompare(left.lastUsedAt || left.updatedAt)).slice(0, 4), [data?.capabilityProfiles]);
   const applyCapabilityProfile = async (profileId: string | null, savedProfile?: CapabilityProfile) => {
     if (activeSession?.scopeKind === "standalone") {
@@ -5550,6 +5563,7 @@ export function App() {
                     sessionId={activeSession?.id}
                     model={data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.model || ""}
                     effort={String(data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.reasoningValue ?? "")}
+                    collaborationEnabled={data.plugins.some((plugin) => plugin.id === "collaboration" && plugin.enabled)}
                     executionMode={currentExecutionMode}
                     loadModels={loadComposerModels}
                     onModelChange={saveComposerModel}
@@ -5622,6 +5636,7 @@ export function App() {
         {view === "mcp" && <McpView servers={data.mcpServers || []} workspaces={data.workspaces} activeWorkspaceId={activeWorkspaceId} onChanged={refresh} onNotice={setNotice} />}
         {view === "git" && <GitWorkbench workspaceId={activeWorkspaceId} />}
         {view === "settings" && <RecoverableSectionBoundary resetKey={`${settingsTarget}:${settingsProvider}`} title="设置页面暂时无法显示"><SettingsView
+          plugins={data.plugins}
           initialSection={settingsTarget}
           settings={data.settings}
           dataHome={data.runtime.dataHome}
@@ -5691,6 +5706,7 @@ export function App() {
         setDialog(null);
       }} />}
       {dialog === "task-mode" && <TaskEngineDialog
+        orchestrationEnabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)}
         runtime={data.runtime}
         providers={agentProviders}
         providerControls={data.providerControls}
@@ -5791,7 +5807,7 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   </Dialog>;
 }
 
-function TaskEngineDialog({ runtime, providers, providerControls, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
+function TaskEngineDialog({ orchestrationEnabled, runtime, providers, providerControls, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
   const engines = providers.filter((provider) => provider.capabilities.sessions.create).map((provider) => ({
     engine: provider.id,
     title: provider.shortName,
@@ -5811,7 +5827,7 @@ function TaskEngineDialog({ runtime, providers, providerControls, hasWorkspace, 
   const [scopeKind, setScopeKind] = useState<"workspace" | "standalone">(hasWorkspace ? "workspace" : "standalone");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const workflowReady = providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
+  const workflowReady = orchestrationEnabled && providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
   const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" && workflowReady : engineReady(selected);
   const taskTypes = [...engines.map((item) => ({ ...item, engine: item.engine as EngineName | "workflow" })), { engine: "workflow" as const, title: "Meta 任务编排", description: "先规划审批，再并行调度多个子 Agent", detail: "适合可拆分的大任务；会在当前工作区创建独立任务文件夹。" }];
   return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
@@ -5822,7 +5838,7 @@ function TaskEngineDialog({ runtime, providers, providerControls, hasWorkspace, 
     </div>
     <div className="task-mode-grid">
       {taskTypes.map((item) => {
-        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone" || !workflowReady} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : item.detail}</p></span><i>{workflowReady && selected === "workflow" ? <Check size={15} /> : !workflowReady ? "不可用" : null}</i></button>;
+        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone" || !workflowReady} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : !workflowReady ? (orchestrationEnabled ? "请先连接支持规划的 Agent" : "请在设置中启用任务编排插件") : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : !workflowReady ? (orchestrationEnabled ? "请先连接支持规划的 Agent" : "请在设置中启用任务编排插件") : item.detail}</p></span><i>{workflowReady && selected === "workflow" ? <Check size={15} /> : !workflowReady ? "不可用" : null}</i></button>;
         const control = providerControls.find((candidate) => candidate.providerId === item.engine);
         const available = engineReady(item.engine);
         return <button type="button" key={item.engine} className={`task-mode-card ${selected === item.engine ? "selected" : ""}`} disabled={!available || busy} onClick={() => setSelected(item.engine)}>
@@ -6306,6 +6322,7 @@ function McpDialog({ server, workspaces, activeWorkspaceId, onClose, onDone }: {
 }
 
 function SettingsView({
+  plugins,
   initialSection,
   settings,
   dataHome,
@@ -6325,6 +6342,7 @@ function SettingsView({
   onNotice,
   onChanged
 }: {
+  plugins: Bootstrap["plugins"];
   initialSection: SettingsSectionName;
   settings: SettingsData;
   dataHome: string;
@@ -6759,10 +6777,11 @@ function SettingsView({
     </div>
   </details>;
   return <section className="content-view settings-view">
-    <div className="section-heading settings-sticky-heading"><div><h1>设置</h1><p>管理 Agent、会话、页面、个人数据与软件版本。</p></div>{!(["updates", "sessions", "data"] as SettingsSectionName[]).includes(settingsSection) && <div className="settings-save-actions">{saveError && <span role="alert">{saveError}</span>}<button className="primary" disabled={saveState === "clean" || saveState === "saving"} onClick={() => void save()}>{saveState === "saving" ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saveLabel}</button></div>}</div>
+    <div className="section-heading settings-sticky-heading"><div><h1>设置</h1><p>管理 Agent、会话、页面、个人数据与软件版本。</p></div>{!(["updates", "sessions", "data", "plugins"] as SettingsSectionName[]).includes(settingsSection) && <div className="settings-save-actions">{saveError && <span role="alert">{saveError}</span>}<button className="primary" disabled={saveState === "clean" || saveState === "saving"} onClick={() => void save()}>{saveState === "saving" ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saveLabel}</button></div>}</div>
     <div className="settings-shell">
     <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={setSettingsSection} onAgentPageChange={setAiSettingsPage} />
     <div className="settings-page-content">
+    {settingsSection === "plugins" && <PluginSettings plugins={plugins} request={api} onChanged={onChanged} />}
     {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
     {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId, runtime) => { onProviderChange(providerId); setAiSettingsPage(runtime ? "runtime" : "providers"); }} /></div>}
     {settingsSection === "ai" && aiSettingsPage === "overview" && <div className="settings-section settings-agent-overview">

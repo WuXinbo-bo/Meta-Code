@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { assertPathInsideRoot } from "./pathBoundary.js";
@@ -25,8 +26,61 @@ function safeFileName(value: string) {
   return cleaned || "attachment";
 }
 
-function attachmentDirectory(workspaceRoot: string, sessionId: string) {
-  return path.join(workspaceRoot, ".claude-codex", "attachments", sessionId);
+let storageRoot: string | undefined;
+export function configureAttachmentStorage(root: string) {
+  storageRoot = path.resolve(root);
+  fs.mkdirSync(storageRoot, { recursive: true, mode: 0o700 });
+}
+function safeSessionId(sessionId: string) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}$/.test(sessionId)) throw new Error("附件任务 ID 无效");
+  return sessionId;
+}
+export function attachmentDirectory(workspaceRoot: string, sessionId: string) {
+  return path.join(storageRoot || path.join(workspaceRoot, ".claude-codex", "attachments"), safeSessionId(sessionId));
+}
+export function attachmentReference(reference: string) {
+  let normalized = reference.replaceAll("\\", "/");
+  if (storageRoot && normalized.startsWith(`${storageRoot.replaceAll("\\", "/")}/`)) normalized = `@attachments/${normalized.slice(storageRoot.length + 1)}`;
+  const match = normalized.match(/^(?:@attachments|\.claude-codex\/attachments)\/([a-zA-Z0-9_-]+)\/([^/]+)$/);
+  if (!match || match[2] === "." || match[2] === "..") return null;
+  return { sessionId: safeSessionId(match[1]), name: match[2], managed: normalized.startsWith("@attachments/") };
+}
+export function resolveAttachmentPath(workspaceRoot: string, sessionId: string, reference: string) {
+  const parsed = attachmentReference(reference);
+  if (!parsed || parsed.sessionId !== sessionId) throw new Error("附件路径不属于当前任务");
+  const managed = path.join(attachmentDirectory(workspaceRoot, sessionId), parsed.name);
+  if (storageRoot && (parsed.managed || fs.existsSync(managed))) return assertPathInsideRoot(storageRoot, managed, { allowRoot: false });
+  if (parsed.managed) throw new Error("附件存储尚未配置");
+  return assertPathInsideRoot(workspaceRoot, path.join(workspaceRoot, ".claude-codex", "attachments", sessionId, parsed.name), { allowRoot: false });
+}
+
+/** Migrate only attachments referenced by durable session messages, verified by hash. */
+export async function migrateSessionAttachments(workspaceRoot: string, sessionId: string, attachments: Attachment[]) {
+  if (!storageRoot) return;
+  for (const item of attachments) {
+    const parsed = attachmentReference(item.relativePath);
+    if (!parsed || parsed.managed || parsed.sessionId !== sessionId) continue;
+    const source = path.join(workspaceRoot, ".claude-codex", "attachments", sessionId, parsed.name);
+    if (!fs.existsSync(source)) continue;
+    assertPathInsideRoot(workspaceRoot, source, { allowRoot: false });
+    const data = await fsp.readFile(source);
+    if (data.length !== item.size || crypto.createHash("sha256").update(data).digest("hex") !== item.sha256) throw new Error(`附件迁移校验失败：${item.name}`);
+    const destination = path.join(attachmentDirectory(workspaceRoot, sessionId), parsed.name);
+    assertPathInsideRoot(storageRoot, destination, { allowMissing: true });
+    await fsp.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    if (!fs.existsSync(destination)) await fsp.writeFile(destination, data, { flag: "wx", mode: 0o600 });
+    if (!(await fsp.readFile(destination)).equals(data)) throw new Error(`附件迁移目标已存在不同内容：${item.name}`);
+    // Preserve old bytes for rollback before removing the verified source.
+    const backup = path.join(storageRoot, 'legacy-backup', sessionId, parsed.name);
+    assertPathInsideRoot(storageRoot, backup, { allowMissing: true });
+    await fsp.mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
+    if (!fs.existsSync(backup)) await fsp.writeFile(backup, data, { flag: "wx", mode: 0o600 });
+    if (!(await fsp.readFile(backup)).equals(data)) throw new Error("附件迁移备份校验失败");
+    if ((await fsp.readFile(source)).equals(data)) await fsp.unlink(source);
+    for (const directory of [path.dirname(source), path.dirname(path.dirname(source)), path.join(workspaceRoot, '.claude-codex')]) {
+      try { await fsp.rmdir(directory); } catch { break; }
+    }
+  }
 }
 
 export async function storeAttachment(input: {
@@ -46,7 +100,7 @@ export async function storeAttachment(input: {
   const storedName = `${stem}-${id.slice(-8)}${extension}`;
   const directory = attachmentDirectory(input.workspaceRoot, input.sessionId);
   const target = path.join(directory, storedName);
-  assertPathInsideRoot(input.workspaceRoot, target, { allowMissing: true });
+  assertPathInsideRoot(storageRoot || input.workspaceRoot, target, { allowMissing: true });
   const temporary = `${target}.${crypto.randomUUID()}.tmp`;
   await fsp.mkdir(directory, { recursive: true });
   try {
@@ -56,7 +110,7 @@ export async function storeAttachment(input: {
     await fsp.rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
-  const relativePath = path.relative(input.workspaceRoot, target).replaceAll("\\", "/");
+  const relativePath = storageRoot ? `@attachments/${input.sessionId}/${storedName}` : path.relative(input.workspaceRoot, target).replaceAll("\\", "/");
   return {
     id,
     name,
@@ -75,7 +129,6 @@ export async function validateAttachments(input: {
   if (input.value === undefined || input.value === null) return [];
   if (!Array.isArray(input.value)) throw new Error("附件清单格式无效");
   if (input.value.length > MAX_ATTACHMENTS_PER_MESSAGE) throw new Error("每轮最多附加 10 个文件");
-  const directory = path.resolve(attachmentDirectory(input.workspaceRoot, input.sessionId));
   const seen = new Set<string>();
   const attachments: Attachment[] = [];
   let totalSize = 0;
@@ -94,11 +147,10 @@ export async function validateAttachments(input: {
     if (!attachment.id || seen.has(attachment.id)) throw new Error("附件清单包含重复或无效项目");
     if (!Number.isSafeInteger(attachment.size) || attachment.size <= 0 || attachment.size > MAX_ATTACHMENT_SIZE) throw new Error("附件大小无效");
     if (!/^[a-f0-9]{64}$/i.test(attachment.sha256)) throw new Error("附件校验信息无效");
-    const absolute = path.resolve(input.workspaceRoot, attachment.relativePath);
-    if (absolute !== directory && !absolute.startsWith(`${directory}${path.sep}`)) throw new Error("附件路径不属于当前任务");
-    assertPathInsideRoot(input.workspaceRoot, absolute);
+    const absolute = resolveAttachmentPath(input.workspaceRoot, input.sessionId, attachment.relativePath);
     const stat = await fsp.stat(absolute).catch(() => null);
     if (!stat?.isFile() || stat.size !== attachment.size) throw new Error(`附件不存在或已损坏：${attachment.name}`);
+    if (crypto.createHash("sha256").update(await fsp.readFile(absolute)).digest("hex") !== attachment.sha256) throw new Error(`附件校验失败：${attachment.name}`);
     totalSize += attachment.size;
     if (totalSize > MAX_ATTACHMENTS_TOTAL_SIZE) throw new Error("单轮附件总大小不能超过 200 MB");
     seen.add(attachment.id);
@@ -108,17 +160,33 @@ export async function validateAttachments(input: {
 }
 
 export async function deleteSessionAttachments(workspaceRoot: string, sessionId: string) {
-  await fsp.rm(attachmentDirectory(workspaceRoot, sessionId), { recursive: true, force: true });
+  const target = attachmentDirectory(workspaceRoot, sessionId);
+  assertPathInsideRoot(storageRoot || workspaceRoot, target, { allowMissing: true, allowRoot: false });
+  await fsp.rm(target, { recursive: true, force: true });
+  if (storageRoot) {
+    const backup = path.join(storageRoot, "legacy-backup", safeSessionId(sessionId));
+    assertPathInsideRoot(storageRoot, backup, { allowMissing: true, allowRoot: false });
+    await fsp.rm(backup, { recursive: true, force: true });
+  }
+}
+
+function attachmentAgentPath(item: Attachment) {
+  const parsed = attachmentReference(item.relativePath);
+  if (storageRoot && parsed) {
+    const target = path.join(storageRoot, parsed.sessionId, parsed.name);
+    if (fs.existsSync(target)) return assertPathInsideRoot(storageRoot, target, { allowRoot: false });
+  }
+  return item.relativePath;
 }
 
 export function attachmentPrompt(text: string, attachments: Attachment[]) {
   if (!attachments.length) return text;
   const list = attachments.map((item, index) =>
-    `${index + 1}. ${item.name} | 路径：${item.relativePath} | 类型：${item.mimeType} | 大小：${item.size} bytes | SHA-256：${item.sha256}`
+    `${index + 1}. ${item.name} | 路径：${attachmentAgentPath(item)} | 类型：${item.mimeType} | 大小：${item.size} bytes | SHA-256：${item.sha256}`
   );
   return [
     text || "请处理以下附件。",
-    "本轮附件已保存到当前任务执行目录。请按任务需要直接读取这些路径；不要假设附件内容已被嵌入对话上下文。",
+    "本轮附件已保存到工作台的任务附件目录。请按任务需要直接读取这些路径；不要假设附件内容已被嵌入对话上下文。",
     ...list
   ].join("\n\n");
 }
