@@ -1,34 +1,28 @@
-import type { ClaudeSettings, ModelOption, Settings, SkillPolicy, SkillPolicies, ExecutionMode, TaskFolder, SkillFolder, SkillOrganization, CapabilityProfile, Workspace, Message, SessionStatus, PendingInput, Session, McpTransport, McpServer, State, DelegatedTask, AgentLog, AgentThread, AgentThreadSourceKind, AgentThreadIdentity } from "../../workbench/types.js";
-import path from "node:path";
+import type { Express, RequestHandler } from "express";
 import fs from "node:fs";
-import { DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS, type WorkflowEngine, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowPlanningMode } from "./types.js";
-import {
-  normalizeProviderId,
-  type AgentModelAdapter,
-  type AgentProviderId,
-  type AgentProviderModelSelection,
-  type AgentProviderManifestV1,
-  type AgentReasoningControl,
-  type DelegationMode,
-  type DelegationRequest
-} from "../../agents/types.js";
-import { taskDeletionPolicy } from "../../sessionManagement/deletionPolicy.js";
-import { WorkflowRepository } from "./repository.js";
-import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent, type WorkflowLogContext } from "./logs.js";
 import fsp from "node:fs/promises";
-import { abortWorkflowPlanTransaction, openWorkflowPlanTransaction, readWorkflowPlanTransaction } from "./plannerTransactions.js";
-import { normalizeWorkflowPlan, parsePlanJson, plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, validateWorkflowPlan, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./plan.js";
-import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./stateFiles.js";
-import { timeoutReason } from "../../orchestration/timeouts.js";
-import type { Express } from "express";
-import type { WorkflowRecord } from "./types.js";
-import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
-import type { NormalizedEngineEvent } from "../../engines/types.js";
-import type { WorkspaceTreeIndex } from "../../workspaceTreeIndex.js";
+import path from "node:path";
 import type { AgentAdapterRegistry } from "../../agents/registry.js";
+import {
+normalizeProviderId
+} from "../../agents/types.js";
+import type { NormalizedEngineEvent } from "../../engines/types.js";
 import type { ManagedSkillManager } from "../../managedSkillManager.js";
+import { timeoutReason } from "../../orchestration/timeouts.js";
+import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
+import { taskDeletionPolicy } from "../../sessionManagement/deletionPolicy.js";
+import type { McpServer, SkillPolicies, Workspace } from "../../workbench/types.js";
+import type { WorkspaceTreeIndex } from "../../workspaceTreeIndex.js";
+import { workflowLog, workflowLogFromEngineEvent } from "./logs.js";
+import { normalizeWorkflowPlan, validateWorkflowPlan, type WorkflowProviderCapabilities } from "./plan.js";
+import { abortWorkflowPlanTransaction, openWorkflowPlanTransaction, readWorkflowPlanTransaction } from "./plannerTransactions.js";
+import { WorkflowRepository } from "./repository.js";
+import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./stateFiles.js";
+import type { WorkflowRecord } from "./types.js";
+import { GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS, type WorkflowPlan, type WorkflowPlanningMode } from "./types.js";
 
 export type OrchestrationControllerPorts = {
+  acquireRequest: () => () => void;
   workspaceTreeIndex: WorkspaceTreeIndex;
   workflowRepository: WorkflowRepository;
   workspaceById: (id: string, ownerUserId?: string | undefined) => Workspace | undefined;
@@ -64,6 +58,16 @@ export type OrchestrationControllerPorts = {
 
 export function registerOrchestrationRoutes(app: Express, ports: OrchestrationControllerPorts) {
   const { workspaceTreeIndex, workflowRepository, workspaceById, agentAdapterRegistry, providerReadiness, uid, workflowStateFiles, workflowEvent, workflowRuntimeActive, activeWorkflowPlanners, activeWorkflowNodes, workflowNodeIntents, activeWorkflowIntegrations, waitForWorkflowRuntimeRelease, openInSystemFileManager, assertExistingDirectory, workflowResultPath, runtimeBindingForProvider, workspaceAgentConfig, managedSkillManager, mcpServersForWorkspace, currentWorkflowProviderCapabilities, WORKFLOW_PLANNER_TRANSACTION_DIR, workflowPlannerRequestKey, requestWorkflowPlan, plannerSkillContext, workflowPlannerFailureMessage, retryableWorkflowPlannerFailure, activeWorkflowPlannerRuns, assertWorkflowExecutionReady, queueWorkflowTick } = ports;
+function withAdmission(handler: RequestHandler<Record<string, string>>): RequestHandler<Record<string, string>> {
+  return async (req, res, next) => {
+    let release: () => void;
+    try { release = ports.acquireRequest(); }
+    catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error), code: "orchestration-plugin-disabled" }); return; }
+    try { await handler(req, res, next); }
+    finally { release(); }
+  };
+}
+
 function workflowDirectoryName(title: string) {
   const normalized = title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 48).replace(/[ .]+$/g, "") || "任务编排";
   return normalized;
@@ -92,7 +96,7 @@ app.get("/api/workflows", (req, res) => {
   res.json(workflowRepository.list(req.authUser!.id, req.query.workspaceId ? String(req.query.workspaceId) : undefined));
 });
 
-app.post("/api/workflows", async (req, res) => {
+app.post("/api/workflows", withAdmission(async (req, res) => {
   try {
     const workspace = workspaceById(String(req.body?.workspaceId || ""), req.authUser!.id);
     const prompt = String(req.body?.prompt || "").trim();
@@ -112,7 +116,7 @@ app.post("/api/workflows", async (req, res) => {
     workflowEvent(workflow.id, "workflow.created", req.authUser!.id, workspace.id, workflow.revision);
     res.status(201).json(workflow);
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
+}));
 
 app.get("/api/workflows/:id", (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
@@ -127,7 +131,7 @@ app.get("/api/workflows/:id/branches", (req, res) => {
   res.json(workflowRepository.listBranches(workflow.originId, req.authUser!.id));
 });
 
-app.post("/api/workflows/:id/branches", async (req, res) => {
+app.post("/api/workflows/:id/branches", withAdmission(async (req, res) => {
   const source = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!source) return res.status(404).json({ error: "工作流不存在" });
   try {
@@ -148,7 +152,7 @@ app.post("/api/workflows/:id/branches", async (req, res) => {
     workflowEvent(branch.id, "workflow.branch.created", req.authUser!.id, workspace.id, branch.revision);
     res.status(201).json(branch);
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
+}));
 
 app.put("/api/workflows/:id/prompt", (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
@@ -364,7 +368,7 @@ async function executeWorkflowPlanningRun(input: {
   }
 }
 
-app.post("/api/workflows/:id/plan", async (req, res) => {
+app.post("/api/workflows/:id/plan", withAdmission(async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   const existingController = activeWorkflowPlanners.get(workflow.id);
@@ -402,9 +406,9 @@ app.post("/api/workflows/:id/plan", async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }
-});
+}));
 
-app.post("/api/workflows/:id/approve", async (req, res) => {
+app.post("/api/workflows/:id/approve", withAdmission(async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   try {
@@ -417,7 +421,7 @@ app.post("/api/workflows/:id/approve", async (req, res) => {
     queueWorkflowTick(approved.id, req.authUser!.id);
     res.json(approved);
   } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
+}));
 
 app.post("/api/workflows/:id/retry-integration", (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
@@ -556,12 +560,12 @@ app.post("/api/workflows/:id/retry-failed-nodes", (req, res) => {
   } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-app.post("/api/workflows/:id/revise", async (req, res) => {
+app.post("/api/workflows/:id/revise", withAdmission(async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   try { const revised = workflowRepository.revise(workflow.id, req.authUser!.id, Number(req.body?.revision), String(req.body?.note || "")); workflowStateFiles.sync(revised); workflowStateFiles.appendEvent(revised, { type: "plan.rejected" }); workflowEvent(revised.id, "workflow.plan.rejected", req.authUser!.id, revised.workspaceId, revised.revision); res.json(revised); }
   catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
+}));
 
 app.post("/api/workflows/:id/pause", (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
@@ -582,7 +586,7 @@ app.post("/api/workflows/:id/pause", (req, res) => {
   } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-app.post("/api/workflows/:id/resume", async (req, res) => {
+app.post("/api/workflows/:id/resume", withAdmission(async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
   try {
@@ -609,7 +613,7 @@ app.post("/api/workflows/:id/resume", async (req, res) => {
     } else queueWorkflowTick(resumed.id, req.authUser!.id);
     res.json(resumed);
   } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
+}));
 
 app.post("/api/workflows/:id/cancel", (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);

@@ -170,6 +170,16 @@ export async function deleteSessionAttachments(workspaceRoot: string, sessionId:
   }
 }
 
+/** A branch owns its attachment bytes so deleting the source cannot break it. */
+export async function copySessionAttachments(workspaceRoot: string, sourceSessionId: string, targetWorkspaceRoot: string, targetSessionId: string, attachments: Attachment[]) {
+  const result: Attachment[] = [];
+  for (const attachment of attachments) {
+    const [verified] = await validateAttachments({ workspaceRoot, sessionId: sourceSessionId, value: [attachment] });
+    result.push(await storeAttachment({ workspaceRoot: targetWorkspaceRoot, sessionId: targetSessionId, originalName: verified.name, mimeType: verified.mimeType, data: await fsp.readFile(resolveAttachmentPath(workspaceRoot, sourceSessionId, verified.relativePath)) }));
+  }
+  return result;
+}
+
 function attachmentAgentPath(item: Attachment) {
   const parsed = attachmentReference(item.relativePath);
   if (storageRoot && parsed) {

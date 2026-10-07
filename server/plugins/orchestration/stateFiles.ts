@@ -186,7 +186,11 @@ export class WorkflowStateFiles {
     const collect = (relative = ""): string[] => fs.readdirSync(safePath(legacy.directory, relative), { withFileTypes: true }).flatMap((entry) => {
       if (entry.isSymbolicLink()) return [];
       const child = path.join(relative, entry.name);
-      if (entry.isDirectory()) return collect(child);
+      if (entry.isDirectory()) {
+        const normalized = child.replaceAll("\\", "/");
+        if (/^nodes(?:\/[a-zA-Z0-9_-]+(?:\/(?:plans(?:\/\d+)?(?:\/attempts(?:\/\d+)?)?|attempts(?:\/\d+)?))?)?$/.test(normalized)) return collect(child);
+        return [];
+      }
       return entry.isFile() && knownFile(child) ? [child] : [];
     });
     if (!fs.existsSync(marker)) {
