@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 // Load the real UI through Vite so branding assets resolve exactly as in the app.
-const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+const server = await createServer({ server: { middlewareMode: true }, appType: "custom", optimizeDeps: { noDiscovery: true, include: [] } });
 let AgentConversation, AssistantReply;
 try {
   ({ AgentConversation } = await server.ssrLoadModule("/src/components/AgentConversation.tsx"));

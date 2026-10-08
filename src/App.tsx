@@ -324,6 +324,7 @@ type DraftAttachment = {
 };
 type Message = {
   id: string;
+  sourceId?: string;
   role: "user" | "assistant" | "event" | "error";
   text: string;
   createdAt: string;
@@ -857,13 +858,15 @@ function subagentInfo(message: Message): SubagentInfo {
   const server = String(payload?.server || "").toLowerCase();
   const type = String(payload?.type || message.eventType || "").toLowerCase();
   const actionIsAgent = SUBAGENT_ACTIONS.has(action);
-  const isSubagent =
+  // A parent waiting barrier is lifecycle bookkeeping, not another Agent.
+  const isWaitBarrier = message.eventType === "subagent_wait" || type === "subagent_wait";
+  const isSubagent = !isWaitBarrier && (
     actionIsAgent ||
     server.includes("agent") ||
     type.includes("subagent") ||
     type.includes("collab") ||
     message.eventType === "agent_tool_call" ||
-    message.eventType === "subagent";
+    message.eventType === "subagent");
 
   const directAgentId = typeof payload?.agent_id === "string" ? payload.agent_id : typeof payload?.agentId === "string" ? payload.agentId : "";
   const payloadIdentity = asRecord(payload?.identity);
@@ -907,10 +910,11 @@ function subagentInfo(message: Message): SubagentInfo {
     agentType,
     ...collectDeepValues(message.payload, new Set(["provider", "engine", "model", "runtime", "backend", "agent_type", "agentType", "agent_name", "agentName"]))
   ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
-  const directProvider = [payload?.provider, payload?.engine, payload?.runtime]
+  const directProvider = [payloadIdentity?.providerId, payload?.providerId, payload?.provider, payload?.engine, payload?.runtime]
     .find((value): value is string => typeof value === "string" && /^[a-z][a-z0-9._-]{0,63}$/i.test(value.trim()))
     ?.trim().toLowerCase();
-  const provider = directProvider || (/claude|anthropic|opus|sonnet|haiku/.test(providerSignals)
+  const sourceProvider = isSubagent ? message.sourceId?.match(/^([a-z][a-z0-9._-]{0,63})-worker:/i)?.[1]?.toLowerCase() : undefined;
+  const provider = directProvider || sourceProvider || (/claude|anthropic|opus|sonnet|haiku/.test(providerSignals)
     ? "claude"
     : /codex|openai|gpt(?:-|\b)|o[1-9](?:-|\b)/.test(providerSignals)
       ? "codex"
@@ -2066,6 +2070,7 @@ function EventMessage({
     ? String((message.payload as { thinking?: unknown } | undefined)?.thinking || message.text || "")
     : "";
   const agent = subagentInfo(message);
+  if (message.eventType === "subagent_wait" || asRecord(message.payload)?.type === "subagent_wait") return null;
   if (message.eventType === "user_question" && claudeQuestions(message).length) {
     return <ClaudeQuestionCard message={message} onSubmit={onAnswerQuestion} />;
   }
