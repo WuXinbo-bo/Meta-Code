@@ -1,6 +1,7 @@
 import { Component, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode, type UIEvent } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { ActivityTimeline } from "./ActivityTimeline";
+import { AgentWorkProgress, agentWorkProgressLabel } from "./AgentWorkProgress";
 import { agentStreamVersion } from "./activityModel";
 
 type Props = {
@@ -21,6 +22,7 @@ type Props = {
   loading?: boolean;
   error?: string;
   scrollRef?: React.RefObject<HTMLDivElement | null>;
+  showProgress?: boolean;
 };
 
 export function useAgentOutputFollow(version: string, identity = "") {
@@ -73,7 +75,10 @@ export function useAgentOutputFollow(version: string, identity = "") {
       }
     };
     const onKey = (event: KeyboardEvent) => {
-      if (["Enter", " "].includes(event.key) && (event.target as Element).closest?.("summary")) followingRef.current = false;
+      if (["Enter", " "].includes(event.key) && (event.target as Element).closest?.("summary")) {
+        followingRef.current = false;
+        setFollowing(false);
+      }
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) markIntent();
     };
     container.addEventListener("wheel", onWheel, { passive: true });
@@ -142,15 +147,17 @@ class AgentConversationBoundary extends Component<{ resetKey: string; children: 
   }
 }
 
-export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], emptyText = "尚无活动日志", className = "", loading = false, error = "", scrollRef }: Props) {
+export function AgentConversation({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], emptyText = "尚无活动日志", className = "", loading = false, error = "", scrollRef, showProgress = true }: Props) {
   const safeLogs = Array.isArray(logs) ? logs : [];
   const version = agentStreamVersion(safeLogs);
+  const progressVisible = showProgress && Boolean(agentWorkProgressLabel(status, loading && !safeLogs.length));
   return <div className={`agent-conversation-stream ${className}`.trim()}>
     {error && <p className="agent-conversation-notice" role="status">{error}，正在自动重试。{safeLogs.length > 0 ? "已有日志仍可查看。" : ""}</p>}
     <AgentConversationBoundary resetKey={version}>
       {safeLogs.length
         ? <ActivityTimeline logs={safeLogs} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} showFilters={showFilters} hiddenCategories={hiddenCategories} scrollRef={scrollRef} />
-        : !error && <p className="agent-conversation-empty" role="status">{loading ? "正在读取活动日志…" : emptyText}</p>}
+        : !error && !progressVisible && <p className="agent-conversation-empty" role="status">{loading ? "正在读取活动日志…" : emptyText}</p>}
     </AgentConversationBoundary>
+    {progressVisible && <AgentWorkProgress status={status} loading={loading && !safeLogs.length} />}
   </div>;
 }

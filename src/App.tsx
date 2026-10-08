@@ -70,6 +70,7 @@ import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase"
 import { ThemeToggle } from "./branding/ThemeToggle";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
+import { AgentWorkProgress } from "./components/AgentWorkProgress";
 import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
 import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
 import { AssistantReply } from "./components/AssistantReply";
@@ -91,6 +92,9 @@ import {
 import type { MarkdownBodyProps } from "./components/MarkdownBody";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
 import { useHoverPanel } from "./components/useHoverPanel";
+import { TaskLaunchControls } from "./components/TaskLaunchControls";
+import { ActionMenu } from "./components/ActionMenu";
+import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./components/WorkspaceFileSearch";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
 import { fileKind, isPreviewFileKind, type PreviewFile, type WorkspaceFileNode } from "./files/fileTypes";
 import {
@@ -1182,7 +1186,7 @@ function activityGroupStatus(messages: Message[]) {
 }
 
 function ActivityMessageGroupView({ group, engine, providerLabel, providerControl, workspaceId }: { group: ActivityMessageGroup; engine: EngineName; providerLabel: string; providerControl?: ProviderControlSnapshot; workspaceId?: string }) {
-  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} showFilters={false} /></div>;
+  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} showFilters={false} showProgress={false} /></div>;
 }
 
 type ApiRequestInit = RequestInit & { timeoutMs?: number };
@@ -1376,6 +1380,8 @@ const SidebarTaskList = memo(function SidebarTaskList({
   delegationEnabled,
   providerControls,
   workspaceNames,
+  projects,
+  renderProjectMenu,
   onSelect,
   onPrefetch,
   onCancelPrefetch,
@@ -1402,15 +1408,20 @@ const SidebarTaskList = memo(function SidebarTaskList({
   delegationEnabled: boolean;
   providerControls: ProviderControlSnapshot[];
   workspaceNames: Record<string, string>;
+  projects: Workspace[];
+  renderProjectMenu: (workspace: Workspace) => ReactNode;
   onSelect: (item: SidebarTaskItem) => void;
   onPrefetch: (id: string) => void;
   onCancelPrefetch: () => void;
   onOpenTaskContextMenu: (id: string, x: number, y: number) => void;
   onOpenAreaContextMenu: (x: number, y: number) => void;
-  onOpenFolderContextMenu: (id: string, x: number, y: number) => void;
-  onCreateFolder: () => void;
+  onOpenFolderContextMenu: (id: string, x: number, y: number, workspaceId: string) => void;
+  onCreateFolder: (workspaceId?: string) => void;
 }) {
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
+  const [projectLimits, setProjectLimits] = useState<Record<string, number>>({});
+  const [recentLimit, setRecentLimit] = useState(20);
   const [archiveState, setArchiveState] = useState({ scopeKey, open: false });
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
   const archiveOpen = archiveState.scopeKey === scopeKey && archiveState.open;
@@ -1452,31 +1463,31 @@ const SidebarTaskList = memo(function SidebarTaskList({
     </> : <>
       {activeTaskShortcuts.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>进行中</span><small>{activeTaskShortcuts.length}</small></div><div className="session-group">{activeTaskShortcuts.map(renderTask)}</div></section>}
       {pinnedTaskShortcuts.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedTaskShortcuts.length}</small></div><div className="session-group">{pinnedTaskShortcuts.map(renderTask)}</div></section>}
-      {recentUnfiledTasks.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>最近</span><small>{recentUnfiledTasks.length}</small></div><div className="session-group">{recentUnfiledTasks.map(renderTask)}</div></section>}
-      {!standaloneActive && taskFolders.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>文件夹</span><button type="button" aria-label="新建任务文件夹" onClick={onCreateFolder}><Plus size={13} /></button></div>{taskFolders.map((folder) => {
-        const folderTasks = folderTaskItems.get(folder.id) || [];
-        const open = !collapsedFolderIds.has(folder.id);
-        return <details className="task-folder-group" key={folder.id} open={open} onToggle={(event) => {
-          const nextOpen = event.currentTarget.open;
-          setCollapsedFolderIds((current) => {
-            if (nextOpen === !current.has(folder.id)) return current;
-            const next = new Set(current);
-            if (nextOpen) next.delete(folder.id); else next.add(folder.id);
-            return next;
-          });
-        }}><summary onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onOpenFolderContextMenu(
-            folder.id,
-            Math.max(8, Math.min(event.clientX, window.innerWidth - 210)),
-            Math.max(8, Math.min(event.clientY, window.innerHeight - 120))
-          );
-        }}><Folder size={13} /><span>{folder.name}</span><small>{folderTasks.length}</small></summary>{open && <div>{folderTasks.map(renderTask)}</div>}</details>;
+      {projects.length > 0 && <section className="sidebar-task-section sidebar-projects"><div className="sidebar-section-heading"><span>项目</span></div>{projects.map((project) => {
+        const open = !collapsedProjectIds.has(project.id);
+        const projectTasks = visibleTaskItems.filter((item) => item.task.workspaceId === project.id && !(item.kind === "chat" && item.task.scopeKind === "standalone") && !item.task.pinned && !ACTIVE_TASK_STATUSES.has(item.task.status));
+        const limit = projectLimits[project.id] || 12;
+        const folders = project.taskFolders || [];
+        const knownFolders = new Set(folders.map((folder) => folder.id));
+        const unfiled = projectTasks.filter((item) => !item.task.folderId || !knownFolders.has(item.task.folderId));
+        return <section className="sidebar-project" key={project.id}>
+          <div className="sidebar-project-heading"><button type="button" aria-label={`展开项目：${project.name}`} aria-expanded={open} title={project.root} onClick={() => setCollapsedProjectIds((current) => { const next = new Set(current); if (open) next.add(project.id); else next.delete(project.id); return next; })}><ChevronRight className={open ? "is-expanded" : ""} size={12} /><Folder size={14} /><span>{project.name}</span>{project.pinned && <Pin size={11} />}</button>{renderProjectMenu(project)}</div>
+          {open && <div className="sidebar-project-tasks">
+            {unfiled.slice(0, limit).map(renderTask)}
+            {unfiled.length > limit && <button type="button" className="sidebar-show-more" onClick={() => setProjectLimits((current) => ({ ...current, [project.id]: limit + 20 }))}><ChevronDown size={12} />更多任务</button>}
+            {folders.map((folder) => {
+              const key = `${project.id}:${folder.id}`;
+              const folderOpen = !collapsedFolderIds.has(key);
+              const folderTasks = projectTasks.filter((item) => item.task.folderId === folder.id);
+              return <details className="task-folder-group" key={key} open={folderOpen} onToggle={(event) => { const nextOpen = event.currentTarget.open; setCollapsedFolderIds((current) => { if (nextOpen === !current.has(key)) return current; const next = new Set(current); if (nextOpen) next.delete(key); else next.add(key); return next; }); }}><summary onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onOpenFolderContextMenu(folder.id, Math.max(8, Math.min(event.clientX, window.innerWidth - 210)), Math.max(8, Math.min(event.clientY, window.innerHeight - 120)), project.id); }}><Folder size={12} /><span>{folder.name}</span></summary>{folderOpen && folderTasks.map(renderTask)}</details>;
+            })}
+            {!projectTasks.length && <span className="sidebar-project-empty">暂无其他任务</span>}
+          </div>}
+        </section>;
       })}</section>}
+      {(() => { const recent = recentUnfiledTasks.filter((item) => item.kind === "chat" && item.task.scopeKind === "standalone" || !projects.some((project) => project.id === item.task.workspaceId)); return recent.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>最近对话</span></div><div className="session-group">{recent.slice(0, recentLimit).map(renderTask)}</div>{recent.length > recentLimit && <button type="button" className="sidebar-show-more" onClick={() => setRecentLimit((current) => current + 20)}><ChevronDown size={12} />更多对话</button>}</section>; })()}
       {taskCount === 0 && <div className="sidebar-empty-state"><MessagesSquare size={20} /><strong>还没有任务</strong><small>创建任务后会显示在这里</small></div>}
       {archivedTasks.length > 0 && <details className="archived-session-list" open={archiveOpen} onToggle={(event) => setArchiveState({ scopeKey, open: event.currentTarget.open })}><summary><Archive size={12} />已归档 · {archivedTasks.length}<ChevronRight size={12} /></summary>{archiveOpen && <div>{archivedTasks.map(renderTask)}</div>}</details>}
-      {!standaloneActive && <button type="button" className="session-area-empty" onClick={onCreateFolder}><Plus size={13} />新建任务文件夹</button>}
     </>}
   </div>;
 });
@@ -1918,9 +1929,7 @@ function SubagentDrawer({
               ))}
             </nav>
           )}>
-          {drawerStatus === "running"
-            ? <div className="agent-drawer-progress" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>子 Agent 正在工作，日志实时更新</span></div>
-            : drawerDetailPending && <div className="agent-drawer-progress syncing" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>正在同步子 Agent 日志…</span></div>}
+          {drawerDetailPending && <div className="agent-drawer-progress syncing" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>正在同步子 Agent 日志…</span></div>}
           {(selectedAgent?.task || info.task) && (
             <AgentTaskDescription key={selectedAgentId} title="委派任务" text={selectedAgent?.task || info.task || ""} />
           )}
@@ -2390,7 +2399,7 @@ export function App() {
   const [resizingPane, setResizingPane] = useState<ResizingPane | null>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [sessionAreaMenu, setSessionAreaMenu] = useState<{ x: number; y: number } | null>(null);
-  const [taskFolderMenu, setTaskFolderMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [taskFolderMenu, setTaskFolderMenu] = useState<{ id: string; workspaceId: string; x: number; y: number } | null>(null);
   const [view, setView] = useState<"chat" | "agents" | "mcp" | "settings" | "git">("chat");
   const [activeWorkflowId, setActiveWorkflowId] = useState("");
   const [workflowDraftOpen, setWorkflowDraftOpen] = useState(false);
@@ -2419,6 +2428,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 720);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [dialog, setDialog] = useState<"workspace" | "task-mode" | "agent" | "agent-import" | "agents" | null>(null);
+  const [newTaskWorkspaceId, setNewTaskWorkspaceId] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
   const guideInitializedRef = useRef(false);
   const [pendingNewTaskPrompt, setPendingNewTaskPrompt] = useState("");
@@ -2474,6 +2484,7 @@ export function App() {
   const activeScopeBrowserResource = workspaceBrowser.tabs.find((tab) => tab.id === workspaceBrowser.activeTabId)?.resource;
   const activeFileScopeId = workspaceBrowserScopeId(activeScopeBrowserResource, taskFileScopeId);
   const filePanel = useHoverPanel(`${view}:${activeFileScopeId}`, inspectorOpen);
+  const directoryPanelVisible = (inspectorOpen || filePanel.open) && view === "chat" && activeScopeBrowserResource?.kind !== "tool";
   const settlePendingSessionTab = useCallback(() => {
     const pending = sessionNavigationRef.current;
     if (pending.phase !== "loading") return;
@@ -2516,6 +2527,7 @@ export function App() {
   const [treeQuery, setTreeQuery] = useState("");
   const [treeSearchOpen, setTreeSearchOpen] = useState(false);
   const treeSearchRef = useRef<HTMLInputElement>(null);
+  const searchWorkspaceFileList = useCallback((workspaceId: string, query: string, signal: AbortSignal) => api<WorkspaceFileSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/files/search?q=${encodeURIComponent(query)}`, { signal, timeoutMs: 25_000 }), []);
   const [historyLoad, setHistoryLoad] = useState<{ sessionId: string; start: number; target: number } | null>(null);
   const [historyPageLoading, setHistoryPageLoading] = useState(false);
   const [agentDrawerMessageId, setAgentDrawerMessageId] = useState("");
@@ -2570,11 +2582,11 @@ export function App() {
     setTaskFolderMenu(null);
     setSessionAreaMenu({ x, y });
   }, []);
-  const openSidebarTaskFolderMenu = useCallback((id: string, x: number, y: number) => {
+  const openSidebarTaskFolderMenu = useCallback((id: string, x: number, y: number, workspaceId: string) => {
     if (sessionNavigationRef.current.phase === "loading") return;
     setSessionContextMenu(null);
     setSessionAreaMenu(null);
-    setTaskFolderMenu({ id, x, y });
+    setTaskFolderMenu({ id, workspaceId, x, y });
   }, []);
 
   useEffect(() => () => cancelFilePreviewRequest(false), [cancelFilePreviewRequest]);
@@ -3344,6 +3356,12 @@ export function App() {
     setTreeError(cached?.error || "");
     setTreeUpdatedAt(cached?.updatedAt || null);
     void loadWorkspaceTree(activeFileScopeId, { silent: Boolean(cached) });
+  }, [activeFileScopeId]);
+
+  useEffect(() => {
+    if (!activeFileScopeId || !directoryPanelVisible) return;
+    const cached = treeCacheRef.current.get(activeFileScopeId);
+    if (cached) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     const pollTimer = window.setInterval(() => {
       if (!document.hidden) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     }, 15_000);
@@ -3354,7 +3372,7 @@ export function App() {
       window.clearInterval(pollTimer);
       unsubscribeReconcile();
     };
-  }, [activeFileScopeId]);
+  }, [activeFileScopeId, directoryPanelVisible]);
 
   useEffect(() => {
     if (!activeFileScopeId || !tree.length) return;
@@ -3382,6 +3400,7 @@ export function App() {
     [data?.skills, skillPolicies]
   );
   const treeHasVisibleItems = useMemo(() => workspaceTreeContainsQuery(tree, treeQuery), [tree, treeQuery]);
+  const treeHasVisibleDirectories = useMemo(() => workspaceTreeContainsQuery(tree.filter((node) => node.type === "directory"), treeQuery), [tree, treeQuery]);
   const standaloneActive = activeScopeBrowserResource?.kind === "conversation"
     ? !activeScopeBrowserResource.workspaceId
     : standaloneScope || activeSession?.scopeKind === "standalone";
@@ -3498,7 +3517,7 @@ export function App() {
 
     for (const item of taskItems) {
       const isActive = ACTIVE_TASK_STATUSES.has(item.task.status);
-      if (!deferredSidebarQuery || item.task.title.toLocaleLowerCase().includes(deferredSidebarQuery)) visible.push(item);
+      if (!deferredSidebarQuery || `${item.task.title} ${workspaceNames[item.task.workspaceId] || "临时对话"}`.toLocaleLowerCase().includes(deferredSidebarQuery)) visible.push(item);
       if (isActive) active.push(item);
       else if (item.task.pinned) pinned.push(item);
       if (!item.task.pinned && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
@@ -3512,7 +3531,7 @@ export function App() {
       recentUnfiledTasks: recent,
       folderTaskItems: byFolder
     };
-  }, [taskItems, taskFolders, deferredSidebarQuery]);
+  }, [taskItems, taskFolders, deferredSidebarQuery, workspaceNames]);
   const archivedSessions = useMemo(() => (data?.sessions || []).filter((item) => (!sidebarWorkspaceFilter || item.scopeKind !== "standalone" && item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.sessions, sidebarWorkspaceFilter]);
   const archivedWorkflows = useMemo(() => (data?.workflows || []).filter((item) => (!sidebarWorkspaceFilter || item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.workflows, sidebarWorkspaceFilter]);
   const archivedTasks = useMemo<SidebarTaskItem[]>(() => [
@@ -3605,6 +3624,15 @@ export function App() {
       <button type="button" onClick={async () => { const name = window.prompt("修改工作区名称", item.name)?.trim(); if (name && name !== item.name) await updateWorkspaceMetadata(item.id, { name }); }}><Pencil size={14} />重命名</button>
     </div></details>
   </div>;
+  const renderProjectMenu = (item: Workspace) => <div className="sidebar-project-actions"><button type="button" className="sidebar-project-create" aria-label={`新建对话：${item.name}`} title="新建对话" onClick={() => createSession(item.id)}><Plus size={15} /></button><ActionMenu className="sidebar-project-menu" label={`项目设置：${item.name}`}>
+    <button type="button" onClick={() => createSession(item.id)}><MessageSquarePlus size={14} />新建对话</button>
+    <button type="button" onClick={() => { setSidebarWorkspaceFilter((current) => current === item.id ? "" : item.id); }}><FileSearch size={14} />{sidebarWorkspaceFilter === item.id ? "全部任务" : "只看此项目"}</button>
+    <button type="button" onClick={() => void openWorkspace(item.id).catch((error) => setNotice(error.message))}><FolderOpen size={14} />打开项目</button>
+    <button type="button" onClick={() => void createTaskFolder(item.id)}><Folder size={14} />新建任务文件夹</button>
+    <button type="button" onClick={() => void updateWorkspaceMetadata(item.id, { pinned: !item.pinned }).catch((error) => setNotice(error.message))}><Pin size={14} />{item.pinned ? "取消置顶" : "置顶项目"}</button>
+    <button type="button" onClick={async () => { const name = window.prompt("修改项目名称", item.name)?.trim(); if (name && name !== item.name) await updateWorkspaceMetadata(item.id, { name }).catch((error) => setNotice(error.message)); }}><Pencil size={14} />重命名</button>
+    <button type="button" onClick={() => void updateWorkspaceMetadata(item.id, { archived: true }).catch((error) => setNotice(error.message))}><Archive size={14} />归档项目</button>
+  </ActionMenu></div>;
 
   const resetTaskViewState = () => {
     cancelFilePreviewRequest();
@@ -4012,12 +4040,13 @@ export function App() {
     }
   };
 
-  const createSession = () => {
+  const createSession = (workspaceId = "") => {
     cancelSessionNavigation();
     setPendingNewTaskPrompt("");
     setPendingNewTaskSkills([]);
     setPendingNewTaskAttachments([]);
     setDraftAttachments([]);
+    setNewTaskWorkspaceId(workspaceId);
     setDialog("task-mode");
   };
 
@@ -4264,32 +4293,32 @@ export function App() {
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
 
-  const createTaskFolder = useCallback(async () => {
-    if (!sidebarWorkspaceFilter) return;
+  const createTaskFolder = useCallback(async (workspaceId = sidebarWorkspaceFilter) => {
+    if (!workspaceId) return;
     const name = window.prompt("新建任务文件夹")?.trim();
     if (!name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setSessionAreaMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }, [sidebarWorkspaceFilter, setNotice]);
 
-  const renameTaskFolder = async (folder: TaskFolder) => {
+  const renameTaskFolder = async (workspaceId: string, folder: TaskFolder) => {
     const name = window.prompt("重命名任务文件夹", folder.name)?.trim();
     if (!name || name === folder.name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
 
-  const deleteTaskFolder = async (folder: TaskFolder) => {
+  const deleteTaskFolder = async (workspaceId: string, folder: TaskFolder) => {
     if (!await confirmAction(`删除任务文件夹「${folder.name}」？\n其中的任务会移回最近任务，不会被删除。`, { destructive: true })) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(sidebarWorkspaceFilter)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
-      setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
+      setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.workspaceId === result.workspace.id && item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.workspaceId === result.workspace.id && item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
@@ -4319,6 +4348,7 @@ export function App() {
     if (!text && !drafts.length) return;
     await agentConfigSaveRef.current;
     if (!activeSession) {
+      setNewTaskWorkspaceId("");
       setPendingNewTaskPrompt(text);
       setPendingNewTaskSkills(explicitSkills);
       setPendingNewTaskAttachments(drafts);
@@ -5122,7 +5152,7 @@ export function App() {
         <button type="button" className="activity-brand" title="返回 Meta Code 工作台" aria-label="返回 Meta Code 工作台" onClick={() => { cancelSessionNavigation(); setView("chat"); }}><ProductLogo variant="mark" /></button>
         <div className="activity-primary">
           <button type="button" className={sidebarOpen && sidebarSection === "tasks" ? "active" : ""} aria-label="任务" title="全部任务" onClick={() => showSidebarSection("tasks")}><MessagesSquare size={20} /></button>
-          <button type="button" aria-label="新任务" title="新任务" onClick={createSession}><MessageSquarePlus size={20} /></button>
+          <button type="button" aria-label="新任务" title="新任务" onClick={() => createSession()}><MessageSquarePlus size={20} /></button>
         </div>
         <div className="activity-secondary">
           <button type="button" className={view === "agents" ? "active" : ""} aria-label="Skill 中心" title="Skill 中心" onClick={() => { cancelSessionNavigation(); setView("agents"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Sparkles size={19} /></button>
@@ -5133,13 +5163,13 @@ export function App() {
       </nav>
       <aside className="sidebar">
         <header className="sidebar-pane-header">
-          <span><strong>{sidebarSection === "tasks" ? "任务" : "工作区"}</strong></span>
+          <span><strong>任务</strong></span>
           <IconButton label="收起导航面板" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={16} /></IconButton>
         </header>
-        {sidebarSection === "tasks" ? <>
-          <div className="sidebar-task-actions"><button className="new-task" onClick={createSession}><MessageSquarePlus size={16} /><span>新任务</span></button></div>
-          <div className="sidebar-scope-filter"><FolderOpen size={14} /><select aria-label="筛选任务工作区" value={sidebarWorkspaceFilter} onChange={(event) => setSidebarWorkspaceFilter(event.target.value)}><option value="">全部任务</option>{activeWorkspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><IconButton label="管理工作区" onClick={() => showSidebarSection("workspaces")}><MoreHorizontal size={15} /></IconButton></div>
-          <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />{sidebarQuery && <button type="button" aria-label="清除搜索" onClick={() => setSidebarQuery("")}><X size={13} /></button>}</label>
+        <>
+          <div className="sidebar-task-actions"><button className="new-task" onClick={() => createSession()}><MessageSquarePlus size={16} /><span>新任务</span></button></div>
+          <div className="sidebar-toolbar"><label className={`sidebar-search ${sidebarQuery ? "has-query" : ""}`}><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />{sidebarQuery && <button type="button" aria-label="清除搜索" onClick={() => setSidebarQuery("")}><X size={13} /></button>}</label><IconButton label="添加项目" onClick={() => setDialog("workspace")}><FolderOpen size={15} /></IconButton></div>
+          {sidebarWorkspaceFilter && <button type="button" className="sidebar-filter-reset" onClick={() => setSidebarWorkspaceFilter("")}><ArrowLeft size={12} />全部任务</button>}
           <SidebarTaskList
             query={deferredSidebarQuery}
             visibleTaskItems={visibleTaskItems}
@@ -5159,6 +5189,8 @@ export function App() {
             delegationEnabled={delegationEnabled}
             providerControls={data.providerControls}
             workspaceNames={workspaceNames}
+            projects={[...pinnedWorkspaces, ...recentWorkspaces].filter((item) => !sidebarWorkspaceFilter || item.id === sidebarWorkspaceFilter)}
+            renderProjectMenu={renderProjectMenu}
             onSelect={handleSidebarTaskSelection}
             onPrefetch={scheduleSessionPrefetch}
             onCancelPrefetch={cancelSessionPrefetch}
@@ -5167,15 +5199,8 @@ export function App() {
             onOpenFolderContextMenu={openSidebarTaskFolderMenu}
             onCreateFolder={createTaskFolder}
           />
-        </> : <div className="workspace-panel">
-          <div className="workspace-panel-actions"><button type="button" onClick={() => showSidebarSection("tasks")}><ArrowLeft size={15} />全部任务</button><button type="button" className="primary" onClick={() => setDialog("workspace")}><Plus size={15} />添加工作区</button></div>
-          <div className="workspace-panel-list">
-            {pinnedWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedWorkspaces.length}</small></div>{pinnedWorkspaces.map(renderWorkspaceItem)}</section>}
-            {recentWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>最近使用</span><small>{recentWorkspaces.length}</small></div>{recentWorkspaces.map(renderWorkspaceItem)}</section>}
-            {archivedWorkspaces.length > 0 && <section className="workspace-archive-section"><button type="button" className="workspace-archive-toggle" aria-expanded={workspaceArchiveOpen} onClick={() => setWorkspaceArchiveOpen((value) => !value)}><Archive size={13} /><span>已归档</span><small>{archivedWorkspaces.length}</small><ChevronRight size={13} /></button>{workspaceArchiveOpen && <div className="workspace-archive-items">{archivedWorkspaces.map(renderWorkspaceItem)}</div>}</section>}
-            {data.workspaces.length === 0 && <div className="sidebar-empty-state"><FolderOpen size={20} /><strong>还没有工作区</strong><small>添加本地文件夹后开始</small></div>}
-          </div>
-        </div>}
+          {archivedWorkspaces.length > 0 && <details className="sidebar-archived-projects"><summary><Archive size={12} />已归档项目</summary>{archivedWorkspaces.map(renderWorkspaceItem)}</details>}
+        </>
       </aside>
       {!navigationPending && sessionContextMenu && (() => {
         const session = data.sessions.find((item) => item.id === sessionContextMenu.id);
@@ -5204,20 +5229,19 @@ export function App() {
         </div></>;
       })()}
       {!navigationPending && sessionAreaMenu && sidebarWorkspaceFilter && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
-      {!navigationPending && taskFolderMenu && (() => { const folder = taskFolders.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
+      {!navigationPending && taskFolderMenu && (() => { const { workspaceId } = taskFolderMenu; const folder = data.workspaces.find((item) => item.id === workspaceId)?.taskFolders?.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(workspaceId, folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(workspaceId, folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
       {sidebarVisible && <button className="mobile-sidebar-backdrop" aria-label="关闭侧栏" onClick={() => setSidebarOpen(false)} />}
       {sidebarVisible && <button className="pane-resizer pane-resizer-sidebar" type="button" role="separator" aria-label="调整任务区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.sidebar} onPointerDown={(event) => beginPaneResize("sidebar", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("sidebar")} onKeyDown={(event) => handlePaneResizeKeyDown("sidebar", event)}><GripVertical size={14} /></button>}
 
       <main className="main-panel" aria-busy={navigationPending}>
-        <header className="topbar">
+        <header className={`topbar ${view === "chat" ? "topbar-browser-layout" : ""}`}>
+          <div className="topbar-title">
           {view !== "chat" && <IconButton label="返回任务" onClick={() => setView("chat")}><ArrowLeft size={18} /></IconButton>}
           <div className="title-block">
             <strong>{view === "chat" ? activeWorkspaceBrowserTab?.title || (workflowDraftOpen ? "Meta 任务编排" : activeWorkflowId ? data.workflows.find((item) => item.id === activeWorkflowId)?.title : activeSession?.title) || "新任务" : view === "agents" ? "Skill 中心" : view === "mcp" ? "MCP" : view === "git" ? "版本管理" : "设置"}</strong>
           </div>
-          {view === "chat" && !activeBrowserToolResource && <button ref={filePanel.triggerRef} {...filePanel.triggerProps} type="button" className="task-location-trigger" title={fileScopeWorkspace?.root || "独立任务目录"} aria-label="查看任务文件" aria-expanded={inspectorVisible} aria-controls="task-file-panel"><FolderOpen size={14} /><span>{fileScopeStandalone ? "临时对话" : fileScopeWorkspace?.name || "文件"}</span><ChevronDown size={12} /></button>}
-          {displayedSession?.status === "running" && <div className="run-status"><LoaderCircle className="spin" size={13} />执行中</div>}
-          {!navigationPending && displayedSession?.status === "paused" && <div className="run-status paused"><Pause size={13} />已暂停</div>}
-          <div className="topbar-actions">
+          </div>
+          <div className="topbar-pages">
         {workspaceBrowserVisible && <WorkspaceBrowserTabs
           tabs={workspaceBrowser.tabs}
           conversationProviders={browserConversationProviders}
@@ -5241,16 +5265,18 @@ export function App() {
             else { dispatchWorkspaceBrowser({ type: "deactivate" }); setPreviewFile(null); setView("chat"); }
           }}
         />}
+          </div>
+          <div className="topbar-actions">
+          {displayedSession?.status === "running" && <div className="run-status" title="执行中" aria-label="执行中"><LoaderCircle className="spin" size={13} /><span>执行中</span></div>}
+          {!navigationPending && displayedSession?.status === "paused" && <div className="run-status paused" title="已暂停" aria-label="已暂停"><Pause size={13} /><span>已暂停</span></div>}
           {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} />}
-          {view === "chat" && !activeBrowserToolResource && <IconButton label={inspectorPinned ? "收起文件区" : "固定文件区"} onClick={() => { filePanel.close(); setInspectorOpen((value) => !value); }}><FolderOpen size={17} /></IconButton>}
-          <details className="task-more-menu" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector<HTMLElement>("summary")?.focus(); } }}>
-            <summary title="任务详情与更多操作" aria-label="任务详情与更多操作"><MoreHorizontal size={18} /></summary>
-            <div className="task-more-content">
+          {view === "chat" && !activeBrowserToolResource && <button ref={filePanel.triggerRef} {...filePanel.triggerProps} type="button" className="icon-button task-file-trigger" title="查看任务文件" aria-label="查看任务文件" aria-expanded={inspectorVisible} aria-controls="task-file-panel"><FolderOpen size={17} /></button>}
+          <ActionMenu className="task-more-menu" label="任务详情与更多操作">
               <ThemeToggle />
               {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <button type="button" disabled={displayedDeletionBusy} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}{displayedDeletionPolicy?.requiresTermination ? "停止并删除任务" : "删除任务"}</button>}
               {!navigationPending && displayedSession && <section className="task-usage-details"><header><Gauge size={14} /><strong>任务 Token</strong><span>{usageLabel}</span></header><dl><div><dt>全部线程</dt><dd>{displayedTokens.toLocaleString()}</dd></div><div><dt>主线程</dt><dd>{mainTokens.toLocaleString()}</dd></div><div><dt>子 Agent（{usageSummary.agentCount}）</dt><dd>{agentTokens.toLocaleString()}</dd></div><div><dt>输入／输出</dt><dd>{usageSummary.total.input_tokens.toLocaleString()} / {usageSummary.total.output_tokens.toLocaleString()}</dd></div><div><dt>缓存输入</dt><dd>{usageSummary.total.cached_input_tokens.toLocaleString()}</dd></div><div><dt>推理输出</dt><dd>{usageSummary.total.reasoning_output_tokens.toLocaleString()}</dd></div></dl></section>}
-            </div>
-          </details>
+              <div className="mobile-provider-summary"><ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} /></div>
+          </ActionMenu>
           </div>
         </header>
 
@@ -5444,7 +5470,7 @@ export function App() {
                   </div>;
                 })}
               </div>
-              {running && <div className="working-line"><LoaderCircle className="spin" size={16} />智能体正在工作</div>}
+              {running && <AgentWorkProgress status="running" className="working-line" />}
               <div />
             </div>
             {!navigationPending && !followOutput && (
@@ -5691,23 +5717,25 @@ export function App() {
               <small title={treeUpdatedAt ? `目录已刷新：${treeUpdatedAt.toLocaleString()}` : "尚未读取"}>{treeUpdatedAt ? `${treeUpdatedAt.toDateString() === new Date().toDateString() ? "" : `${treeUpdatedAt.toLocaleDateString([], { month: "short", day: "numeric" })} `}${treeUpdatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "尚未读取"}</small>
             </span>
             <span className="inspector-header-actions">
-              {fileScopeWorkspace && <button type="button" className="agents-file-button" onClick={openAgents} title="编辑 AGENTS.md" aria-label="编辑 AGENTS.md"><FileCode2 size={15} /></button>}
-              <IconButton label="在文件管理器中打开工作区" disabled={!activeFileScopeId} onClick={() => openWorkspaceFolder()}><FolderOpen size={15} /></IconButton>
               <IconButton label="刷新文件" disabled={!activeFileScopeId || treeLoading} onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>
                 <RefreshCw className={treeLoading ? "spin" : undefined} size={15} />
               </IconButton>
               <IconButton label="搜索文件" disabled={!activeFileScopeId} onClick={() => { setTreeSearchOpen(true); requestAnimationFrame(() => treeSearchRef.current?.focus()); }}><Search size={15} /></IconButton>
               <IconButton label={inspectorPinned ? "取消固定文件区" : "固定文件区"} onClick={() => { filePanel.close(); setInspectorOpen((value) => !value); }}><Pin size={15} /></IconButton>
+              <ActionMenu className="file-more-menu" label="文件区更多操作" ownerId="task-file-panel">{fileScopeWorkspace && <button type="button" aria-label="编辑 AGENTS.md" onClick={openAgents}><FileCode2 size={14} />项目指令</button>}<button type="button" disabled={!activeFileScopeId} onClick={() => openWorkspaceFolder()}><FolderOpen size={14} />在文件管理器中打开</button></ActionMenu>
               <IconButton label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanel.close(true); }}><X size={15} /></IconButton>
             </span>
           </div>
           <label className={`tree-search ${treeSearchOpen || treeQuery ? "is-expanded" : ""}`}>
             <Search size={14} aria-hidden="true" />
-            <input ref={treeSearchRef} value={treeQuery} onFocus={() => setTreeSearchOpen(true)} onBlur={() => { if (!treeQuery) setTreeSearchOpen(false); }} onChange={(event) => setTreeQuery(event.target.value)} placeholder="筛选已加载的文件和目录" aria-label="筛选已加载的文件和目录" />
+            <input ref={treeSearchRef} value={treeQuery} onFocus={() => setTreeSearchOpen(true)} onBlur={() => { if (!treeQuery) setTreeSearchOpen(false); }} onChange={(event) => setTreeQuery(event.target.value)} placeholder="搜索文件和目录" aria-label="搜索文件和目录" />
             {treeQuery && <button type="button" aria-label="清除文件搜索" onClick={() => setTreeQuery("")}><X size={13} /></button>}
           </label>
           {treeError && <div className="tree-error"><span>{treeError}</span><button type="button" onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>重试</button></div>}
-          {treeHasVisibleItems ? <RecoverableSectionBoundary resetKey={`${activeFileScopeId}:${treeUpdatedAt?.getTime() || 0}`} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary> : <p className="empty-note">{treeLoading ? "正在读取工作区文件" : treeQuery ? "没有匹配的文件" : "没有可显示的文件"}</p>}
+          {treeQuery.trim() && inspectorVisible && <WorkspaceFileSearch workspaceId={activeFileScopeId} query={treeQuery} search={searchWorkspaceFileList} loadedTree={tree} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={(node) => void openFilePreview(node)} />}
+          {treeQuery.trim() && treeHasVisibleDirectories && <small className="tree-local-label">已加载目录</small>}
+          <div className="persistent-file-tree"><RecoverableSectionBoundary resetKey={activeFileScopeId} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={treeQuery.trim() ? tree.filter((node) => node.type === "directory") : tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary></div>
+          {!treeHasVisibleItems && !treeQuery.trim() && <p className="empty-note">{treeLoading ? "正在读取工作区文件" : "没有可显示的文件"}</p>}
         </aside>
       {inspectorPinned && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
 
@@ -5717,6 +5745,7 @@ export function App() {
         setDialog(null);
       }} />}
       {dialog === "task-mode" && <TaskEngineDialog
+        initialWorkspaceId={newTaskWorkspaceId}
         orchestrationEnabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)}
         runtime={data.runtime}
         providers={agentProviders}
@@ -5819,15 +5848,14 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   </Dialog>;
 }
 
-function TaskEngineDialog({ orchestrationEnabled, runtime, providers, providerControls, workspaces, onWorkspaceAdded, onClose, onSelect, onSelectWorkflow }: { orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; workspaces: Workspace[]; onWorkspaceAdded: (workspace: Workspace) => void; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone", workspaceId: string) => Promise<void>; onSelectWorkflow: (workspaceId: string) => Promise<void> }) {
-  const engines = providers.filter((provider) => provider.capabilities.sessions.create);
+function TaskEngineDialog({ initialWorkspaceId, orchestrationEnabled, runtime, providers, providerControls, workspaces, onWorkspaceAdded, onClose, onSelect, onSelectWorkflow }: { initialWorkspaceId: string; orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; workspaces: Workspace[]; onWorkspaceAdded: (workspace: Workspace) => void; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone", workspaceId: string) => Promise<void>; onSelectWorkflow: (workspaceId: string) => Promise<void> }) {
   const engineReady = (engine: EngineName) => {
     const control = providerControls.find((candidate) => candidate.providerId === engine);
     return control ? control.operations.setDefault : Boolean(runtime.providers[engine]?.available);
   };
-  // No global main-agent or implicit workspace preference is carried into a draft.
+  // Project actions may explicitly target a workspace; generic tasks stay temporary.
   const [selected, setSelected] = useState<EngineName | "">("");
-  const [workspaceId, setWorkspaceId] = useState("");
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspaceId);
   const [taskKind, setTaskKind] = useState<"conversation" | "workflow">("conversation");
   const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -5835,17 +5863,9 @@ function TaskEngineDialog({ orchestrationEnabled, runtime, providers, providerCo
   const scopeKind = workspaceId ? "workspace" : "standalone";
   const workflowReady = orchestrationEnabled && providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
   const selectedAvailable = taskKind === "workflow" ? Boolean(workspaceId) && workflowReady : Boolean(selected) && engineReady(selected);
-  const selectedControl = providerControls.find((control) => control.providerId === selected);
   if (addingWorkspace) return <WorkspaceDialog onClose={() => setAddingWorkspace(false)} onCreated={(item) => { onWorkspaceAdded(item); setWorkspaceId(item.id); setAddingWorkspace(false); }} />;
   return <Dialog title="新任务" className="task-launch-dialog" onClose={busy ? () => undefined : onClose}>
-    <div className="task-launch-fields">
-      <label><span>位置</span><div className="task-launch-location"><select aria-label="新任务位置" value={workspaceId} disabled={busy} onChange={(event) => setWorkspaceId(event.target.value)}><option value="">临时对话</option>{workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select><button type="button" disabled={busy} onClick={() => setAddingWorkspace(true)} title="选择本地目录并添加工作区"><FolderOpen size={15} />选择目录</button></div></label>
-      <p className="task-launch-hint">{workspaceId ? workspaces.find((workspace) => workspace.id === workspaceId)?.root : "独立任务目录"}</p>
-      <label><span>任务类型</span><select aria-label="任务类型" value={taskKind} disabled={busy} onChange={(event) => setTaskKind(event.target.value as "conversation" | "workflow")}><option value="conversation">对话任务</option><option value="workflow" disabled={!workflowReady}>任务编排{!workflowReady ? "（暂不可用）" : ""}</option></select></label>
-      {taskKind === "conversation" && <label><span>主 Agent</span><select aria-label="本次任务主 Agent" value={selected} disabled={busy} onChange={(event) => setSelected(event.target.value)}><option value="" disabled>请选择本次使用的 Agent</option>{engines.map((provider) => <option key={provider.id} value={provider.id} disabled={!engineReady(provider.id)}>{provider.shortName}{!engineReady(provider.id) ? "（未就绪）" : ""}</option>)}</select></label>}
-      {taskKind === "conversation" && selected && !engineReady(selected) && <p className="task-launch-hint">{providerMainAgentUnavailableReason(selectedControl)}</p>}
-      {taskKind === "workflow" && !workspaceId && <p className="task-launch-hint">任务编排需要工作区</p>}
-    </div>
+    <TaskLaunchControls workspaces={workspaces} providers={providers} providerControls={providerControls} workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId} selectedProvider={selected} onProviderChange={setSelected} taskKind={taskKind} onTaskKindChange={setTaskKind} engineReady={engineReady} workflowReady={workflowReady} busy={busy} onAddDirectory={() => setAddingWorkspace(true)} />
     {error && <p className="form-error" role="alert">{error}</p>}
     <div className="dialog-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="button" className="primary" disabled={busy || !selectedAvailable} onClick={async () => {
       setBusy(true); setError("");

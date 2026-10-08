@@ -155,7 +155,8 @@ assert.match(renderer, /GenericActivityRenderer/);
 assert.match(renderer, /unknown: GenericActivityRenderer/);
 assert.match(timeline, /activityGroupLabel/);
 assert.match(timeline, /open && <div className="agent-stream-cluster-items">/);
-assert.match(timeline, /isLiveTimeline\(status\) \? liveActivityItems\(visible, provider\) : settledActivityItems\(visible\)/);
+// Live/settled disclosure behavior is asserted against the rendered component
+// in test-agent-conversation-layout, independent of its implementation shape.
 assert.match(timeline, /type: "summary"/);
 assert.match(timeline, /<CompletedActivitySummary/);
 assert.match(timeline, /open && <div className="activity-summary-details">/);

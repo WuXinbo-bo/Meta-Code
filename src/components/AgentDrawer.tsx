@@ -20,7 +20,7 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
   }, []);
   return <div className="agent-drawer-backdrop" onMouseDown={onClose}>
     <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`${title}日志`} className={`agent-drawer ${className}`} onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
-      if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (event.key !== "Tab") return;
       const targets = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input, textarea, select, summary, [tabindex="0"]')).filter((element) => element.getClientRects().length);
       const first = targets[0];
@@ -34,7 +34,7 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
       {!followOutput.following && followOutput.pendingCount > 0 && <button type="button" className="agent-drawer-new-activity" onClick={followOutput.jumpToLatest}>
         <ArrowDown size={13} /> 新增 {followOutput.pendingCount > 99 ? "99+" : followOutput.pendingCount} 条活动
       </button>}
-      <div className="agent-drawer-body" ref={followOutput.containerRef} onScroll={followOutput.onScroll}>
+      <div className="agent-drawer-body" ref={followOutput.containerRef} onScroll={followOutput.onScroll} role="region" aria-label={`${title}活动日志`}>
         <div className="agent-drawer-content" ref={followOutput.contentRef}>{children}</div>
       </div>
     </aside>

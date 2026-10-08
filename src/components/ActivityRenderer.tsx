@@ -1,5 +1,5 @@
 import { Activity, ChevronRight } from "lucide-react";
-import { useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { AgentActivityEntry } from "./AgentActivityEntry";
 import type { ActivityCategory, ActivityViewLog } from "./activityModel";
 
@@ -20,9 +20,10 @@ export type ActivityRendererProps = {
 
 function GenericActivityRenderer({ log, expanded = false }: ActivityRendererProps) {
   const [open, setOpen] = useState(expanded);
+  useEffect(() => setOpen(expanded), [expanded]);
   const time = new Date(log.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const diagnostics = log.diagnostics || log.activity?.diagnostics || [];
-  return <details className={`agent-stream-event activity-visual-external status category-unknown phase-${log.phase}`} open={expanded || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`agent-stream-event activity-visual-external status category-unknown phase-${log.phase}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>
       <span className="agent-event-icon neutral"><Activity size={13} /></span>
       <span><strong>{log.title || "未识别活动"}</strong><small>{log.text || log.rawType || "活动内容已保留"}</small></span>
