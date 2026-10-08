@@ -157,17 +157,19 @@ function PreservedActivityRenderer({ open, onOpenChange, ...props }: ActivityRen
   return <div ref={rootRef} className="activity-log-disclosure" style={{ display: "contents" }}><ActivityRenderer {...props} expanded={open} /></div>;
 }
 
-function CompletedActivitySummary({ item, open, onOpenChange, renderLog }: {
+function CompletedActivitySummary({ item, status, open, onOpenChange, renderLog }: {
   item: Extract<ActivityItem, { type: "summary" }>;
+  status: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   renderLog: (log: ActivityViewLog) => ReactNode;
 }) {
   const categoryLabel = activityCategoryLabel(item.category);
   const failed = activityItemHasFailure(item);
-  return <details open={open} className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category}${failed ? " phase-failed" : ""}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
+  const phase = failed ? "failed" : isLiveTimeline(status) && item.logs.some((log) => log.phase === "running" || log.phase === "started") ? "running" : "completed";
+  return <details open={open} className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category} phase-${phase}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
-      <span className={`agent-event-icon ${failed ? "failed" : "completed"}`}>{categoryIcon(item.category)}</span>
+      <span className={`agent-event-icon ${phase}`}>{categoryIcon(item.category)}</span>
       <strong>{activityGroupLabel(item.category, item.logs.length)}</strong>
       <ChevronRight className="agent-event-chevron" size={14} />
     </summary>
@@ -205,7 +207,10 @@ function CollapsedActivityGroup({ item, status, open, onOpenChange, renderLog }:
 }
 
 function minimalActivities(logs: readonly unknown[], provider: string, status: string) {
-  const normalized = normalizeActivityLogs(logs);
+  // Bootstrap lifecycle acknowledgements duplicate the task header and working
+  // indicator. Preserve them in the source logs and explicit inspection view.
+  const normalized = normalizeActivityLogs(logs).filter((log) => !isRoutineActivityStatus(log)
+    || !/会话已创建|开始运行|(?:thread|session)[._ ](?:created|started)|turn[._ ]started/i.test(`${log.title} ${log.text} ${log.rawType || ""}`));
   const hasUsefulActivity = normalized.some((log) => !isRoutineActivityStatus(log));
   const latest = [...normalized].reverse().find((log) => !isRoutineActivityStatus(log));
   const visible: ActivityViewLog[] = [];
@@ -219,7 +224,15 @@ function minimalActivities(logs: readonly unknown[], provider: string, status: s
     if (displayLog.category === "reasoning" && visible.at(-1)?.category === "reasoning") visible[visible.length - 1] = displayLog;
     else visible.push(displayLog);
   }
-  return isLiveTimeline(status) ? liveActivityItems(visible, provider) : settledActivityItems(visible);
+  if (!isLiveTimeline(status)) return settledActivityItems(visible);
+  return liveActivityItems(visible, provider).map((item): ActivityItem => {
+    const log = item.type === "log" || item.type === "current" ? item.log : null;
+    // A single live tool uses the same compact disclosure as its completed
+    // state. Starting a command must not expose its body automatically.
+    return log && SUMMARY_CATEGORIES.has(log.category)
+      ? { type: "summary", id: `activity-summary-${log.category}-${log.id}`, category: log.category, logs: [log] }
+      : item;
+  });
 }
 
 export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], scrollRef: externalScrollRef }: {
@@ -338,7 +351,7 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   const renderItem = (item: ActivityItem) => item.type === "group"
     ? <CollapsedActivityGroup key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "summary"
-      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
+      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "current"
       ? <div className="activity-live-current" key={`current-${item.log.id}`}>{renderLog(item.log)}</div>
     : item.type === "plan"
@@ -361,7 +374,7 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
       {(query || categoryFilter !== "all" || phaseFilter !== "all") && <button type="button" title="清除筛选" aria-label="清除筛选" onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("all"); }}><X size={13} /></button>}
     </div>}
     {hasFilters && <p className="activity-timeline-result-count" role="status">匹配 {filteredLogs.length} / {normalizedLogs.length} 条活动</p>}
-    {!items.length && normalizedLogs.length > 0 && <p className="activity-timeline-no-results" role="status">{hasFilters ? "没有匹配的活动" : "暂无可展示的活动"}</p>}
+    {!items.length && hasFilters && <p className="activity-timeline-no-results" role="status">没有匹配的活动</p>}
     <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""} ${externalScrollRef ? "external-scroll" : ""}`} ref={externalScrollRef ? listRef : localScrollRef}>
       {virtualized
         ? <div className="activity-virtual-content" style={{ height: `${virtualizer.getTotalSize()}px` }}>

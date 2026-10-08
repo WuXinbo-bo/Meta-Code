@@ -14,6 +14,8 @@ import { createPortal } from "react-dom";
 import {
   ArrowLeft,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleAlert,
   FileText,
   History,
@@ -136,9 +138,12 @@ export function WorkspaceBrowserTabs({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [allTabsOpen, setAllTabsOpen] = useState(false);
   const [tabQuery, setTabQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia("(max-width: 760px)").matches);
   const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0, maxHeight: 480 });
   const reduceMotion = motion === "reduced" || (motion === "system" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
 
   const containsNode = useCallback((node: Node | null) => Boolean(node && (
     rootRef.current?.contains(node) || popoverRef.current?.contains(node) || contextMenuRef.current?.contains(node)
@@ -161,8 +166,32 @@ export function WorkspaceBrowserTabs({
     if (focusSearch) clickOpenedRef.current = true;
     focusSearchRef.current = focusSearch;
     setAllTabsOpen(true);
-    if (focusSearch) window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    if (focusSearch && !compact) setSearchOpen(true);
+    if (focusSearch) window.requestAnimationFrame(() => {
+      if (!compact) { searchInputRef.current?.focus(); return; }
+      const target = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
+      (target || searchButtonRef.current)?.focus();
+    });
   };
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const onChange = () => {
+      setCompact(query.matches);
+      closePopover();
+      setTabQuery("");
+      hoveredRef.current = false;
+      suppressClickRef.current = false;
+      pointerDragRef.current = null;
+      dropTargetRef.current = null;
+      dragGhostRef.current?.remove();
+      dragGhostRef.current = null;
+      dragElementRef.current?.classList.remove("is-dragging");
+      dropElementRef.current?.classList.remove("is-drop-before", "is-drop-after");
+    };
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [closePopover]);
 
   const scheduleClose = () => {
     clearHoverTimer();
@@ -178,7 +207,7 @@ export function WorkspaceBrowserTabs({
     const placePopover = () => {
       const rect = rootRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const width = Math.min(340, window.innerWidth - 20);
+      const width = compact ? Math.min(680, Math.max(420, window.innerWidth * 0.6), window.innerWidth - 20) : Math.min(360, window.innerWidth - 20);
       const left = Math.max(10, Math.min(rect.right - width, window.innerWidth - width - 10));
       const top = Math.min(rect.bottom + 5, Math.max(10, window.innerHeight - 170));
       setPopoverPosition({ left, top, maxHeight: Math.min(480, window.innerHeight - top - 10) });
@@ -186,13 +215,13 @@ export function WorkspaceBrowserTabs({
     placePopover();
     window.addEventListener("resize", placePopover);
     return () => window.removeEventListener("resize", placePopover);
-  }, [allTabsOpen]);
+  }, [allTabsOpen, compact]);
 
   useEffect(() => {
-    if (!allTabsOpen) return;
+    if (compact && !allTabsOpen) return;
     const activeButton = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
     activeButton?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [activeTabId, allTabsOpen]);
+  }, [activeTabId, allTabsOpen, compact]);
 
   useEffect(() => {
     if (!contextMenu && !allTabsOpen) return;
@@ -237,10 +266,10 @@ export function WorkspaceBrowserTabs({
       const oldRect = previous.get(tabId);
       if (!oldRect) continue;
       const newRect = element.getBoundingClientRect();
-      const offsetY = oldRect.top - newRect.top;
-      if (Math.abs(offsetY) < 1) continue;
+      const offsetX = oldRect.left - newRect.left;
+      if (Math.abs(offsetX) < 1) continue;
       element.animate(
-        [{ transform: `translate3d(0, ${offsetY}px, 0)` }, { transform: "translate3d(0, 0, 0)" }],
+        [{ transform: `translate3d(${offsetX}px, 0, 0)` }, { transform: "translate3d(0, 0, 0)" }],
         { duration: 180, easing: "cubic-bezier(.2,.8,.2,1)" }
       );
     }
@@ -248,9 +277,13 @@ export function WorkspaceBrowserTabs({
 
   useEffect(() => {
     if (!allTabsOpen) return;
-    if (focusSearchRef.current) window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    if (focusSearchRef.current) window.requestAnimationFrame(() => {
+      if (!compact) { searchInputRef.current?.focus(); return; }
+      const target = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
+      (target || searchButtonRef.current)?.focus();
+    });
     focusSearchRef.current = false;
-  }, [allTabsOpen]);
+  }, [activeTabId, allTabsOpen, compact]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -266,14 +299,14 @@ export function WorkspaceBrowserTabs({
   }, [tabQuery, tabs]);
 
   const requestClose = useCallback((tabId: string) => {
-    const index = filteredTabs.findIndex((tab) => tab.id === tabId);
-    const fallbackId = filteredTabs[index + 1]?.id || filteredTabs[index - 1]?.id;
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    const fallbackId = tabs[index + 1]?.id || tabs[index - 1]?.id;
     onClose(tabId);
     window.requestAnimationFrame(() => {
       const fallback = fallbackId ? tabButtonsRef.current.get(fallbackId) : undefined;
       (fallback || searchInputRef.current || allTabsButtonRef.current)?.focus();
     });
-  }, [filteredTabs, onClose]);
+  }, [tabs, onClose]);
 
   const activateAndFocus = useCallback((tabId: string) => {
     onActivate(tabId);
@@ -290,15 +323,14 @@ export function WorkspaceBrowserTabs({
   }, [clearHoverTimer]);
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number, tab: WorkspaceBrowserTab) => {
+    const visibleTabs = compact ? filteredTabs : tabs;
     let nextIndex: number | null = null;
-    if (event.ctrlKey && event.key === "PageUp") nextIndex = (index - 1 + filteredTabs.length) % filteredTabs.length;
-    else if (event.ctrlKey && event.key === "PageDown") nextIndex = (index + 1) % filteredTabs.length;
-    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + filteredTabs.length) % filteredTabs.length;
-    else if (event.key === "ArrowRight") nextIndex = (index + 1) % filteredTabs.length;
-    else if (event.key === "ArrowUp") nextIndex = (index - 1 + filteredTabs.length) % filteredTabs.length;
-    else if (event.key === "ArrowDown") nextIndex = (index + 1) % filteredTabs.length;
+    if (event.ctrlKey && event.key === "PageUp") nextIndex = (index - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (event.ctrlKey && event.key === "PageDown") nextIndex = (index + 1) % visibleTabs.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (event.key === "ArrowRight") nextIndex = (index + 1) % visibleTabs.length;
     else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = filteredTabs.length - 1;
+    else if (event.key === "End") nextIndex = visibleTabs.length - 1;
     else if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "w") {
       event.preventDefault();
       requestClose(tab.id);
@@ -315,7 +347,7 @@ export function WorkspaceBrowserTabs({
     }
     if (nextIndex === null) return;
     event.preventDefault();
-    activateAndFocus(filteredTabs[nextIndex].id);
+    activateAndFocus(visibleTabs[nextIndex].id);
   };
 
   const clearPointerDragVisuals = () => {
@@ -396,7 +428,7 @@ export function WorkspaceBrowserTabs({
     dropTargetRef.current = null;
     if (targetElement && targetTabId && targetTabId !== drag.sourceId) {
       const rect = targetElement.getBoundingClientRect();
-      const side = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+      const side = event.clientX < rect.left + rect.width / 2 ? "before" : "after";
       targetElement.classList.add(`is-drop-${side}`);
       dropElementRef.current = targetElement;
       dropTargetRef.current = { tabId: targetTabId, side };
@@ -405,8 +437,8 @@ export function WorkspaceBrowserTabs({
     const track = trackRef.current;
     if (!track) return;
     const trackRect = track.getBoundingClientRect();
-    if (event.clientY < trackRect.top + 24) track.scrollBy({ top: -18 });
-    else if (event.clientY > trackRect.bottom - 24) track.scrollBy({ top: 18 });
+    if (event.clientX < trackRect.left + 24) track.scrollBy({ left: -18 });
+    else if (event.clientX > trackRect.right - 24) track.scrollBy({ left: 18 });
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -438,95 +470,9 @@ export function WorkspaceBrowserTabs({
     if (drag.dragging) window.setTimeout(() => { suppressClickRef.current = false; }, 0);
   };
 
-  const menuTabIndex = contextMenu ? tabs.findIndex((tab) => tab.id === contextMenu.tabId) : -1;
-  const menuTab = menuTabIndex >= 0 ? tabs[menuTabIndex] : undefined;
-
-  if (!tabs.length) return null;
-  return (
-    <nav
-      ref={rootRef}
-      className={`workspace-browser-tabs motion-${motion} ${allTabsOpen ? "is-open" : ""} ${className}`.trim()}
-      aria-label={ariaLabel}
-      onPointerEnter={(event) => {
-        if (event.pointerType !== "mouse") return;
-        hoveredRef.current = true;
-        clearHoverTimer();
-        if (!allTabsOpen) hoverTimerRef.current = window.setTimeout(() => openPopover(false), 200);
-      }}
-      onPointerLeave={(event) => {
-        if (event.pointerType !== "mouse") return;
-        hoveredRef.current = false;
-        scheduleClose();
-      }}
-      onBlur={(event) => {
-        if (!containsNode(event.relatedTarget as Node | null)) scheduleClose();
-      }}
-    >
-      {activeTab && activeTab.resource.kind !== "conversation" && onReturnToConversation && <button
-        type="button"
-        className="workspace-browser-tabs__return"
-        aria-label="返回对话"
-        title="返回对话"
-        onClick={() => { closePopover(); onReturnToConversation(); }}
-      ><ArrowLeft size={15} /></button>}
-      <button
-        ref={allTabsButtonRef}
-        type="button"
-        className="workspace-browser-tabs__current"
-        aria-expanded={allTabsOpen}
-        aria-haspopup="dialog"
-        aria-controls={popoverId}
-        aria-label="切换页面"
-        title={activeTab?.detail ? `${activeTab.title}\n${activeTab.detail}` : activeTab?.title || "已打开页面"}
-        onClick={() => {
-          setContextMenu(null);
-          if (allTabsOpen && clickOpenedRef.current) {
-            closePopover();
-          } else openPopover(true);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            openPopover(true);
-          }
-        }}
-      >
-        <span className="workspace-browser-tab__icon" aria-hidden="true">{activeTab ? <ResourceIcon tab={activeTab} conversationProviders={conversationProviders} /> : <PanelsTopLeft size={15} />}</span>
-        <span className="workspace-browser-tabs__current-label">{activeTab?.resource.kind === "conversation" ? "页面" : activeTab?.title || "页面"}</span>
-        {activeTab?.status === "loading" && <LoaderCircle className="workspace-browser-tab__status is-loading" size={13} aria-label="加载中" />}
-        {activeTab?.status === "error" && <CircleAlert className="workspace-browser-tab__status is-error" size={13} aria-label="加载失败" />}
-        <ChevronDown size={13} className="workspace-browser-tabs__chevron" aria-hidden="true" />
-      </button>
-      {allTabsOpen && createPortal(<section
-        ref={popoverRef}
-        id={popoverId}
-        className={`workspace-browser-tabs__popover motion-${motion} ${reduceMotion ? "is-motion-reduced" : ""}`}
-        role="dialog"
-        aria-label="已打开页面"
-        style={{ left: popoverPosition.left, top: popoverPosition.top, maxHeight: popoverPosition.maxHeight }}
-        onPointerEnter={() => { hoveredRef.current = true; clearHoverTimer(); }}
-        onPointerLeave={() => { hoveredRef.current = false; scheduleClose(); }}
-        onBlur={(event) => { if (!containsNode(event.relatedTarget as Node | null)) scheduleClose(); }}
-      >
-        <div className="workspace-browser-tabs__popover-head"><strong>已打开页面</strong><span>{tabs.length}/{maxTabs}</span></div>
-        <label className="workspace-browser-tabs__search">
-          <Search size={14} aria-hidden="true" />
-          <input
-            ref={searchInputRef}
-            value={tabQuery}
-            onChange={(event) => setTabQuery(event.target.value)}
-            placeholder="搜索页面"
-            aria-label="搜索页面"
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowDown" || !filteredTabs.length) return;
-              event.preventDefault();
-              focusTab(tabButtonsRef.current, filteredTabs[0].id);
-            }}
-          />
-          {tabQuery && <button type="button" aria-label="清空页面搜索" onClick={() => { setTabQuery(""); searchInputRef.current?.focus(); }}><X size={13} /></button>}
-        </label>
-      <div ref={trackRef} className="workspace-browser-tabs__track" role="tablist" aria-orientation="vertical">
-        {filteredTabs.map((tab, visibleIndex) => {
+  const renderTabStrip = (displayedTabs: readonly WorkspaceBrowserTab[]) => (
+      <div ref={trackRef} className="workspace-browser-tabs__track" role="tablist" aria-orientation="horizontal" aria-label="打开的页面">
+        {displayedTabs.map((tab, visibleIndex) => {
           const active = tab.id === activeTabId;
           return (
             <div
@@ -547,7 +493,7 @@ export function WorkspaceBrowserTabs({
                 role="tab"
                 aria-controls={ariaControlsId}
                 aria-selected={active}
-                tabIndex={active || (!filteredTabs.some((item) => item.id === activeTabId) && visibleIndex === 0) ? 0 : -1}
+                tabIndex={active || (!displayedTabs.some((item) => item.id === activeTabId) && visibleIndex === 0) ? 0 : -1}
                 title={tab.detail ? `${tab.title}\n${tab.detail}` : tab.title}
                 onClick={() => {
                   if (suppressClickRef.current) {
@@ -603,14 +549,125 @@ export function WorkspaceBrowserTabs({
             </div>
           );
         })}
-        {!filteredTabs.length && <p className="workspace-browser-tabs__empty">没有匹配的页面</p>}
+        {!displayedTabs.length && <p className="workspace-browser-tabs__empty">没有匹配的页面</p>}
       </div>
-      <button
+  );
+
+  const menuTabIndex = contextMenu ? tabs.findIndex((tab) => tab.id === contextMenu.tabId) : -1;
+  const menuTab = menuTabIndex >= 0 ? tabs[menuTabIndex] : undefined;
+
+  if (!tabs.length) return null;
+  return (
+    <nav
+      ref={rootRef}
+      className={`workspace-browser-tabs ${compact ? "is-compact" : "is-inline"} motion-${motion} ${allTabsOpen ? "is-open" : ""} ${className}`.trim()}
+      aria-label={ariaLabel}
+      onPointerEnter={(event) => {
+        if (!compact || event.pointerType !== "mouse") return;
+        hoveredRef.current = true;
+        clearHoverTimer();
+        if (!allTabsOpen) hoverTimerRef.current = window.setTimeout(() => openPopover(false), 200);
+      }}
+      onPointerLeave={(event) => {
+        if (!compact || event.pointerType !== "mouse") return;
+        hoveredRef.current = false;
+        scheduleClose();
+      }}
+      onBlur={(event) => {
+        if (!containsNode(event.relatedTarget as Node | null)) scheduleClose();
+      }}
+    >
+      {activeTab && activeTab.resource.kind !== "conversation" && onReturnToConversation && <button
         type="button"
-        className="workspace-browser-tabs__restore"
-        disabled={recentlyClosedCount === 0}
-        onClick={() => onReopenLastClosed()}
-      ><History size={14} /><span>恢复最近关闭的页面</span>{recentlyClosedCount > 0 && <small>{recentlyClosedCount}</small>}</button>
+        className="workspace-browser-tabs__return"
+        aria-label="返回对话"
+        title="返回对话"
+        onClick={() => { closePopover(); onReturnToConversation(); }}
+      ><ArrowLeft size={15} /></button>}
+      {!compact && renderTabStrip(tabs)}
+      <button
+        ref={allTabsButtonRef}
+        type="button"
+        className={compact ? "workspace-browser-tabs__current" : "workspace-browser-tabs__all"}
+        aria-expanded={allTabsOpen}
+        aria-haspopup="dialog"
+        aria-controls={popoverId}
+        aria-label={compact ? "切换页面" : "全部页面"}
+        title={compact ? activeTab?.detail ? `${activeTab.title}\n${activeTab.detail}` : activeTab?.title || "已打开页面" : "搜索和管理已打开页面"}
+        onClick={() => {
+          setContextMenu(null);
+          if (allTabsOpen && clickOpenedRef.current) {
+            closePopover();
+          } else openPopover(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            openPopover(true);
+          }
+        }}
+      >
+        <span className="workspace-browser-tab__icon" aria-hidden="true"><PanelsTopLeft size={15} /></span>
+        {compact && <><span className="workspace-browser-tabs__current-label">{activeTab?.resource.kind === "conversation" ? "页面" : activeTab?.title || "页面"}</span>
+          {activeTab?.status === "loading" && <LoaderCircle className="workspace-browser-tab__status is-loading" size={13} aria-label="加载中" />}
+          {activeTab?.status === "error" && <CircleAlert className="workspace-browser-tab__status is-error" size={13} aria-label="加载失败" />}
+          <ChevronDown size={13} className="workspace-browser-tabs__chevron" aria-hidden="true" />
+        </>}
+      </button>
+      {allTabsOpen && createPortal(<section
+        ref={popoverRef}
+        id={popoverId}
+        className={`workspace-browser-tabs__popover ${compact ? "is-compact" : "is-page-menu"} motion-${motion} ${reduceMotion ? "is-motion-reduced" : ""}`}
+        role="dialog"
+        aria-label="已打开页面"
+        style={{ left: popoverPosition.left, top: popoverPosition.top, maxHeight: popoverPosition.maxHeight }}
+        onPointerEnter={() => { hoveredRef.current = true; clearHoverTimer(); }}
+        onPointerLeave={() => { hoveredRef.current = false; scheduleClose(); }}
+        onBlur={(event) => { if (!containsNode(event.relatedTarget as Node | null)) scheduleClose(); }}
+      >
+        <div className="workspace-browser-tabs__popover-head"><strong>页面</strong><span>{tabs.length}/{maxTabs}</span><div className="workspace-browser-tabs__toolbar">
+          {compact && <><button type="button" aria-label="向左滚动页面" title="向左滚动页面" onClick={() => trackRef.current?.scrollBy({ left: -260, behavior: reduceMotion ? "instant" : "smooth" })}><ChevronLeft size={14} /></button>
+          <button type="button" aria-label="向右滚动页面" title="向右滚动页面" onClick={() => trackRef.current?.scrollBy({ left: 260, behavior: reduceMotion ? "instant" : "smooth" })}><ChevronRight size={14} /></button></>}
+          <button ref={searchButtonRef} type="button" aria-label="搜索页面" title="搜索页面" aria-expanded={searchOpen} onClick={() => { setSearchOpen((open) => !open); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }}><Search size={14} /></button>
+          <button type="button" aria-label="恢复最近关闭的页面" title="恢复最近关闭的页面" disabled={recentlyClosedCount === 0} onClick={() => onReopenLastClosed()}><History size={14} /></button>
+        </div></div>
+        {(searchOpen || tabQuery) && <label className="workspace-browser-tabs__search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            value={tabQuery}
+            onChange={(event) => setTabQuery(event.target.value)}
+            placeholder="搜索页面"
+            aria-label="搜索页面"
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowDown" || !filteredTabs.length) return;
+              event.preventDefault();
+              if (compact) focusTab(tabButtonsRef.current, filteredTabs[0].id);
+              else popoverRef.current?.querySelector<HTMLButtonElement>(".workspace-browser-tabs__all-list > button")?.focus();
+            }}
+          />
+          {tabQuery && <button type="button" aria-label="清空页面搜索" onClick={() => { setTabQuery(""); searchInputRef.current?.focus(); }}><X size={13} /></button>}
+        </label>}
+      {compact ? renderTabStrip(filteredTabs) : <div className="workspace-browser-tabs__all-list">
+        {filteredTabs.map((tab) => <button
+          type="button"
+          key={tab.id}
+          className={tab.id === activeTabId ? "is-active" : undefined}
+          aria-label={`切换到 ${tab.title}`}
+          onClick={() => { onActivate(tab.id); closePopover(); focusTab(tabButtonsRef.current, tab.id); }}
+          onKeyDown={(event) => {
+            const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button") || []);
+            const current = buttons.indexOf(event.currentTarget);
+            let index: number | null = null;
+            if (event.key === "ArrowDown") index = (current + 1) % buttons.length;
+            else if (event.key === "ArrowUp") index = (current - 1 + buttons.length) % buttons.length;
+            else if (event.key === "Home") index = 0;
+            else if (event.key === "End") index = buttons.length - 1;
+            if (index !== null) { event.preventDefault(); buttons[index]?.focus(); }
+          }}
+        ><ResourceIcon tab={tab} conversationProviders={conversationProviders} /><span><strong>{tab.title}</strong>{tab.detail && <small>{tab.detail}</small>}</span>{tab.pinned && <Pin size={12} aria-label="已固定" />}</button>)}
+        {!filteredTabs.length && <p className="workspace-browser-tabs__empty">没有匹配的页面</p>}
+      </div>}
       </section>, document.body)}
       {contextMenu && menuTab && (
         createPortal(<div
@@ -636,14 +693,14 @@ export function WorkspaceBrowserTabs({
             buttons[nextIndex]?.focus();
           }}
         >
-          <button type="button" role="menuitem" disabled={menuTabIndex === 0} onClick={() => { onMove(menuTab.id, menuTabIndex - 1); setContextMenu(null); }}>向上移动</button>
-          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onMove(menuTab.id, menuTabIndex + 1); setContextMenu(null); }}>向下移动</button>
+          <button type="button" role="menuitem" disabled={menuTabIndex === 0} onClick={() => { onMove(menuTab.id, menuTabIndex - 1); setContextMenu(null); }}>向左移动</button>
+          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onMove(menuTab.id, menuTabIndex + 1); setContextMenu(null); }}>向右移动</button>
           <button type="button" role="menuitem" disabled={menuTabIndex === 0} onClick={() => { onMove(menuTab.id, 0); setContextMenu(null); }}>移到最前</button>
           <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onMove(menuTab.id, tabs.length - 1); setContextMenu(null); }}>移到最后</button>
           <span className="workspace-browser-tab-menu__separator" role="separator" />
           <button type="button" role="menuitem" onClick={() => { requestClose(menuTab.id); setContextMenu(null); }}>关闭</button>
           <button type="button" role="menuitem" disabled={tabs.length <= 1} onClick={() => { onCloseOthers(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭其他标签</button>
-          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onCloseRight(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭下方页面</button>
+          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onCloseRight(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭右侧页面</button>
         </div>, document.body)
       )}
     </nav>

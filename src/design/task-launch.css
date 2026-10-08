@@ -1,0 +1,92 @@
+.task-create-controls { display: grid; gap: 16px; padding: 20px; }
+.task-create-row { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 12px; min-width: 0; }
+.task-create-label { color: var(--mc-text-secondary); font-size: 12px; white-space: nowrap; }
+.task-create-location { position: relative; display: flex; min-width: 0; align-items: center; gap: 4px; }
+.task-create-location-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: calc(100% - 36px);
+  height: 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--mc-line);
+  border-radius: var(--mc-r-md);
+  color: var(--mc-text);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+.task-create-location-trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-create-location-trigger > svg { flex: 0 0 auto; color: var(--mc-text-secondary); }
+.task-create-location-trigger:hover,
+.task-create-location-trigger[aria-expanded="true"] { background: var(--mc-hover); border-color: var(--mc-line-strong); }
+.task-create-options { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 8px; }
+.task-create-icon {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--mc-r-md);
+  color: var(--mc-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--mc-fast) ease, border-color var(--mc-fast) ease;
+}
+.task-create-icon:hover:not(:disabled) { color: var(--mc-text); background: var(--mc-hover); }
+.task-create-icon.is-selected { border-color: var(--mc-line-strong); color: var(--mc-text); background: var(--mc-selected); }
+.task-create-icon.task-create-choice {
+  width: 42px;
+  height: 42px;
+  flex-basis: 42px;
+  border-color: transparent;
+  border-radius: 10px;
+  background: var(--mc-surface-subtle);
+  transition: background var(--mc-fast) ease, border-color var(--mc-fast) ease, box-shadow var(--mc-fast) ease;
+}
+.task-create-choice > svg { display: block; }
+.task-create-choice:hover:not(:disabled) { border-color: var(--mc-line); background: var(--mc-hover); }
+.task-create-choice.is-selected { border-color: var(--mc-line-strong); background: var(--mc-selected); box-shadow: 0 1px 2px rgba(31, 35, 40, .04); }
+.task-create-choice.is-selected:hover:not(:disabled) { border-color: var(--mc-line-strong); background: var(--mc-selected); }
+.task-create-choice:focus-visible { outline: 2px solid var(--mc-focus); outline-offset: 3px; }
+.task-create-choice:disabled { box-shadow: none; }
+:root[data-theme="dark"] .dialog.task-launch-dialog { background: var(--mc-surface); }
+.task-create-icon:disabled,
+.task-create-location-trigger:disabled { opacity: .4; cursor: default; }
+.task-create-selection { min-width: 0; margin-left: 3px; color: var(--mc-text-secondary); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.task-create-location-panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 5px);
+  left: 0;
+  display: grid;
+  width: min(286px, calc(100vw - 100px));
+  max-height: min(300px, 50vh);
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--mc-line);
+  border-radius: var(--mc-r-lg);
+  background: var(--mc-overlay);
+  box-shadow: var(--mc-shadow-menu);
+  animation: task-create-location-enter var(--mc-fast) ease-out;
+}
+.task-create-location-panel > button { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 8px; padding: 5px 8px; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text-secondary); background: transparent; text-align: left; font-size: 12px; cursor: pointer; }
+.task-create-location-panel > button > svg { flex: 0 0 auto; }
+.task-create-location-panel > button > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-create-location-panel > button:hover,
+.task-create-location-panel > button.is-selected { color: var(--mc-text); background: var(--mc-hover); }
+.task-create-location-panel > button.is-selected > svg:last-child { color: var(--mc-success); }
+.task-create-location-divider { height: 1px; margin: 4px; background: var(--mc-line); }
+.task-create-location-panel > .task-create-add-project { margin-top: 4px; border-top: 1px solid var(--mc-line); border-radius: 0 0 var(--mc-r-sm) var(--mc-r-sm); }
+.task-create-notice { margin: -3px 0 0 66px; color: var(--mc-warning); font-size: 11px; line-height: 1.6; }
+@keyframes task-create-location-enter { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 480px) {
+  .task-create-controls { padding: 16px; gap: 12px; }
+  .task-create-row { grid-template-columns: 54px minmax(0, 1fr); gap: 8px; }
+  .task-create-notice { margin-left: 62px; }
+  .task-create-location-panel { width: min(254px, calc(100vw - 96px)); }
+}
+@media (prefers-reduced-motion: reduce) { .task-create-location-panel { animation: none; } }

@@ -1,0 +1,21 @@
+.agent-work-progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 9px 0;
+  color: var(--mc-text-secondary, #5f625f);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.agent-work-progress__spinner { flex: 0 0 auto; color: var(--mc-info, #567999); animation: agent-work-spin 900ms linear infinite; }
+.agent-work-progress__dots { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; }
+.agent-work-progress__dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: agent-work-dot 1.4s ease-in-out infinite; }
+.agent-work-progress__dots i:nth-child(2) { animation-delay: 160ms; }
+.agent-work-progress__dots i:nth-child(3) { animation-delay: 320ms; }
+@keyframes agent-work-spin { to { transform: rotate(360deg); } }
+@keyframes agent-work-dot { 0%, 70%, 100% { opacity: .35; } 35% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .agent-work-progress__spinner, .agent-work-progress__dots i { animation: none; }
+  .agent-work-progress__dots i { opacity: .65; }
+}

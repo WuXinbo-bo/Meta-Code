@@ -537,7 +537,12 @@
 }
 
 @media (max-width: 760px) {
-  .app-shell { grid-template-columns: var(--activity-rail-width) 0 minmax(0, 1fr) 0; }
+  .app-shell,
+  .app-shell.inspector-collapsed,
+  .app-shell.sidebar-collapsed,
+  .app-shell.sidebar-collapsed.inspector-collapsed {
+    grid-template-columns: var(--activity-rail-width) 0 minmax(0, 1fr) 0;
+  }
   .sidebar { left: var(--activity-rail-width); width: min(280px, calc(100vw - var(--activity-rail-width))); }
   .topbar { padding-inline: 8px; }
   .task-location-trigger { max-width: 90px; padding-inline: 4px; }

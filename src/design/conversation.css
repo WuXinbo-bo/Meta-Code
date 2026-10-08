@@ -123,6 +123,17 @@
 .markdown-body blockquote,
 .agent-markdown-message blockquote { border-left-color: var(--mc-line-strong); color: var(--mc-text-secondary); }
 
+.copy-code {
+  border-color: var(--mc-line-strong);
+  color: var(--mc-text-secondary);
+  background: var(--mc-surface);
+}
+.copy-code:hover {
+  color: var(--mc-text);
+  background: var(--mc-hover);
+}
+.copy-code:focus-visible { outline: 2px solid var(--mc-text-secondary); outline-offset: 2px; }
+
 .event-row,
 .activity-message-group,
 .error-group,
