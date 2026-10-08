@@ -7,7 +7,16 @@ const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT = 15_000;
 const MAX_OUTPUT = 8 * 1024 * 1024;
 
-async function runGit(root: string, args: string[], timeout = GIT_TIMEOUT) {
+/**
+ * Execute a Git command without invoking a shell.
+ *
+ * This is exported for higher-level Git services (for example worktree
+ * lifecycle management) so they share the same timeout, output limit, and
+ * error normalization as the read/write Git service. Callers must pass a
+ * validated repository root and argument array; `execFile` keeps user input
+ * out of shell interpolation on every supported platform.
+ */
+export async function runGit(root: string, args: string[], timeout = GIT_TIMEOUT) {
   try {
     const result = await execFileAsync("git", ["-C", root, ...args], { encoding: "utf8", timeout, windowsHide: true, maxBuffer: MAX_OUTPUT });
     return String(result.stdout || "");

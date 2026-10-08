@@ -12,11 +12,18 @@ import {
   type DelegationExecutionAdapter,
   type DelegationRequest
 } from "./types.js";
+import {
+  createAgentCapabilitySnapshot,
+  probeAgentCapabilities,
+  type AgentCapabilitySnapshotOptions
+} from "./capabilityProbe.js";
+import type { AgentCapabilitySnapshot } from "./types.js";
 
 export class AgentAdapterRegistry<TMainRunner = never, TWorkflowPlannerRunner = never, TWorkflowWorkerRunner = never> {
   private readonly descriptors = new Map<AgentProviderId, AgentDescriptor>();
   private readonly adapters = new Map<AgentProviderId, DelegationExecutionAdapter>();
   private readonly v1Adapters = new Map<AgentProviderId, AgentAdapterV1<TMainRunner, TWorkflowPlannerRunner, TWorkflowWorkerRunner>>();
+  private readonly capabilitySnapshots = new Map<AgentProviderId, AgentCapabilitySnapshot>();
 
   constructor(descriptors: AgentDescriptor[] = []) {
     for (const descriptor of descriptors) this.registerDescriptor(descriptor);
@@ -61,6 +68,34 @@ export class AgentAdapterRegistry<TMainRunner = never, TWorkflowPlannerRunner = 
     return this.descriptors.get(normalizeProviderId(providerId));
   }
 
+  /**
+   * Return the latest runtime-aware capability snapshot. Legacy callers that
+   * have not performed a probe receive a compatibility snapshot derived from
+   * the manifest and can continue using the original descriptor capabilities.
+   */
+  capabilitySnapshot(providerId: string, options: AgentCapabilitySnapshotOptions = {}) {
+    const id = normalizeProviderId(providerId);
+    const existing = this.capabilitySnapshots.get(id);
+    if (existing && Object.keys(options).length === 0) return structuredClone(existing);
+    const descriptor = this.requireDescriptor(id);
+    return createAgentCapabilitySnapshot(descriptor, options);
+  }
+
+  setCapabilitySnapshot(snapshot: AgentCapabilitySnapshot) {
+    const id = normalizeProviderId(snapshot.providerId);
+    this.requireDescriptor(id);
+    this.capabilitySnapshots.set(id, structuredClone({ ...snapshot, providerId: id }));
+    return this;
+  }
+
+  async probeCapabilities(providerId: string, options: AgentCapabilitySnapshotOptions = {}) {
+    const id = normalizeProviderId(providerId);
+    const descriptor = this.requireDescriptor(id);
+    const snapshot = await probeAgentCapabilities(descriptor, options);
+    this.setCapabilitySnapshot(snapshot);
+    return structuredClone(snapshot);
+  }
+
   requireDescriptor(providerId: string) {
     const descriptor = this.descriptor(providerId);
     if (!descriptor) throw new Error(`未注册的 Agent Provider：${providerId}`);
@@ -69,12 +104,20 @@ export class AgentAdapterRegistry<TMainRunner = never, TWorkflowPlannerRunner = 
 
   supports(providerId: string, requirements: string[] = []) {
     const descriptor = this.descriptor(providerId);
-    return Boolean(descriptor && hasAgentCapabilities(descriptor, requirements));
+    if (!descriptor) return false;
+    const snapshot = this.capabilitySnapshots.get(descriptor.id);
+    return snapshot
+      ? hasAgentCapabilities({ ...descriptor, capabilities: snapshot.effectiveCapabilities }, requirements)
+      : hasAgentCapabilities(descriptor, requirements);
   }
 
   requireCapabilities(providerId: string, requirements: string[] = []) {
     const descriptor = this.requireDescriptor(providerId);
-    const assessment = assessAgentCapabilities(descriptor, requirements);
+    const snapshot = this.capabilitySnapshots.get(descriptor.id);
+    const assessment = assessAgentCapabilities(
+      snapshot ? { ...descriptor, capabilities: snapshot.effectiveCapabilities } : descriptor,
+      requirements
+    );
     const error = agentCapabilityError(descriptor, assessment);
     if (error) throw new Error(error);
     return assessment.normalized;
@@ -114,7 +157,10 @@ export class AgentAdapterRegistry<TMainRunner = never, TWorkflowPlannerRunner = 
   async execute(request: DelegationRequest) {
     const providerId = normalizeProviderId(request.providerId);
     const descriptor = this.requireDescriptor(providerId);
-    if (!descriptor.capabilities.delegation.worker) throw new Error(`${descriptor.displayName} 不支持工作台委派`);
+    // Admission must use the runtime-aware snapshot when one is available;
+    // checking only the static manifest would let an unavailable or degraded
+    // transport reach the adapter.
+    this.requireCapabilities(providerId, ["delegation-worker"]);
     const capabilityRequirements = this.requireCapabilities(providerId, request.capabilityRequirements);
     const adapter = this.adapters.get(providerId);
     if (!adapter) throw new Error(`${descriptor.displayName} 尚未绑定执行 Adapter`);

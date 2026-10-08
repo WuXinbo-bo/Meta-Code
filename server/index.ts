@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import readXlsxFile from "read-excel-file/node";
 import { deleteActivityArtifactsForSession, readActivityArtifact } from "./activity/artifacts.js";
+import { createPublishedArtifact, listPublishedArtifacts, readPublishedArtifact, updatePublishedArtifact } from "./activity/publishedArtifacts.js";
 import {
 advanceActivityTurnFileBaseline,
 createActivityTurnFileBaseline,
@@ -33,6 +34,10 @@ import { canonicalActivity, normalizeCanonicalActivity } from "./activity/normal
 import { compactStoredActivityDetails } from "./activity/redaction.js";
 import type { CanonicalActivityRecord } from "./activity/types.js";
 import { BUILTIN_AGENT_DESCRIPTORS } from "./agents/catalog.js";
+import { createAgentCapabilitySnapshot } from "./agents/capabilityProbe.js";
+import { loadCustomAgents } from "./agents/customAgents.js";
+import { HookRegistry } from "./agents/hooks.js";
+import { RoutineScheduler, type AgentRoutine, type UpdateRoutineInput } from "./agents/routines.js";
 import {
 normalizeProviderId,
 type AgentModelAdapter,
@@ -42,6 +47,7 @@ type AgentProviderModelSelection,
 type AgentReasoningControl,
 type DelegationMode
 } from "./agents/types.js";
+import { crossProviderReviewPair, resolveAgentRoute, type AgentRoutingPolicy } from "./agents/routing.js";
 import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTranscriptIndex.js";
 import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
 import { AppUpdateService } from "./appUpdate/service.js";
@@ -61,9 +67,11 @@ import { codexActivityFromEvent, isCodexContextCompactionNotice, runCodexSession
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import type { EngineName, EngineRuntimeStatus, NormalizedEngineEvent } from "./engines/types.js";
 import { WorkbenchEventHub } from "./eventHub.js";
+import { TraceRecorder } from "./observability/traces.js";
 import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, looksLikeTextPreview, TEXT_PREVIEW_EXTENSIONS } from "./filePreviewTypes.js";
 import { pickFolder } from "./folderPicker.js";
 import { checkoutBranch, commitFiles, createBranch, fetchRemote, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
+import { WorktreeError, bindWorktree, cleanupWorktree, createWorktree, listWorktrees, preflightMerge, restoreWorktree } from "./git/worktreeManager.js";
 import { IncrementalJsonl } from "./incrementalJsonl.js";
 import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
 import { BUILTIN_DELEGATION_SKILL_NAME, BUILTIN_SKILL_MANAGER_NAME, ManagedSkillManager, type SkillPromptContext } from "./managedSkillManager.js";
@@ -229,6 +237,7 @@ const MCP_CONFIG_DIR = APP_PATHS.mcpConfigDir;
 configureAttachmentStorage(path.join(APP_PATHS.dataDir, "attachments"));
 const WORKFLOW_PLANNER_TRANSACTION_DIR = path.join(APP_PATHS.pluginRuntimeDir, ORCHESTRATION_PLUGIN_ID, "transactions");
 const ACTIVITY_ARTIFACTS_DIR = APP_PATHS.activityArtifactsDir;
+const PUBLISHED_ARTIFACTS_DIR = path.join(APP_PATHS.dataDir, "artifacts", "published");
 const SESSION_RECOVERY_DIR = path.join(APP_PATHS.dataDir, "sessions", "recovery");
 const SKILLS_DIR = path.join(CODEX_HOME, "skills");
 const STATE_FILE = path.join(RUNTIME_DIR, "state.json");
@@ -300,6 +309,12 @@ type ActiveRun = {
 const activeRuns = new Map<string, ActiveRun>();
 const sessionCreationMutationLocks = new Map<string, Promise<void>>();
 
+function dispatchAgentHook(input: { kind: "session" | "tool" | "permission" | "subagent" | "compact"; event: string; providerId?: string; sessionId?: string; taskId?: string; payload?: unknown }) {
+  void hookRegistry.dispatch(input).catch((error) => {
+    console.warn("Agent hook dispatch failed:", error instanceof Error ? error.message : String(error));
+  });
+}
+
 async function withSessionCreationMutationLock<T>(key: string, operation: () => Promise<T>) {
   const previous = sessionCreationMutationLocks.get(key) || Promise.resolve();
   let release!: () => void;
@@ -334,6 +349,16 @@ const pluginHost = createBuiltInPluginHost(APP_PATHS);
 pluginHost.start();
 const { repository: workflowRepository, stateFiles: workflowStateFiles } = createOrchestrationServices(pluginHost.context(ORCHESTRATION_PLUGIN_ID), stateStore.db);
 const eventHub = new WorkbenchEventHub();
+const traceRecorder = new TraceRecorder();
+let routineScheduler: RoutineScheduler | null = null;
+// Hooks are an intentionally small, host-owned extension point. They are
+// registered by built-in integrations during process startup; the API only
+// exposes diagnostics and never evaluates user supplied JavaScript.
+const hookRegistry = new HookRegistry({
+  onError: ({ hook, context, error, status }) => {
+    console.warn(`Agent hook ${hook.id} ${status} on ${context.event}:`, error instanceof Error ? error.message : String(error));
+  }
+});
 const appUpdateService = new AppUpdateService({
   projectRoot: ROOT,
   stateFile: APP_PATHS.appUpdateStateFile,
@@ -2169,7 +2194,17 @@ async function hasActiveDelegatedTasksAfterGrace(parentTaskId: string, signal: A
   return false;
 }
 
-function launchDelegatedExecution(task: DelegatedTask) { void delegationExecution.launch(task).catch((error) => console.error("Delegation execution failed", error)); }
+function launchDelegatedExecution(task: DelegatedTask) {
+  const span = traceRecorder.start("delegation", "delegated-agent", {
+    traceId: task.traceId,
+    provider: task.selectedProvider || task.provider,
+    attributes: { taskId: task.id, parentSessionId: task.parentSessionId, mode: task.mode || "implementation" }
+  });
+  void delegationExecution.launch(task).then(
+    () => { traceRecorder.finish(span.spanId, "ok"); },
+    (error) => { traceRecorder.finish(span.spanId, "error", error); console.error("Delegation execution failed", error); }
+  );
+}
 
 function queueDelegatedTask(input: AgentBridgeRequest, provider: AgentProviderId) { return delegationBroker.queue(input, provider); }
 
@@ -4099,6 +4134,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
 }
 
 function launchSessionRun(session: Session, workspace: Workspace, prompt: string, skillPolicies?: SkillPolicies, skillNames?: string[], requestedExecutionMode?: ExecutionMode) {
+  dispatchAgentHook({ kind: "session", event: "session.start", providerId: session.engine, sessionId: session.id, payload: { executionMode: requestedExecutionMode || workspaceAgentConfig(workspace).executionMode } });
   const executionMode = resolveTurnExecutionMode(requestedExecutionMode, skillPolicies || {}, workspaceAgentConfig(workspace).executionMode);
   const recoveredTaskIds = new Set(pendingDelegatedTasks(session.id)
     .filter((task) => TERMINAL_DELEGATED_STATUSES.has(task.status))
@@ -4140,6 +4176,7 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
       session.runFinishedAt = new Date().toISOString();
       session.updatedAt = session.runFinishedAt;
       appendMessage(session, { role: "error", text: message, eventType: "workbench.run.error" });
+      dispatchAgentHook({ kind: "session", event: "session.error", providerId: session.engine, sessionId: session.id, payload: { message } });
       await saveState().catch((saveError) => console.error("Unexpected run failure save failed", saveError));
     })
     .finally(async () => {
@@ -4149,6 +4186,7 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
       activeRun.releaseSkillProjection?.();
       workspaceTreeIndex.invalidate(workspace.root);
       if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
+      dispatchAgentHook({ kind: "session", event: "session.finish", providerId: session.engine, sessionId: session.id, payload: { status: session.status } });
     });
   return activeRun;
 }
@@ -5126,6 +5164,11 @@ const sessionNativeInventoryCache = new Map<string, { expiresAt: number; items: 
 const sessionNativeInventoryLoads = new Map<string, Promise<{ items: SessionInventoryItem[]; warnings: string[] }>>();
 await ensureRuntime();
 await claimLegacyOwnership(auth.getOwnerUserId());
+routineScheduler = new RoutineScheduler({
+  file: path.join(APP_PATHS.dataDir, "routines.json"),
+  run: runScheduledRoutine
+});
+routineScheduler.start();
 await reconcileNativeCodexDelegatedTasks().catch((error) => console.error("Codex delegated task reconciliation failed", error));
 for (const workspace of state.workspaces) syncWorkspaceSkillProjection(workspace, workspaceAgentConfig(workspace).skillPolicies);
 await Promise.all([detectCodexRuntime(), getClaudeRuntime()]);
@@ -5139,6 +5182,7 @@ async function shutdown(reason: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   queuePaused = true;
+  routineScheduler?.stop();
   console.log(`Workbench shutdown requested: ${reason}`);
   const forceExitTimer = setTimeout(() => process.exit(1), 15_000);
   forceExitTimer.unref();
@@ -5328,6 +5372,42 @@ function runBuiltinWorkflowNode(...args: Parameters<OrchestrationRuntime["runBui
 function executeWorkflowNode(...args: Parameters<OrchestrationRuntime["executeWorkflowNode"]>): ReturnType<OrchestrationRuntime["executeWorkflowNode"]> { return orchestrationRuntime.executeWorkflowNode(...args); }
 function integrateWorkflow(...args: Parameters<OrchestrationRuntime["integrateWorkflow"]>): ReturnType<OrchestrationRuntime["integrateWorkflow"]> { return orchestrationRuntime.integrateWorkflow(...args); }
 
+/** Start a scheduled prompt as an ordinary Meta Code session. Routines share
+ * the same Native/Managed execution path, persistence and event stream as a
+ * user-created task, so a scheduled run never gets a private execution model.
+ */
+async function runScheduledRoutine(routine: AgentRoutine) {
+  const ownerUserId = routine.ownerUserId;
+  if (!ownerUserId) throw new Error("例程缺少所属用户，已拒绝执行");
+  const requested = String(routine.providerId || "auto").trim().toLowerCase();
+  const engine = requested === "auto"
+    ? resolveAgentRoute("auto", agentAdapterRegistry.list(), { strategy: "reliability" }).selectedProvider
+    : normalizeProviderId(requested);
+  const provider = agentAdapterRegistry.descriptor(engine);
+  if (!provider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(engine)) throw new Error(`Provider「${engine}」不支持创建任务`);
+  const providerControl = await providerControlSnapshotFor(engine, ownerUserId);
+  if (!providerControl.operations.setDefault) throw new Error(`Provider「${engine}」尚未安装或连接未验证`);
+  const workspace = routine.workspaceId ? workspaceById(routine.workspaceId, ownerUserId) : undefined;
+  if (routine.workspaceId && !workspace) throw new Error("例程绑定的工作区不存在或无权访问");
+  const scopeKind: Session["scopeKind"] = workspace ? "workspace" : "standalone";
+  const now = new Date().toISOString();
+  const standaloneSkillPolicies = scopeKind === "standalone" ? completeSkillPolicies({}) : undefined;
+  const session: Session = {
+    id: uid("task"), ownerUserId, title: routine.name, scopeKind, workspaceId: workspace?.id || "",
+    codexThreadId: null, engine, engineSessionId: null, createdAt: now, updatedAt: now, usage: emptyUsage(),
+    messages: [], pendingInputs: [], status: "idle", revision: 0,
+    standaloneSkillPolicies, standaloneCapabilityProfileId: null,
+    standaloneExecutionMode: standaloneSkillPolicies ? normalizeExecutionMode(undefined, standaloneSkillPolicies) : undefined,
+    pinned: false, archivedAt: null
+  };
+  const executionWorkspace = workspace || await ensureSessionExecutionRoot(session);
+  state.sessions.unshift(session);
+  await saveState();
+  eventHub.publish("sessions.changed", { sessionId: session.id, action: "created", source: "routine", routineId: routine.id }, [ownerUserId]);
+  launchSessionRun(session, executionWorkspace, routine.prompt, undefined, undefined, executionWorkspace.agentExecutionMode);
+  return { routineId: routine.id, sessionId: session.id, providerId: engine };
+}
+
 async function runTurn(session: Session, workspace: Workspace, prompt: string, activeRun: ActiveRun) {
   const runner = agentAdapterRegistry.mainRunner(session.engine);
   if (!runner) throw new Error(`Agent Provider 尚未绑定主任务 Runner：${session.engine}`);
@@ -5383,7 +5463,8 @@ app.post("/api/internal/delegation/tasks", async (req, res) => {
     return res.status(401).json({ error: "Agent 委派桥接令牌无效" });
   }
   try {
-    const providerId = normalizeProviderId(req.body?.providerId);
+    const requestedProvider = String(req.body?.providerId || "").trim().toLowerCase();
+    const providerId = requestedProvider === "auto" ? requestedProvider as AgentProviderId : normalizeProviderId(requestedProvider);
     res.status(202).json(await queueDelegatedTask(req.body as AgentBridgeRequest, providerId));
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -6651,6 +6732,184 @@ app.get("/api/agent-providers", (_req, res) => {
   res.json({ schemaVersion: 1, items: agentAdapterRegistry.list(), transports: agentAdapterRegistry.providerSnapshots() });
 });
 
+app.get("/api/custom-agents", async (req, res) => {
+  try {
+    const workspaceId = req.query.workspaceId ? String(req.query.workspaceId) : "";
+    const workspace = workspaceId ? workspaceById(workspaceId, req.authUser!.id) : undefined;
+    if (workspaceId && !workspace) return res.status(404).json({ error: "工作区不存在" });
+    const loaded = await loadCustomAgents({ projectRoot: workspace?.root || ROOT, userHome: os.homedir() });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ schemaVersion: 1, workspaceId: workspace?.id || null, ...loaded });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/hooks", auth.requireRoles("owner", "admin"), (_req, res) => {
+  res.json({ schemaVersion: 1, hooks: hookRegistry.list() });
+});
+
+function routineOwnedBy(id: string, ownerUserId: string) {
+  const routine = routineScheduler?.get(id);
+  return routine && routine.ownerUserId === ownerUserId ? routine : undefined;
+}
+function publishRoutineChanged(routine: AgentRoutine, action: string) {
+  eventHub.publish("routines.changed", { routineId: routine.id, action, status: routine.lastStatus, nextRunAt: routine.nextRunAt }, [routine.ownerUserId || ""]);
+}
+
+app.get("/api/routines", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ schemaVersion: 1, items: routineScheduler?.list().filter((routine) => routine.ownerUserId === req.authUser!.id) || [] });
+});
+
+app.post("/api/routines", async (req, res) => {
+  try {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    if (workspaceId && !workspaceById(workspaceId, req.authUser!.id)) return res.status(404).json({ error: "工作区不存在" });
+    const providerId = String(req.body?.providerId || "auto").trim().toLowerCase();
+    if (providerId !== "auto") agentAdapterRegistry.requireDescriptor(providerId);
+    const routine = routineScheduler!.create({
+      id: req.body?.id === undefined ? undefined : String(req.body.id),
+      ownerUserId: req.authUser!.id,
+      name: String(req.body?.name || ""), providerId, prompt: String(req.body?.prompt || ""), workspaceId,
+      intervalMs: req.body?.intervalMs === undefined || req.body.intervalMs === null ? null : Number(req.body.intervalMs),
+      nextRunAt: req.body?.nextRunAt === undefined ? undefined : req.body.nextRunAt,
+      enabled: req.body?.enabled !== false
+    });
+    auth.auditRequest(req, { action: "routine.create", targetType: "routine", targetId: routine.id });
+    publishRoutineChanged(routine, "created");
+    res.status(201).json(routine);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.patch("/api/routines/:id", async (req, res) => {
+  try {
+    const current = routineOwnedBy(String(req.params.id), req.authUser!.id);
+    if (!current) return res.status(404).json({ error: "例程不存在" });
+    const workspaceId = req.body?.workspaceId === undefined ? current.workspaceId : String(req.body.workspaceId || "") || undefined;
+    if (workspaceId && !workspaceById(workspaceId, req.authUser!.id)) return res.status(404).json({ error: "工作区不存在" });
+    if (req.body?.providerId !== undefined && String(req.body.providerId).toLowerCase() !== "auto") agentAdapterRegistry.requireDescriptor(String(req.body.providerId));
+    const input: UpdateRoutineInput = {
+      ...(req.body?.name !== undefined ? { name: String(req.body.name) } : {}),
+      ...(req.body?.providerId !== undefined ? { providerId: String(req.body.providerId).trim().toLowerCase() } : {}),
+      ...(req.body?.prompt !== undefined ? { prompt: String(req.body.prompt) } : {}),
+      ...(req.body?.workspaceId !== undefined ? { workspaceId } : {}),
+      ...(req.body?.intervalMs !== undefined ? { intervalMs: req.body.intervalMs === null ? null : Number(req.body.intervalMs) } : {}),
+      ...(req.body?.nextRunAt !== undefined ? { nextRunAt: req.body.nextRunAt } : {}),
+      ...(req.body?.enabled !== undefined ? { enabled: Boolean(req.body.enabled) } : {})
+    };
+    const updated = routineScheduler!.update(current.id, input);
+    publishRoutineChanged(updated, "updated");
+    res.json(updated);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/routines/:id/run", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  try { const result = await routineScheduler!.runNow(routine.id); const updated = routineScheduler!.get(routine.id); if (updated) publishRoutineChanged(updated, "run"); res.status(202).json({ routineId: routine.id, result }); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/routines/:id/pause", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  const updated = routineScheduler!.pause(routine.id); publishRoutineChanged(updated, "paused"); res.json(updated);
+});
+
+app.post("/api/routines/:id/resume", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  const updated = routineScheduler!.resume(routine.id); publishRoutineChanged(updated, "resumed"); res.json(updated);
+});
+
+app.delete("/api/routines/:id", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  routineScheduler!.delete(routine.id);
+  auth.auditRequest(req, { action: "routine.delete", targetType: "routine", targetId: routine.id });
+  publishRoutineChanged(routine, "deleted");
+  res.json({ ok: true });
+});
+
+/** Provider-neutral capability and routing endpoints power Native/Managed UI
+ * without silently changing which adapter is selected. */
+app.get("/api/agent-providers/:providerId/capabilities", async (req, res) => {
+  try {
+    const providerId = normalizeProviderId(req.params.providerId);
+    const descriptor = agentAdapterRegistry.requireDescriptor(providerId);
+    const runtime = providerId === "codex" ? await detectCodexRuntime(false, true) : providerId === "claude" ? await getClaudeRuntime(false, true) : null;
+    const transport = agentAdapterRegistry.providerSnapshot(providerId);
+    const snapshot = createAgentCapabilitySnapshot(descriptor, {
+      requestedMode: req.query.mode === "managed" ? "managed" : "native",
+      transportCapabilities: transport ? {
+        kind: transport.transport === "acp" ? "acp" : "native",
+        enhanced: Boolean(transport.enhanced),
+        standard: transport.transport === "acp" ? "acp-v1" : "native",
+        protocolVersion: transport.acp?.protocolVersion,
+        capabilities: transport.acp?.capabilities as never
+      } : undefined,
+      runtimeProbe: runtime ? {
+        available: runtime.available,
+        status: runtime.available ? "ready" : "unavailable",
+        executablePath: runtime.path,
+        version: runtime.version,
+        source: runtime.source,
+        error: runtime.available ? undefined : runtime.message,
+        details: { message: runtime.message }
+      } : undefined
+    });
+    // Registry admission follows the native runtime probe. A managed view is
+    // presentation-only and must never replace the provider's global
+    // admission snapshot for a native session.
+    if (snapshot.requestedMode === "native") agentAdapterRegistry.setCapabilitySnapshot(snapshot);
+    res.json({
+      descriptor,
+      ...snapshot
+    });
+  } catch (error) { res.status(404).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/agent-providers/:providerId/integrations", async (req, res) => {
+  try {
+    const providerId = normalizeProviderId(req.params.providerId);
+    const snapshot = agentAdapterRegistry.capabilitySnapshot(providerId);
+    const transport = snapshot.transportCapabilities;
+    const negotiated = (transport.capabilities || {}) as Record<string, unknown>;
+    const integration = (negotiated as { integrations?: Record<string, unknown> }).integrations || {};
+    const capability = (key: string, fallback: boolean) => typeof integration[key] === "boolean" ? Boolean(integration[key]) : fallback;
+    res.json({ schemaVersion: 1, providerId, mode: snapshot.mode, runtimeProbe: snapshot.runtimeProbe, integrations: {
+      "browser.read": capability("browser.read", snapshot.effectiveCapabilities.tools.web),
+      "browser.interact": capability("browser.interact", false),
+      "computer.use": capability("computer.use", false),
+      "connector.mcp": capability("connector.mcp", snapshot.effectiveCapabilities.tools.mcp),
+      "connector.remote": capability("connector.remote", transport.kind === "acp" && Boolean(transport.capabilities))
+    }, restrictions: snapshot.restrictions });
+  } catch (error) { res.status(404).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/agent-routing/resolve", auth.requireRoles("owner", "admin"), (req, res) => {
+  try {
+    const requestedProvider = String(req.body?.providerId || "auto").trim().toLowerCase() as "auto" | AgentProviderId;
+    const policy = (recordOf(req.body?.policy) || {}) as AgentRoutingPolicy;
+    res.json({ schemaVersion: 1, ...resolveAgentRoute(requestedProvider, agentAdapterRegistry.list(), policy) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/agent-reviews/plan", auth.requireRoles("owner", "admin"), (req, res) => {
+  try {
+    const primary = normalizeProviderId(req.body?.primaryProvider || "");
+    const reviewer = req.body?.reviewerProvider ? normalizeProviderId(req.body.reviewerProvider) : undefined;
+    const pair = crossProviderReviewPair(primary, agentAdapterRegistry.list(), reviewer);
+    const trace = traceRecorder.start("review", "cross-provider-review", { provider: primary, attributes: { reviewer: pair.reviewer } });
+    traceRecorder.finish(trace.spanId, "ok");
+    res.json({ schemaVersion: 1, pair, traceId: trace.traceId, strategy: "primary-then-independent-review" });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/observability/traces/:traceId", auth.requireRoles("owner", "admin"), (req, res) => {
+  const traceId = String(req.params.traceId || "");
+  res.json({ schemaVersion: 1, traceId, spans: traceRecorder.list(traceId) });
+});
+
 app.get("/api/agent-providers/:providerId/readiness", async (req, res) => {
   try {
     const providerId = normalizeProviderId(req.params.providerId);
@@ -7277,6 +7536,73 @@ app.post("/api/workspaces/:id/git/checkout", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
   try { const current = await readGitSnapshot(workspace.root); if (current.files.length) throw new Error("当前工作树有未提交修改，请先暂存或提交后再切换分支"); await checkoutBranch(workspace.root, String(req.body?.name || "")); auth.auditRequest(req, { action: "workspace.git.checkout", targetType: "workspace", targetId: workspace.id }); res.json(await readGitSnapshot(workspace.root)); }
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+function worktreeErrorResponse(res: express.Response, error: unknown) {
+  if (error instanceof WorktreeError) return res.status(400).json({ error: error.message, code: error.code, details: error.details });
+  return res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-worktree-failed" });
+}
+
+app.get("/api/workspaces/:id/git/worktrees", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); res.json(await listWorktrees(workspace.root)); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    const result = await createWorktree({
+      workspaceRoot: workspace.root,
+      worktreePath: String(req.body?.path || req.body?.worktreePath || ""),
+      branch: req.body?.branch === undefined ? undefined : String(req.body.branch),
+      ref: req.body?.ref === undefined ? undefined : String(req.body.ref),
+      detach: req.body?.detach === true,
+      force: req.body?.force === true
+    });
+    auth.auditRequest(req, { action: "workspace.git.worktree.create", targetType: "workspace", targetId: workspace.id, summary: { path: result.path, branch: req.body?.branch || null } });
+    res.status(result.status === "already_exists" ? 200 : 201).json(result);
+  } catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/bind", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.json(await bindWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""))); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/restore", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.json(await restoreWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""))); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/cleanup", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    const result = await cleanupWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""), req.body?.force === true);
+    auth.auditRequest(req, { action: "workspace.git.worktree.cleanup", targetType: "workspace", targetId: workspace.id, summary: { path: result.path, force: req.body?.force === true } });
+    res.json(result);
+  } catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/merge-preflight", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    res.json(await preflightMerge({
+      workspaceRoot: workspace.root,
+      source: String(req.body?.source || ""),
+      target: req.body?.target === undefined ? undefined : String(req.body.target),
+      worktreePath: req.body?.worktreePath === undefined ? undefined : String(req.body.worktreePath),
+      allowDirty: req.body?.allowDirty === true
+    }));
+  } catch (error) { worktreeErrorResponse(res, error); }
 });
 
 app.post("/api/workspaces/:id/files/move", async (req, res) => {
@@ -8670,6 +8996,49 @@ app.get("/api/activity-artifacts/:id", async (req, res) => {
     const message = error instanceof Error ? error.message : String(error);
     res.status(message === "活动工件不存在" || (error as NodeJS.ErrnoException)?.code === "ENOENT" ? 404 : 400).json({ error: message });
   }
+});
+
+// Published Artifacts are versioned, user-owned deliverables. They remain
+// local-first and separate from activity evidence, while the UI can render
+// them as interactive/revisable outputs instead of one-off log attachments.
+app.get("/api/artifacts", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId ? String(req.query.sessionId) : undefined;
+    if (sessionId && !sessionById(sessionId, req.authUser!.id)) return res.status(404).json({ error: "任务不存在" });
+    res.json({ schemaVersion: 1, items: await listPublishedArtifacts(PUBLISHED_ARTIFACTS_DIR, req.authUser!.id, sessionId) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/artifacts", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    if (!sessionById(sessionId, req.authUser!.id)) return res.status(404).json({ error: "任务不存在" });
+    const artifact = await createPublishedArtifact(PUBLISHED_ARTIFACTS_DIR, {
+      ownerUserId: req.authUser!.id, sessionId, title: String(req.body?.title || ""), description: String(req.body?.description || ""),
+      mediaType: String(req.body?.mediaType || "text/plain"), content: String(req.body?.content || "")
+    });
+    eventHub.publish("artifact.changed", { action: "created", artifactId: artifact.id, sessionId }, [req.authUser!.id]);
+    res.status(201).json(artifact);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/artifacts/:id", async (req, res) => {
+  try { res.json(await readPublishedArtifact(PUBLISHED_ARTIFACTS_DIR, String(req.params.id || ""), req.authUser!.id)); }
+  catch (error) { const message = error instanceof Error ? error.message : String(error); res.status((error as NodeJS.ErrnoException)?.code === "ENOENT" || message.includes("不存在") ? 404 : 400).json({ error: message }); }
+});
+
+app.patch("/api/artifacts/:id", async (req, res) => {
+  try {
+    const artifact = await updatePublishedArtifact(PUBLISHED_ARTIFACTS_DIR, String(req.params.id || ""), req.authUser!.id, {
+      ...(req.body?.title !== undefined ? { title: String(req.body.title) } : {}),
+      ...(req.body?.description !== undefined ? { description: String(req.body.description) } : {}),
+      ...(req.body?.mediaType !== undefined ? { mediaType: String(req.body.mediaType) } : {}),
+      ...(req.body?.content !== undefined ? { content: String(req.body.content) } : {}),
+      ...(req.body?.published !== undefined ? { published: Boolean(req.body.published) } : {})
+    });
+    eventHub.publish("artifact.changed", { action: "updated", artifactId: artifact.id, sessionId: artifact.sessionId, version: artifact.version }, [req.authUser!.id]);
+    res.json(artifact);
+  } catch (error) { const message = error instanceof Error ? error.message : String(error); res.status((error as NodeJS.ErrnoException)?.code === "ENOENT" || message.includes("不存在") ? 404 : 400).json({ error: message }); }
 });
 
 app.get("/api/cli-runtimes", auth.requireRoles("owner", "admin"), async (_req, res) => {

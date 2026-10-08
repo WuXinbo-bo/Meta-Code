@@ -4,6 +4,46 @@ import type { AcpConfigOption } from "../chat/types";
 export type ProviderControlStatus = "ready" | "attention" | "unavailable" | "checking";
 export type ProviderLifecycleStage = "missing" | "installed" | "needs-connection" | "ready" | "updating";
 
+/** Capability state returned by the provider negotiation endpoint.  The
+ * frontend keeps this shape intentionally provider-neutral so new adapters
+ * can advertise the same status without adding Provider-specific UI branches.
+ */
+export type ProviderCapabilityMode = "native" | "managed" | "degraded";
+export type ProviderCapabilityRestriction = {
+  capability?: string;
+  reason?: string;
+  scope?: string;
+} | string;
+export type ProviderCapabilityModeState = {
+  available?: boolean;
+  restrictions?: ProviderCapabilityRestriction[];
+  reasons?: string[];
+};
+export type ProviderCapabilitySnapshot = {
+  schemaVersion?: number;
+  providerId: string;
+  mode?: ProviderCapabilityMode;
+  requestedMode?: ProviderCapabilityMode;
+  nativeCapabilities?: AgentProviderDescriptor["capabilities"];
+  workbenchCapabilities?: AgentProviderDescriptor["capabilities"];
+  effectiveCapabilities?: AgentProviderDescriptor["capabilities"];
+  transportCapabilities?: Record<string, unknown>;
+  versionRequirements?: Record<string, unknown>;
+  runtimeProbe?: {
+    available?: boolean;
+    status?: string;
+    version?: string;
+    source?: string;
+    message?: string;
+    error?: string;
+    checkedAt?: string;
+  };
+  restrictions?: ProviderCapabilityRestriction[];
+  degradedReasons?: string[];
+  modes?: Partial<Record<ProviderCapabilityMode, ProviderCapabilityModeState>>;
+  capturedAt?: string;
+};
+
 export type ProviderControlOperations = {
   setDefault: boolean;
   testConnection: boolean;

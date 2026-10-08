@@ -7,3 +7,5 @@
 - [Task orchestration UI](task-orchestration-ui.md)
 - [Workbench UI](workbench-ui.md)
 - [Codex native link](codex-native-link.md)
+- [Capability compatibility](capability-compatibility.md)
+- [Git worktree lifecycle](git-worktree-lifecycle.md)

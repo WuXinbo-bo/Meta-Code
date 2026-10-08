@@ -3,6 +3,7 @@ import { Check, ChevronDown, Folder, FolderPlus, MessageSquare, MessageSquareTex
 import type { AgentProviderDescriptor } from "../agents/types";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import type { ProviderControlSnapshot } from "../providers/types";
+import { CapabilityModeBadge, capabilitySnapshotForControl, useProviderCapabilitySnapshot } from "../providers/CapabilityCompatibility";
 import { useHoverPanel } from "./useHoverPanel";
 import "../design/task-launch.css";
 
@@ -40,6 +41,9 @@ export function TaskLaunchControls({ workspaces, providers, providerControls, wo
   const workspace = workspaces.find((item) => item.id === workspaceId);
   const engines = providers.filter((provider) => provider.capabilities.sessions.create);
   const selected = engines.find((provider) => provider.id === selectedProvider);
+  const selectedControl = providerControls.find((candidate) => candidate.providerId === selectedProvider);
+  const capabilityFallback = selectedControl ? capabilitySnapshotForControl(selectedControl) : null;
+  const capabilityState = useProviderCapabilitySnapshot(selectedProvider, Boolean(selectedControl), capabilityFallback);
   const firstReady = engines.find((provider) => engineReady(provider.id))?.id;
   const providerTabStop = selected && engineReady(selected.id) ? selected.id : firstReady;
   const selectWorkspace = (id: string) => {
@@ -55,7 +59,7 @@ export function TaskLaunchControls({ workspaces, providers, providerControls, wo
 
     <div className="task-create-main">
       {taskKind === "conversation" ? <>
-        <div className="task-create-section-heading"><span id="task-create-agent-label">主 Agent</span><span aria-live="polite">{selected?.shortName || "选择一个开始"}</span></div>
+        <div className="task-create-section-heading"><span id="task-create-agent-label">主 Agent</span><span aria-live="polite">{selected?.shortName || "选择一个开始"}{selectedControl && <CapabilityModeBadge snapshot={capabilityState.snapshot || capabilityFallback} loading={capabilityState.loading} />}</span></div>
         <div className="task-create-providers" role="radiogroup" aria-label="本次任务主 Agent" onKeyDown={(event) => selectRadioWithKeyboard(event, onProviderChange)}>
           {engines.map((provider) => {
             const control = providerControls.find((candidate) => candidate.providerId === provider.id);
