@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { registerProcessTree, terminateProcessTree, unregisterProcessTree } from "../../processTree.js";
 import type { WorkflowNodeCheck } from "./types.js";
@@ -13,6 +14,8 @@ const MAX_EVIDENCE_CHARS = 32_000;
 const VERIFICATION_TIMEOUT_MS = 5 * 60_000;
 const ALLOWED_PROGRAMS = new Set(["node", "npm", "pnpm", "yarn", "bun", "python", "python3", "pytest", "cargo", "go", "dotnet"]);
 const SNAPSHOT_FILE_CONCURRENCY = 16;
+const SNAPSHOT_CACHE_LIMIT = 30_000;
+const snapshotSignatureCache = new Map<string, { metadata: string; signature: string }>();
 
 export type WorkspaceSnapshot = Map<string, string>;
 
@@ -20,9 +23,22 @@ function normalizedRelative(value: string) {
   return value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
 }
 
-async function fileSignature(filePath: string, size: number, mtimeMs: number) {
-  if (size > MAX_HASH_BYTES) return `${size}:${Math.round(mtimeMs)}`;
-  return crypto.createHash("sha256").update(await fs.readFile(filePath)).digest("hex");
+function snapshotMetadata(stat: fsSync.Stats) {
+  return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+}
+
+function cacheSignature(filePath: string, metadata: string, signature: string) {
+  if (snapshotSignatureCache.size >= SNAPSHOT_CACHE_LIMIT) snapshotSignatureCache.delete(snapshotSignatureCache.keys().next().value!);
+  snapshotSignatureCache.set(filePath, { metadata, signature });
+  return signature;
+}
+
+async function fileSignature(filePath: string, stat: fsSync.Stats) {
+  const metadata = snapshotMetadata(stat);
+  const cached = snapshotSignatureCache.get(filePath);
+  if (cached?.metadata === metadata) return cached.signature;
+  const signature = stat.size > MAX_HASH_BYTES ? `metadata:${metadata}` : crypto.createHash("sha256").update(await fs.readFile(filePath)).digest("hex");
+  return cacheSignature(filePath, metadata, signature);
 }
 
 export function snapshotEntryIgnored(name: string, directory: boolean) {
@@ -44,7 +60,7 @@ async function snapshotFileSignature(filePath: string) {
     try {
       lastStat = await fs.stat(filePath);
       if (!lastStat.isFile()) return null;
-      return await fileSignature(filePath, lastStat.size, lastStat.mtimeMs);
+      return await fileSignature(filePath, lastStat);
     } catch (error) {
       if (snapshotAccessCode(error) === "ENOENT") return null;
       if (!isTransientSnapshotAccessError(error)) throw error;
@@ -66,11 +82,16 @@ export async function captureWorkspaceSnapshot(root: string): Promise<WorkspaceS
   const directories = [path.resolve(root)];
   const files: Array<{ absolute: string; relative: string }> = [];
   while (directories.length) {
-    const directory = directories.shift()!;
+    const directory = directories.pop()!;
     const entries = await fs.readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.isSymbolicLink() || snapshotEntryIgnored(entry.name, entry.isDirectory())) continue;
+      if (snapshotEntryIgnored(entry.name, entry.isDirectory())) continue;
       const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        try { snapshot.set(normalizedRelative(path.relative(root, absolute)), `symlink:${await fs.readlink(absolute)}`); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        continue;
+      }
       if (entry.isDirectory()) {
         directories.push(absolute);
         continue;
@@ -88,6 +109,32 @@ export async function captureWorkspaceSnapshot(root: string): Promise<WorkspaceS
       if (signature !== null) snapshot.set(file.relative, signature);
     }
   }));
+  return snapshot;
+}
+
+export function captureWorkspaceSnapshotSync(root: string): WorkspaceSnapshot {
+  const snapshot: WorkspaceSnapshot = new Map();
+  const directories = [path.resolve(root)];
+  while (directories.length) {
+    const directory = directories.pop()!;
+    for (const entry of fsSync.readdirSync(directory, { withFileTypes: true })) {
+      if (snapshotEntryIgnored(entry.name, entry.isDirectory())) continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        snapshot.set(normalizedRelative(path.relative(root, absolute)), `symlink:${fsSync.readlinkSync(absolute)}`);
+        continue;
+      }
+      if (entry.isDirectory()) directories.push(absolute);
+      else if (entry.isFile()) {
+        const stat = fsSync.statSync(absolute);
+        const metadata = snapshotMetadata(stat);
+        const cached = snapshotSignatureCache.get(absolute);
+        const signature = cached?.metadata === metadata ? cached.signature
+          : cacheSignature(absolute, metadata, stat.size > MAX_HASH_BYTES ? `metadata:${metadata}` : crypto.createHash("sha256").update(fsSync.readFileSync(absolute)).digest("hex"));
+        snapshot.set(normalizedRelative(path.relative(root, absolute)), signature);
+      }
+    }
+  }
   return snapshot;
 }
 
@@ -121,6 +168,11 @@ function scopeCandidates(scope: string, workspaceRoot: string, workDirectory: st
     candidates.add(`${taskRoot}/${normalized}`);
   }
   return [...candidates];
+}
+
+export function workflowFileScopeMatcher(scopes: string[], root: string) {
+  const matchers = scopes.flatMap((scope) => scopeCandidates(scope, root, root)).map(globPattern);
+  return (filePath: string) => matchers.some((matcher) => matcher.test(normalizedRelative(filePath)));
 }
 
 export function filesOutsideWriteScope(changedFiles: string[], writeScope: string[], workspaceRoot: string, workDirectory: string) {

@@ -36,7 +36,7 @@ export const WORKFLOW_ROLE_SKILLS = {
     "执行契约：只完成当前节点，不重写全局计划、不扩张任务范围、不调用其他 Agent；严格遵守工作目录、workspaceAccess 和 writeScope。",
     "运行时隔离契约：浏览器 Profile、user-data-dir、截图、临时预览脚本、测试日志和缓存只能写入工作台为当前节点提供的系统托管临时目录；不得放入 src、artifacts 或其他业务目录。结束前停止本节点启动的浏览器、预览服务器和辅助进程。",
     "产物契约：业务产物必须真实创建或确认存在，并登记稳定 ID、类型、路径、用途和下游消费者；纯判断节点可以没有文件，但必须提供可消费的事实、决策或交接说明。",
-    "验收契约：逐条验证验收标准；只登记实际执行过的检查，保留命令、状态、退出码和证据。不得把计划执行或准备执行写成已经通过。",
+    "验收契约：逐条验证验收标准；只登记实际执行过的检查，保留命令、状态、退出码和证据。检查若只是 Read、静态分析、人工判断或其他非命令证据，command 和 exitCode 必须为 null，name/evidence 应准确描述真实依据；不得把工具名称、阅读动作或自然语言标签伪装成命令。只有实际执行的 shell/verificationCommands 才填写 command 和 exitCode。只读节点的已审批 verificationCommands 由 Workbench 执行，Agent 阅读 systemVerification 和业务文件完成审查，不重复执行命令或绕过只读权限；系统检查已登记，无需改写。不得把计划执行或准备执行写成已经通过。",
     "祖先保护契约：修复和终端 QA 不得改写上游产物，使任何已完成祖先节点的 constraints 或 acceptance 从通过变为失败。允许在当前 writeScope 内做兼容适配；若正式合同彼此确实不可同时满足，必须返回 blocked 并列出冲突节点和字段，不能自行选择一份合同覆盖另一份。",
     "职责分流契约：unresolved 只登记当前节点合同内尚未完成且会阻止本节点验收的问题。应由明确下游节点继续验证的风险、假设和限制写入 warnings 或 handoff.constraints/nextAgentInstructions，不得因此把已完成当前合同的结果降为 partial。",
     "失败契约：当前合同无法完整交付时返回 partial；缺少必需输入、权限、Skill、MCP 或上游产物时返回 blocked；执行本身失败时返回 failed。不得用文字声称完成来绕过缺失产物、失败检查或权限限制，也不得自行增加真实访谈、有偿试点等合同外硬门槛。",

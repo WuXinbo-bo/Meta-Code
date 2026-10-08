@@ -3,12 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { normalizeWorkflowNodeResult } from "./execution.js";
+import { captureWorkspaceSnapshotSync, type WorkspaceSnapshot } from "./enforcement.js";
+import { workflowCompletedFileIntegrityIssues, workflowResultFileIntegrityIssue } from "./fileIntegrity.js";
 import { reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction } from "./nodeResultTransactions.js";
 import { normalizeWorkflowPlan, workflowNodeContractDigest } from "./plan.js";
-import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowIntegrationPhase, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowRecord, type WorkflowStatus } from "./types.js";
+import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowExecutionTarget, type WorkflowIntegrationPhase, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowRecord, type WorkflowStatus } from "./types.js";
 import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
 
-type WorkflowRow = { id: string; owner_user_id: string; workspace_id: string; work_directory: string; origin_id: string; parent_workflow_id: string | null; branch_index: number; branch_label: string; title: string; original_prompt: string; planner_engine: string; max_concurrent_agents: number | null; planner_session_id: string | null; planner_engine_session_id: string | null; planner_runtime_binding_json: string | null; status: WorkflowStatus; paused_from_status: WorkflowStatus | null; paused_planning_mode: "initial" | "refine" | "fresh" | null; paused_planning_maintenance: number; active_plan_version: number; revision: number; review_note: string | null; final_result_json: string | null; planner_logs_json: string; planner_started_at: string | null; planner_finished_at: string | null; integration_logs_json: string; integration_phase: WorkflowIntegrationPhase | null; integration_attempt: number; integration_runtime_binding_json: string | null; integrator_result_json: string | null; validator_result_json: string | null; integration_started_at: string | null; integration_finished_at: string | null; pinned: number; archived_at: string | null; folder_id: string | null; created_at: string; updated_at: string };
+type WorkflowRow = { id: string; owner_user_id: string; workspace_id: string; execution_target: WorkflowExecutionTarget; execution_root: string; workspace_root: string; worktree_id: string | null; work_directory: string; origin_id: string; parent_workflow_id: string | null; branch_index: number; branch_label: string; title: string; original_prompt: string; planner_engine: string; max_concurrent_agents: number | null; planner_session_id: string | null; planner_engine_session_id: string | null; planner_runtime_binding_json: string | null; status: WorkflowStatus; paused_from_status: WorkflowStatus | null; paused_planning_mode: "initial" | "refine" | "fresh" | null; paused_planning_maintenance: number; active_plan_version: number; revision: number; review_note: string | null; final_result_json: string | null; planner_logs_json: string; planner_started_at: string | null; planner_finished_at: string | null; integration_logs_json: string; integration_phase: WorkflowIntegrationPhase | null; integration_attempt: number; integration_runtime_binding_json: string | null; integrator_result_json: string | null; validator_result_json: string | null; integration_started_at: string | null; integration_finished_at: string | null; pinned: number; archived_at: string | null; folder_id: string | null; created_at: string; updated_at: string };
 
 const parse = <T>(value: string | null, fallback: T): T => value ? JSON.parse(value) as T : fallback;
 
@@ -61,6 +63,11 @@ export class WorkflowRepository {
     `);
     const runColumns = db.prepare("PRAGMA table_info(workflow_runs)").all() as Array<{ name: string }>;
     if (!runColumns.some((column) => column.name === "work_directory")) db.exec("ALTER TABLE workflow_runs ADD COLUMN work_directory TEXT NOT NULL DEFAULT ''");
+    if (!runColumns.some((column) => column.name === "execution_target")) db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_target TEXT NOT NULL DEFAULT 'isolated'");
+    if (!runColumns.some((column) => column.name === "execution_root")) db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_root TEXT NOT NULL DEFAULT ''");
+    if (!runColumns.some((column) => column.name === "workspace_root")) db.exec("ALTER TABLE workflow_runs ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''");
+    if (!runColumns.some((column) => column.name === "worktree_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN worktree_id TEXT");
+    db.exec("UPDATE workflow_runs SET execution_root = work_directory WHERE execution_root = ''");
     if (!runColumns.some((column) => column.name === "origin_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN origin_id TEXT NOT NULL DEFAULT ''");
     if (!runColumns.some((column) => column.name === "parent_workflow_id")) db.exec("ALTER TABLE workflow_runs ADD COLUMN parent_workflow_id TEXT");
     if (!runColumns.some((column) => column.name === "branch_index")) db.exec("ALTER TABLE workflow_runs ADD COLUMN branch_index INTEGER NOT NULL DEFAULT 1");
@@ -75,6 +82,8 @@ export class WorkflowRepository {
     if (!runColumns.some((column) => column.name === "paused_from_status")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_from_status TEXT");
     if (!runColumns.some((column) => column.name === "paused_planning_mode")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_planning_mode TEXT");
     if (!runColumns.some((column) => column.name === "paused_planning_maintenance")) db.exec("ALTER TABLE workflow_runs ADD COLUMN paused_planning_maintenance INTEGER NOT NULL DEFAULT 0");
+    if (!runColumns.some((column) => column.name === "pause_mode")) db.exec("ALTER TABLE workflow_runs ADD COLUMN pause_mode TEXT");
+    if (!runColumns.some((column) => column.name === "pending_maintenance_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN pending_maintenance_json TEXT");
     if (!runColumns.some((column) => column.name === "planner_logs_json")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_logs_json TEXT NOT NULL DEFAULT '[]'");
     if (!runColumns.some((column) => column.name === "planner_started_at")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_started_at TEXT");
     if (!runColumns.some((column) => column.name === "planner_finished_at")) db.exec("ALTER TABLE workflow_runs ADD COLUMN planner_finished_at TEXT");
@@ -130,11 +139,13 @@ export class WorkflowRepository {
     }
   }
 
-  create(input: { id?: string; ownerUserId: string; workspaceId: string; workDirectory?: string; prompt: string; plannerEngine: string; maxConcurrentAgents?: number | null; originId?: string; parentWorkflowId?: string | null; branchIndex?: number; branchLabel?: string; reviewNote?: string | null }) {
+  create(input: { id?: string; ownerUserId: string; workspaceId: string; workDirectory?: string; executionTarget?: WorkflowExecutionTarget; executionRoot?: string; workspaceRoot?: string; worktreeId?: string | null; prompt: string; plannerEngine: string; maxConcurrentAgents?: number | null; originId?: string; parentWorkflowId?: string | null; branchIndex?: number; branchLabel?: string; reviewNote?: string | null }) {
     const now = new Date().toISOString(); const id = input.id || `workflow-${crypto.randomUUID()}`;
     const branchIndex = Math.max(1, input.branchIndex || 1);
-    this.db.prepare("INSERT INTO workflow_runs (id, owner_user_id, workspace_id, work_directory, origin_id, parent_workflow_id, branch_index, branch_label, title, original_prompt, planner_engine, max_concurrent_agents, status, review_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)")
-      .run(id, input.ownerUserId, input.workspaceId, input.workDirectory || "", input.originId || id, input.parentWorkflowId || null, branchIndex, input.branchLabel || `方案 ${branchIndex}`, input.prompt.trim().slice(0, 80) || "任务编排", input.prompt.trim(), input.plannerEngine, input.maxConcurrentAgents ?? null, input.reviewNote?.trim() || null, now, now);
+    const executionRoot = input.executionRoot || input.workDirectory || "";
+    const executionTarget = input.executionTarget || (input.executionRoot ? "workspace" : "isolated");
+    this.db.prepare("INSERT INTO workflow_runs (id, owner_user_id, workspace_id, work_directory, execution_target, execution_root, workspace_root, worktree_id, origin_id, parent_workflow_id, branch_index, branch_label, title, original_prompt, planner_engine, max_concurrent_agents, status, review_note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)")
+      .run(id, input.ownerUserId, input.workspaceId, executionRoot, executionTarget, executionRoot, input.workspaceRoot || (executionTarget === "workspace" ? executionRoot : ""), input.worktreeId || null, input.originId || id, input.parentWorkflowId || null, branchIndex, input.branchLabel || `方案 ${branchIndex}`, input.prompt.trim().slice(0, 80) || "任务编排", input.prompt.trim(), input.plannerEngine, input.maxConcurrentAgents ?? null, input.reviewNote?.trim() || null, now, now);
     return this.get(id, input.ownerUserId)!;
   }
 
@@ -147,13 +158,13 @@ export class WorkflowRepository {
 
   listNavigation(ownerUserId: string) {
     const rows = this.db.prepare(`
-      SELECT id, title, workspace_id, work_directory, planner_engine, max_concurrent_agents,
+      SELECT id, title, workspace_id, work_directory, execution_target, execution_root, workspace_root, worktree_id, planner_engine, max_concurrent_agents,
              status, revision, pinned, archived_at, folder_id, updated_at, created_at
       FROM workflow_runs
       WHERE owner_user_id = ?
       ORDER BY updated_at DESC
     `).all(ownerUserId) as Array<Pick<WorkflowRow,
-      "id" | "title" | "workspace_id" | "work_directory" | "planner_engine" |
+      "id" | "title" | "workspace_id" | "work_directory" | "execution_target" | "execution_root" | "workspace_root" | "worktree_id" | "planner_engine" |
       "max_concurrent_agents" | "status" | "revision" | "pinned" | "archived_at" |
       "folder_id" | "updated_at" | "created_at"
     >>;
@@ -162,6 +173,10 @@ export class WorkflowRepository {
       title: row.title,
       workspaceId: row.workspace_id,
       workDirectory: row.work_directory,
+      executionTarget: row.execution_target,
+      executionRoot: row.execution_root || row.work_directory,
+      workspaceRoot: row.workspace_root,
+      worktreeId: row.worktree_id,
       plannerEngine: row.planner_engine,
       maxConcurrentAgents: row.max_concurrent_agents,
       status: row.status,
@@ -201,15 +216,65 @@ export class WorkflowRepository {
       .run(options.reviewNote?.trim() || null, JSON.stringify(firstLog ? [firstLog] : []), now, options.resetSession ? 1 : 0, options.resetSession ? 1 : 0, now, id, ownerUserId);
   }
 
-  startMaintenance(id: string, ownerUserId: string, firstLog: WorkflowNodeLog, note: string) {
+  startMaintenance(id: string, ownerUserId: string, firstLog: WorkflowNodeLog, note: string, recoveryRequest?: NonNullable<WorkflowRecord["pendingMaintenance"]>) {
     const row = this.require(id, ownerUserId);
     if (!row.active_plan_version) throw new Error("当前没有可以维护的计划");
-    if (!["awaiting_approval", "completed", "needs_review", "draft"].includes(row.status)) throw new Error(`当前状态 ${row.status} 不能维护规划`);
+    if (!["awaiting_approval", "completed", "needs_review", "draft", "paused"].includes(row.status)) throw new Error(`当前状态 ${row.status} 不能维护规划`);
     const logs = [...parse<WorkflowNodeLog[]>(row.planner_logs_json, []), firstLog].slice(-300);
     const now = new Date().toISOString();
-    this.db.prepare("UPDATE workflow_runs SET review_note = ?, planner_logs_json = ?, planner_started_at = ?, planner_finished_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
-      .run(note.trim(), JSON.stringify(logs), now, now, id, ownerUserId);
+    // The queued request is also the restart recovery record. Keep it until
+    // the planner has durably produced a candidate or a no-change answer.
+    this.db.prepare("UPDATE workflow_runs SET review_note = ?, planner_logs_json = ?, planner_started_at = ?, planner_finished_at = NULL, pending_maintenance_json = COALESCE(?, pending_maintenance_json), revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(note.trim(), JSON.stringify(logs), now, recoveryRequest ? JSON.stringify(recoveryRequest) : null, now, id, ownerUserId);
     return this.get(id, ownerUserId)!;
+  }
+
+  requestMaintenance(id: string, ownerUserId: string, revision: number, input: NonNullable<WorkflowRecord["pendingMaintenance"]>) {
+    const row = this.require(id, ownerUserId);
+    if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
+    if (!row.active_plan_version) throw new Error("当前没有可以维护的计划");
+    if (!input.note.trim()) throw new Error("请输入需要调整或询问的内容");
+    if (!["queued", "running", "integrating", "paused"].includes(row.status)) throw new Error("当前阶段无需等待执行检查点");
+    if (this.controlMetadata(id).pendingMaintenance) throw new Error("已有调整请求等待检查点，请先处理该请求");
+    const now = new Date().toISOString();
+    const from = row.status === "paused" ? row.paused_from_status : row.status;
+    this.db.prepare("UPDATE workflow_runs SET status = 'paused', paused_from_status = ?, pause_mode = 'checkpoint', pending_maintenance_json = ?, review_note = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(from, JSON.stringify({ ...input, note: input.note.trim(), resumeAfter: row.status !== "paused" && input.resumeAfter }), input.note.trim(), now, id, ownerUserId);
+    return this.get(id, ownerUserId)!;
+  }
+
+  changePlannerProvider(id: string, ownerUserId: string, plannerEngine: string) {
+    const row = this.require(id, ownerUserId);
+    if (row.planner_engine === plannerEngine) return this.get(id, ownerUserId)!;
+    if (!["draft", "awaiting_approval", "completed", "needs_review", "paused"].includes(row.status)) throw new Error("请在安全检查点更换规划 Agent");
+    this.db.prepare("UPDATE workflow_runs SET planner_engine = ?, planner_session_id = NULL, planner_engine_session_id = NULL, planner_runtime_binding_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(plannerEngine, new Date().toISOString(), id, ownerUserId);
+    return this.get(id, ownerUserId)!;
+  }
+
+  checkpointPause(id: string, ownerUserId: string, revision: number) {
+    const row = this.require(id, ownerUserId);
+    if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
+    if (!["queued", "running", "integrating"].includes(row.status)) throw new Error("当前阶段不能等待执行检查点");
+    this.db.prepare("UPDATE workflow_runs SET status = 'paused', paused_from_status = ?, pause_mode = 'checkpoint', revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(row.status, new Date().toISOString(), id, ownerUserId);
+    return this.get(id, ownerUserId)!;
+  }
+
+  prepareMaintenanceResume(id: string, ownerUserId: string, revision: number) {
+    const row = this.require(id, ownerUserId);
+    if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
+    const pending = this.controlMetadata(id).pendingMaintenance;
+    if (row.status !== "paused" || !pending || !row.paused_from_status) throw new Error("没有可恢复的规划维护请求");
+    const executionWasActive = ["queued", "running", "integrating"].includes(row.paused_from_status);
+    this.db.prepare("UPDATE workflow_runs SET status = ?, pause_mode = ?, pending_maintenance_json = ?, paused_from_status = ?, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+      .run(executionWasActive ? "paused" : row.paused_from_status, executionWasActive ? "checkpoint" : null, JSON.stringify({ ...pending, resumeAfter: executionWasActive }), executionWasActive ? row.paused_from_status : null, new Date().toISOString(), id, ownerUserId);
+    return this.get(id, ownerUserId)!;
+  }
+
+  private controlMetadata(id: string) {
+    const row = this.db.prepare("SELECT pause_mode, pending_maintenance_json FROM workflow_runs WHERE id = ?").get(id) as { pause_mode: WorkflowRecord["pauseMode"]; pending_maintenance_json: string | null };
+    return { pauseMode: row.pause_mode || null, pendingMaintenance: parse<WorkflowRecord["pendingMaintenance"]>(row.pending_maintenance_json, null) };
   }
 
   updateOriginalPrompt(id: string, ownerUserId: string, revision: number, prompt: string) {
@@ -273,7 +338,7 @@ export class WorkflowRepository {
     const row = this.require(id, ownerUserId);
     const logs = [...parse<WorkflowNodeLog[]>(row.planner_logs_json, []), log].slice(-300);
     const now = new Date().toISOString();
-    this.db.prepare("UPDATE workflow_runs SET planner_logs_json = ?, planner_finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+    this.db.prepare("UPDATE workflow_runs SET planner_logs_json = ?, planner_finished_at = ?, pending_maintenance_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
       .run(JSON.stringify(logs), now, now, id, ownerUserId);
     return this.get(id, ownerUserId)!;
   }
@@ -285,7 +350,7 @@ export class WorkflowRepository {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("INSERT INTO workflow_plan_versions (workflow_id, version, status, plan_json, schema_version, review_note, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?)").run(id, version, JSON.stringify(normalizeWorkflowPlan(plan)), CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, reviewNote || null, now);
-      this.db.prepare("UPDATE workflow_runs SET title = ?, status = 'awaiting_approval', active_plan_version = ?, review_note = ?, planner_finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(plan.title, version, reviewNote || null, now, now, id, ownerUserId);
+      this.db.prepare("UPDATE workflow_runs SET title = ?, status = 'awaiting_approval', active_plan_version = ?, review_note = ?, planner_finished_at = ?, pending_maintenance_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(plan.title, version, reviewNote || null, now, now, id, ownerUserId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(id, ownerUserId)!;
@@ -294,18 +359,18 @@ export class WorkflowRepository {
   saveMaintenancePlan(id: string, ownerUserId: string, plan: WorkflowPlan, reviewNote?: string) {
     const row = this.require(id, ownerUserId);
     if (!row.active_plan_version) throw new Error("当前没有可以维护的计划");
-    if (!["awaiting_approval", "completed", "needs_review", "draft"].includes(row.status)) throw new Error(`当前状态 ${row.status} 不能保存维护候选计划`);
+    if (!["awaiting_approval", "completed", "needs_review", "draft", "paused"].includes(row.status)) throw new Error(`当前状态 ${row.status} 不能保存维护候选计划`);
     const version = row.active_plan_version + 1; const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("INSERT INTO workflow_plan_versions (workflow_id, version, status, plan_json, schema_version, review_note, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?)").run(id, version, JSON.stringify(normalizeWorkflowPlan(plan)), CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, reviewNote || null, now);
-      this.db.prepare("UPDATE workflow_runs SET title = ?, status = 'awaiting_approval', active_plan_version = ?, review_note = ?, planner_finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(plan.title, version, reviewNote || null, now, now, id, ownerUserId);
+      this.db.prepare("UPDATE workflow_runs SET title = ?, status = 'awaiting_approval', active_plan_version = ?, review_note = ?, planner_finished_at = ?, pending_maintenance_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(plan.title, version, reviewNote || null, now, now, id, ownerUserId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(id, ownerUserId)!;
   }
 
-  approve(id: string, ownerUserId: string, revision: number) {
+  approve(id: string, ownerUserId: string, revision: number, options: { snapshot?: WorkspaceSnapshot } = {}) {
     const row = this.require(id, ownerUserId); if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
     if (row.status !== "awaiting_approval") throw new Error("当前计划不在待审批状态");
     const planRow = this.db.prepare("SELECT plan_json FROM workflow_plan_versions WHERE workflow_id = ? AND version = ?").get(id, row.active_plan_version) as { plan_json: string };
@@ -313,6 +378,23 @@ export class WorkflowRepository {
     const previousRows = this.db.prepare("SELECT * FROM workflow_nodes WHERE workflow_id = ? AND plan_version < ? ORDER BY plan_version DESC, rowid").all(id, row.active_plan_version) as any[];
     const previousById = new Map<string, any>();
     for (const previous of previousRows) if (!previousById.has(previous.node_key)) previousById.set(previous.node_key, previous);
+    const workflow = this.hydrate(row, false);
+    let currentSnapshot = options.snapshot;
+    let snapshotIssue: string | null = null;
+    if (!currentSnapshot && previousRows.some((previous) => previous.summary_json && parse<WorkflowNodeResult | null>(previous.summary_json, null)?.fileIntegrity)) {
+      try { currentSnapshot = captureWorkspaceSnapshotSync(workflow.executionRoot); }
+      catch (error) { snapshotIssue = error instanceof Error ? error.message : String(error); }
+    }
+    const priorWorkflow = row.active_plan_version > 1 ? this.hydrate({ ...row, active_plan_version: row.active_plan_version - 1 }, true) : null;
+    const eligibleWriters = new Set(plan.nodes.filter((node) => previousById.get(node.id)?.contract_digest === workflowNodeContractDigest(node)).map((node) => node.id));
+    let writerEligibilityChanged = true;
+    while (writerEligibilityChanged) {
+      writerEligibilityChanged = false;
+      for (const node of plan.nodes) if (eligibleWriters.has(node.id) && node.dependsOn.some((id) => !eligibleWriters.has(id))) {
+        eligibleWriters.delete(node.id); writerEligibilityChanged = true;
+      }
+    }
+    const priorIssues = currentSnapshot && priorWorkflow ? workflowCompletedFileIntegrityIssues(priorWorkflow, currentSnapshot, eligibleWriters) : null;
     const reusable = new Set<string>();
     let expanded = true;
     while (expanded) {
@@ -322,6 +404,10 @@ export class WorkflowRepository {
         const previous = previousById.get(node.id);
         if (!previous || previous.status !== "completed" || !previous.summary_json || !previous.result_digest) continue;
         if (String(previous.contract_digest || "") !== workflowNodeContractDigest(node)) continue;
+        const fileIssue = priorIssues && previous.plan_version === priorWorkflow?.activePlanVersion
+          ? priorIssues.get(node.id)
+          : workflowResultFileIntegrityIssue(workflow, normalizeWorkflowNodeResult(parse(previous.summary_json, {})), currentSnapshot);
+        if (snapshotIssue || fileIssue) continue;
         reusable.add(node.id); expanded = true;
       }
     }
@@ -338,7 +424,7 @@ export class WorkflowRepository {
         const logs = [...parse<WorkflowNodeLog[]>(previous.logs_json, []), { id: `workflow-reused-${crypto.randomUUID()}`, createdAt: now, kind: "status" as const, title: "复用已验证结果", text: `节点合同及上游输入未变化，复用计划 v${previous.plan_version} 的结果` }].slice(-300);
         reuse.run(previous.attempt, previous.summary_json, previous.result_digest, JSON.stringify(logs), previous.started_at, previous.finished_at, recordId);
       }
-      this.db.prepare("UPDATE workflow_runs SET status = 'queued', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, id);
+      this.db.prepare("UPDATE workflow_runs SET status = 'queued', pause_mode = NULL, pending_maintenance_json = NULL, paused_from_status = NULL, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ?").run(now, id);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.get(id, ownerUserId)!;
@@ -354,15 +440,15 @@ export class WorkflowRepository {
   pause(id: string, ownerUserId: string, revision: number, planning: { mode?: "initial" | "refine" | "fresh"; maintenance?: boolean } = {}) {
     const row = this.require(id, ownerUserId);
     if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
-    if (row.status === "paused") return this.get(id, ownerUserId)!;
-    if (!["planning", "queued", "running", "integrating"].includes(row.status) && !planning.mode) throw new Error(`当前状态 ${row.status} 不能暂停`);
-    const pausedFrom = planning.maintenance ? row.status : planning.mode ? "planning" : row.status;
+    if (row.status === "paused" && this.controlMetadata(id).pauseMode !== "checkpoint") return this.get(id, ownerUserId)!;
+    if (!["planning", "queued", "running", "integrating", "paused"].includes(row.status) && !planning.mode) throw new Error(`当前状态 ${row.status} 不能暂停`);
+    const pausedFrom = row.status === "paused" ? row.paused_from_status : planning.maintenance ? row.status : planning.mode ? "planning" : row.status;
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE workflow_runs SET status = 'paused', paused_from_status = ?, paused_planning_mode = ?, paused_planning_maintenance = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
-        .run(pausedFrom, planning.mode || null, planning.maintenance ? 1 : 0, now, id, ownerUserId);
-      if (["queued", "running"].includes(pausedFrom)) {
+      this.db.prepare("UPDATE workflow_runs SET status = 'paused', pause_mode = 'immediate', pending_maintenance_json = CASE WHEN ? THEN pending_maintenance_json ELSE NULL END, paused_from_status = ?, paused_planning_mode = ?, paused_planning_maintenance = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+        .run(planning.maintenance ? 1 : 0, pausedFrom, planning.mode || null, planning.maintenance ? 1 : 0, now, id, ownerUserId);
+      if (pausedFrom && ["queued", "running"].includes(pausedFrom)) {
         this.db.prepare("UPDATE workflow_nodes SET status = CASE WHEN status = 'running' THEN 'pause_requested' ELSE 'paused' END, next_retry_at = NULL WHERE workflow_id = ? AND plan_version = ? AND status IN ('pending', 'ready', 'queued', 'running', 'retry_wait', 'interrupted')")
           .run(id, row.active_plan_version);
       }
@@ -383,7 +469,7 @@ export class WorkflowRepository {
     try {
       this.db.prepare("UPDATE workflow_nodes SET status = 'interrupted', error = NULL, lease_expires_at = NULL, next_retry_at = NULL, finished_at = NULL WHERE workflow_id = ? AND plan_version = ? AND status IN ('paused', 'pause_requested')")
         .run(id, row.active_plan_version);
-      this.db.prepare("UPDATE workflow_runs SET status = ?, paused_from_status = NULL, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+    this.db.prepare("UPDATE workflow_runs SET status = ?, pause_mode = NULL, pending_maintenance_json = NULL, paused_from_status = NULL, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
         .run(next, now, id, ownerUserId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -397,7 +483,7 @@ export class WorkflowRepository {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE workflow_runs SET status = 'canceled', paused_from_status = NULL, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(now, id, ownerUserId);
+      this.db.prepare("UPDATE workflow_runs SET status = 'canceled', pause_mode = NULL, pending_maintenance_json = NULL, paused_from_status = NULL, paused_planning_mode = NULL, paused_planning_maintenance = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?").run(now, id, ownerUserId);
       this.db.prepare("UPDATE workflow_nodes SET status = 'canceled', error = COALESCE(error, '工作流已终止'), lease_expires_at = NULL, next_retry_at = NULL, finished_at = COALESCE(finished_at, ?) WHERE workflow_id = ? AND plan_version = ? AND status NOT IN ('completed', 'failed', 'blocked', 'skipped', 'canceled')").run(now, id, row.active_plan_version);
       this.db.prepare("UPDATE workflow_node_attempts SET status = 'abandoned', runner_id = NULL, lease_expires_at = NULL, error = COALESCE(error, '工作流已终止'), finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE workflow_id = ? AND status = 'running'").run(now, now, id);
       this.db.exec("COMMIT");
@@ -637,7 +723,10 @@ export class WorkflowRepository {
 
   finishIntegration(id: string, status: "completed" | "needs_review", finalResult: WorkflowNodeResult) {
     const now = new Date().toISOString();
-    this.db.prepare("UPDATE workflow_runs SET status = ?, integration_phase = ?, final_result_json = ?, integration_finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
+    // A checkpoint pause may arrive while Integrator/Validator is running. Keep
+    // the pause visible after that in-flight stage reaches its safe boundary;
+    // resume will continue from the persisted integration checkpoint.
+    this.db.prepare("UPDATE workflow_runs SET status = CASE WHEN pause_mode = 'checkpoint' THEN 'paused' ELSE ? END, integration_phase = ?, final_result_json = ?, integration_finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
       .run(status, status === "completed" ? "completed" : "result_committed", JSON.stringify(finalResult), now, now, id);
   }
 
@@ -666,9 +755,14 @@ export class WorkflowRepository {
         if (restartAgentInPlace) {
           const checkpointDirectory = path.resolve(latest.checkpoint_directory);
           const resolvedCheckpointRoot = path.resolve(checkpointRoot);
-          if (checkpointDirectory !== resolvedCheckpointRoot && checkpointDirectory.startsWith(`${resolvedCheckpointRoot}${path.sep}`)) fs.rmSync(checkpointDirectory, { recursive: true, force: true });
-          this.db.prepare("UPDATE workflow_node_attempts SET status = 'running', phase = 'claimed', runner_id = ?, lease_expires_at = ?, raw_output = NULL, parsed_result_json = NULL, verified_result_json = NULL, result_repair_count = 0, verification_run_count = 0, finished_at = NULL, updated_at = ?, error = NULL WHERE id = ?")
-            .run(runnerId, leaseExpiresAt, now, attemptId);
+          const preserveHostVerification = fs.existsSync(path.join(checkpointDirectory, "host-verification.json"));
+          if (checkpointDirectory !== resolvedCheckpointRoot && checkpointDirectory.startsWith(`${resolvedCheckpointRoot}${path.sep}`)) {
+            if (preserveHostVerification) {
+              for (const name of fs.readdirSync(checkpointDirectory)) if (!["host-verification.json", "before-snapshot.json"].includes(name)) fs.rmSync(path.join(checkpointDirectory, name), { recursive: true, force: true });
+            } else fs.rmSync(checkpointDirectory, { recursive: true, force: true });
+          }
+          this.db.prepare("UPDATE workflow_node_attempts SET status = 'running', phase = 'claimed', runner_id = ?, lease_expires_at = ?, raw_output = NULL, parsed_result_json = NULL, verified_result_json = NULL, result_repair_count = 0, verification_run_count = CASE WHEN ? THEN verification_run_count ELSE 0 END, finished_at = NULL, updated_at = ?, error = NULL WHERE id = ?")
+            .run(runnerId, leaseExpiresAt, preserveHostVerification ? 1 : 0, now, attemptId);
         } else {
           const recoveredPhase = transactionRecoverable && ["result_draft_started", "agent_running"].includes(latest.phase) ? "agent_output_received" : latest.phase;
           this.db.prepare("UPDATE workflow_node_attempts SET status = 'running', phase = ?, runner_id = ?, lease_expires_at = ?, updated_at = ?, error = NULL WHERE id = ?")
@@ -801,6 +895,34 @@ export class WorkflowRepository {
     return [...invalidated];
   }
 
+  blockStaleFileResults(id: string, ownerUserId: string, issues: ReadonlyMap<string, string>) {
+    const workflow = this.hydrate(this.require(id, ownerUserId), true);
+    const affected = new Set(issues.keys());
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const node of workflow.nodes) if (!affected.has(node.id) && node.dependsOn.some((dependency) => affected.has(dependency))) {
+        affected.add(node.id); expanded = true;
+      }
+    }
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const node of workflow.nodes.filter((item) => affected.has(item.id))) {
+        const issue = issues.get(node.id);
+        if (!issue && node.status !== "completed") continue;
+        const reason = issue || "上游文件证据已过期，等待定向重跑";
+        const logs = [...node.logs, { id: `workflow-file-stale-${crypto.randomUUID()}`, createdAt: now, kind: "status" as const, title: issue ? "恢复前文件证据已过期" : "上游结果已过期", text: `${reason}；已保留原结果和产物，请检查文件后定向重跑` }].slice(-300);
+        this.db.prepare("UPDATE workflow_nodes SET status = ?, stale_reason = ?, logs_json = ?, error = ?, lease_expires_at = NULL, next_retry_at = NULL WHERE id = ?")
+          .run(issue ? "blocked" : "pending", reason, JSON.stringify(logs), issue || null, node.recordId);
+      }
+      this.db.prepare("UPDATE workflow_runs SET status = 'needs_review', integration_phase = NULL, integrator_result_json = NULL, validator_result_json = NULL, integration_started_at = NULL, integration_finished_at = NULL, final_result_json = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
+        .run(now, id, ownerUserId);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    return this.get(id, ownerUserId)!;
+  }
+
   replaceNodeArtifacts(workflowId: string, nodeId: string, artifacts: Array<{ path: string; kind: string; hash: string | null; summary: string }>, attempt = 0, resultDigest: string | null = null) {
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
@@ -813,7 +935,7 @@ export class WorkflowRepository {
   }
 
   recoverAfterRestart() {
-    const interrupted = this.db.prepare("SELECT id, owner_user_id, workspace_id, status FROM workflow_runs WHERE status IN ('planning', 'queued', 'running', 'integrating')").all() as Array<{ id: string; owner_user_id: string; workspace_id: string; status: WorkflowStatus }>;
+    const interrupted = this.db.prepare("SELECT id, owner_user_id, workspace_id, status FROM workflow_runs WHERE status IN ('planning', 'queued', 'running', 'integrating', 'paused')").all() as Array<{ id: string; owner_user_id: string; workspace_id: string; status: WorkflowStatus }>;
     if (!interrupted.length) return [];
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
@@ -824,12 +946,12 @@ export class WorkflowRepository {
           continue;
         }
         this.db.prepare("UPDATE workflow_node_attempts SET status = 'interrupted', runner_id = NULL, lease_expires_at = NULL, error = COALESCE(error, '工作台重启中断'), updated_at = ? WHERE workflow_id = ? AND status = 'running'").run(now, item.id);
-        this.db.prepare("UPDATE workflow_nodes SET status = 'interrupted', error = '节点因工作台重启中断，等待恢复调度', lease_expires_at = NULL WHERE workflow_id = ? AND status IN ('queued', 'running')").run(item.id);
-        this.db.prepare("UPDATE workflow_runs SET status = 'queued', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, item.id);
+        this.db.prepare("UPDATE workflow_nodes SET status = 'interrupted', error = '节点因工作台重启中断，等待恢复调度', lease_expires_at = NULL WHERE workflow_id = ? AND status IN ('queued', 'running', 'pause_requested')").run(item.id);
+        if (item.status !== "paused") this.db.prepare("UPDATE workflow_runs SET status = 'queued', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, item.id);
       }
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-    return interrupted.filter((item) => item.status !== "planning").map((item) => ({ id: item.id, ownerUserId: item.owner_user_id, workspaceId: item.workspace_id }));
+    return interrupted.filter((item) => item.status !== "planning" && item.status !== "paused").map((item) => ({ id: item.id, ownerUserId: item.owner_user_id, workspaceId: item.workspace_id }));
   }
 
   recoverExpiredLeases(activeNodeKeys: ReadonlySet<string> = new Set()) {
@@ -872,7 +994,7 @@ export class WorkflowRepository {
       recordId: node.id, workflowId: row.id, planVersion: node.plan_version, status: node.status, attempt: node.attempt, engineThreadId: node.engine_thread_id || null, contextRecoveryCount: node.context_recovery_count || 0, contextRecoveryMode: node.context_recovery_mode || null, idempotencyKey: node.idempotency_key,
       summary: node.summary_json ? normalizeWorkflowNodeResult(parse(node.summary_json, {})) : null, resultDigest: node.result_digest, staleReason: node.stale_reason, logs: parse(node.logs_json, []), error: node.error, resultRepairable: repairableNodes.has(node.id), leaseExpiresAt: node.lease_expires_at, nextRetryAt: node.next_retry_at, startedAt: node.started_at, finishedAt: node.finished_at
     }));
-    return { id: row.id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id, workDirectory: row.work_directory, originId: row.origin_id || row.id, parentWorkflowId: row.parent_workflow_id, branchIndex: row.branch_index || 1, branchLabel: row.branch_label || `方案 ${row.branch_index || 1}`, title: row.title, originalPrompt: row.original_prompt, plannerEngine: row.planner_engine, maxConcurrentAgents: row.max_concurrent_agents, plannerSessionId: row.planner_session_id, plannerEngineSessionId: row.planner_engine_session_id, plannerRuntimeBinding: row.planner_runtime_binding_json ? parse(row.planner_runtime_binding_json, null) : null, status: row.status, pausedFromStatus: row.paused_from_status, pausedPlanningMode: row.paused_planning_mode, pausedPlanningMaintenance: Boolean(row.paused_planning_maintenance), activePlanVersion: row.active_plan_version, revision: row.revision, reviewNote: row.review_note, finalResult: row.final_result_json ? normalizeWorkflowNodeResult(parse(row.final_result_json, {})) : null, plannerLogs: parse(row.planner_logs_json, []), plannerStartedAt: row.planner_started_at, plannerFinishedAt: row.planner_finished_at, integrationLogs: parse(row.integration_logs_json, []), integrationPhase: row.integration_phase, integrationAttempt: row.integration_attempt || 0, integrationRuntimeBinding: row.integration_runtime_binding_json ? parse(row.integration_runtime_binding_json, null) : null, integratorResult: row.integrator_result_json ? normalizeWorkflowNodeResult(parse(row.integrator_result_json, {})) : null, validatorResult: row.validator_result_json ? normalizeWorkflowNodeResult(parse(row.validator_result_json, {})) : null, integrationStartedAt: row.integration_started_at, integrationFinishedAt: row.integration_finished_at, pinned: Boolean(row.pinned), archivedAt: row.archived_at, folderId: row.folder_id, createdAt: row.created_at, updatedAt: row.updated_at, plan, nodes };
+    return { id: row.id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id, workDirectory: row.execution_root || row.work_directory, executionTarget: row.execution_target || "isolated", executionRoot: row.execution_root || row.work_directory, workspaceRoot: row.workspace_root || "", worktreeId: row.worktree_id || null, ...this.controlMetadata(row.id), originId: row.origin_id || row.id, parentWorkflowId: row.parent_workflow_id, branchIndex: row.branch_index || 1, branchLabel: row.branch_label || `方案 ${row.branch_index || 1}`, title: row.title, originalPrompt: row.original_prompt, plannerEngine: row.planner_engine, maxConcurrentAgents: row.max_concurrent_agents, plannerSessionId: row.planner_session_id, plannerEngineSessionId: row.planner_engine_session_id, plannerRuntimeBinding: row.planner_runtime_binding_json ? parse(row.planner_runtime_binding_json, null) : null, status: row.status, pausedFromStatus: row.paused_from_status, pausedPlanningMode: row.paused_planning_mode, pausedPlanningMaintenance: Boolean(row.paused_planning_maintenance), activePlanVersion: row.active_plan_version, revision: row.revision, reviewNote: row.review_note, finalResult: row.final_result_json ? normalizeWorkflowNodeResult(parse(row.final_result_json, {})) : null, plannerLogs: parse(row.planner_logs_json, []), plannerStartedAt: row.planner_started_at, plannerFinishedAt: row.planner_finished_at, integrationLogs: parse(row.integration_logs_json, []), integrationPhase: row.integration_phase, integrationAttempt: row.integration_attempt || 0, integrationRuntimeBinding: row.integration_runtime_binding_json ? parse(row.integration_runtime_binding_json, null) : null, integratorResult: row.integrator_result_json ? normalizeWorkflowNodeResult(parse(row.integrator_result_json, {})) : null, validatorResult: row.validator_result_json ? normalizeWorkflowNodeResult(parse(row.validator_result_json, {})) : null, integrationStartedAt: row.integration_started_at, integrationFinishedAt: row.integration_finished_at, pinned: Boolean(row.pinned), archivedAt: row.archived_at, folderId: row.folder_id, createdAt: row.created_at, updatedAt: row.updated_at, plan, nodes };
   }
 
   private getNodeAttempt(id: string) {

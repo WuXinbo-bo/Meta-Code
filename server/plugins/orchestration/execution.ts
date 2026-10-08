@@ -52,7 +52,9 @@ export function normalizeWorkflowNodeResult(value: unknown): WorkflowNodeResult 
     handoff: { facts: stringList(handoffSource.facts), constraints: stringList(handoffSource.constraints), nextAgentInstructions: stringList(handoffSource.nextAgentInstructions) },
     warnings: stringList(source.warnings).length ? stringList(source.warnings) : stringList(source.risks),
     unresolved: stringList(source.unresolved),
-    machineResultPath: nullableString(source.machineResultPath)
+    machineResultPath: nullableString(source.machineResultPath),
+    ...(source.fileIntegrity && typeof source.fileIntegrity === "object" && (source.fileIntegrity as { schemaVersion?: unknown }).schemaVersion === 1
+      ? { fileIntegrity: source.fileIntegrity as WorkflowNodeResult["fileIntegrity"] } : {})
   };
 }
 

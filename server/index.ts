@@ -70,7 +70,7 @@ import { WorkbenchEventHub } from "./eventHub.js";
 import { TraceRecorder } from "./observability/traces.js";
 import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, looksLikeTextPreview, TEXT_PREVIEW_EXTENSIONS } from "./filePreviewTypes.js";
 import { pickFolder } from "./folderPicker.js";
-import { checkoutBranch, commitFiles, createBranch, fetchRemote, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
+import { checkoutBranch, commitFiles, createBranch, fetchRemote, gitRoot, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
 import { WorktreeError, bindWorktree, cleanupWorktree, createWorktree, listWorktrees, preflightMerge, restoreWorktree } from "./git/worktreeManager.js";
 import { IncrementalJsonl } from "./incrementalJsonl.js";
 import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
@@ -96,6 +96,15 @@ import { registerOrchestrationRoutes } from "./plugins/orchestration/controller.
 import { orchestrationLifecycle } from "./plugins/orchestration/lifecycle.js";
 import { createOrchestrationRuntime, type WorkflowPlannerRunner, type WorkflowWorkerRunner } from "./plugins/orchestration/runtime.js";
 import { createOrchestrationScheduler } from "./plugins/orchestration/scheduler.js";
+import { WorkflowTargetService } from "./plugins/orchestration/targets.js";
+import { WorkflowDefinitionStore } from "./plugins/orchestration/definitions.js";
+import { registerOrchestrationExtensionRoutes } from "./plugins/orchestration/extensionRoutes.js";
+import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "./runtime/workspaceExecutionCoordinator.js";
+import type { WorkflowRecord } from "./plugins/orchestration/types.js";
+import { TaskContextStore, latestTaskHandoffForRoot, renderTaskHandoff, redactTaskText, taskRootsEqual } from "./tasks/context.js";
+import { prepareWorkflowTaskContext } from "./tasks/executionContext.js";
+import { publishTaskWorkflowResult } from "./tasks/workflowResult.js";
+import { registerTaskContextRoutes, workflowHandoff } from "./tasks/routes.js";
 import { terminateServerDescendants, terminateTrackedProcessTrees } from "./processTree.js";
 import { AcpMainSessionRuntime, assertAcpConfigValue, type AcpMainSessionInput } from "./providers/acp/mainSession.js";
 import { acpMcpServers } from "./providers/acp/mcp.js";
@@ -348,6 +357,9 @@ const stateStore = new WorkbenchStateStore(RUNTIME_DIR);
 const pluginHost = createBuiltInPluginHost(APP_PATHS);
 pluginHost.start();
 const { repository: workflowRepository, stateFiles: workflowStateFiles } = createOrchestrationServices(pluginHost.context(ORCHESTRATION_PLUGIN_ID), stateStore.db);
+const taskContextStore = new TaskContextStore(stateStore.db);
+const workflowTargets = new WorkflowTargetService(pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory);
+const workflowDefinitions = new WorkflowDefinitionStore(pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory);
 const eventHub = new WorkbenchEventHub();
 const traceRecorder = new TraceRecorder();
 let routineScheduler: RoutineScheduler | null = null;
@@ -1701,7 +1713,13 @@ function standaloneSessionRoot(session: Pick<Session, "id" | "ownerUserId">) {
 
 function executionWorkspaceForSession(session: Session, ownerUserId?: string): Workspace | undefined {
   if (ownerUserId && session.ownerUserId !== ownerUserId) return undefined;
-  if (session.scopeKind !== "standalone") return session.workspaceId ? workspaceById(session.workspaceId, ownerUserId) : undefined;
+  if (session.scopeKind !== "standalone") {
+    const workspace = session.workspaceId ? workspaceById(session.workspaceId, ownerUserId) : undefined;
+    if (!workspace) return undefined;
+    const context = taskContextStore.forExecution({ kind: "session", id: session.id }, session.ownerUserId);
+    const execution = context?.executions.find((item) => item.kind === "session" && item.id === session.id);
+    return execution?.executionRoot ? { ...workspace, root: execution.executionRoot } : workspace;
+  }
   const standalonePolicies = completeSkillPolicies(session.standaloneSkillPolicies);
   const executionMode = normalizeExecutionMode(session.standaloneExecutionMode, standalonePolicies);
   return {
@@ -1719,8 +1737,15 @@ function executionWorkspaceForSession(session: Session, ownerUserId?: string): W
 function fileScopeById(id: string, ownerUserId: string) {
   const workspace = workspaceById(id, ownerUserId);
   if (workspace) return workspace;
+  const workflow = workflowRepository.get(id, ownerUserId);
+  if (workflow) {
+    const original = workspaceById(workflow.workspaceId, ownerUserId);
+    if (original) return { ...original, id: workflow.id, root: workflow.workDirectory };
+  }
   const session = sessionById(id, ownerUserId);
-  return session?.scopeKind === "standalone" ? executionWorkspaceForSession(session, ownerUserId) : undefined;
+  if (!session) return undefined;
+  const execution = executionWorkspaceForSession(session, ownerUserId);
+  return execution ? { ...execution, id: session.id } : undefined;
 }
 
 async function ensureSessionExecutionRoot(session: Session) {
@@ -2334,6 +2359,14 @@ function appendMessage(session: Session, message: Omit<Message, "id" | "createdA
   session.updatedAt = record.createdAt;
   session.revision += 1;
   return record;
+}
+
+function publishWorkflowResult(workflow: WorkflowRecord) {
+  if (publishTaskWorkflowResult(workflow, {
+    store: taskContextStore, sessionById,
+    executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+    appendMessage, onPublished: publishSessionChanged
+  })) scheduleStateSave();
 }
 
 const sessionMessageIndexes = new WeakMap<Session, { messages: Message[]; indexedLength: number; bySourceId: Map<string, Message> }>();
@@ -4167,7 +4200,24 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
   };
   bindActiveRunCancellation(activeRun, session);
   activeRuns.set(session.id, activeRun);
-  activeRun.promise = runSessionLoop(session, workspace, prompt, activeRun)
+  let executionLease: WorkspaceExecutionLease | undefined;
+  const lockRequest = { root: workspace.root, ownerId: `session:${session.id}`, label: session.title, access: "write" as const };
+  const immediateLease = workspaceExecutionCoordinator.tryAcquire(lockRequest);
+  if (!immediateLease) {
+    appendMessage(session, { role: "event", text: "等待当前项目的其他任务释放写入权限", eventType: "task.workspace.waiting" });
+    scheduleStateSave();
+  }
+  activeRun.promise = Promise.resolve(immediateLease || workspaceExecutionCoordinator.acquire(lockRequest, { signal: activeRun.controller.signal }))
+    .then(async (lease) => {
+      executionLease = lease;
+      if (activeRun.controller.signal.aborted) return;
+      const context = taskContextStore.forExecution({ kind: "session", id: session.id }, session.ownerUserId);
+      const storedHandoff = latestTaskHandoffForRoot(context, workspace.root);
+      const sourceWorkflow = storedHandoff?.source.kind === "workflow" ? workflowRepository.get(storedHandoff.source.id, session.ownerUserId) : null;
+      const handoff = sourceWorkflow && taskRootsEqual(sourceWorkflow.executionRoot || sourceWorkflow.workDirectory, workspace.root) ? workflowHandoff(sourceWorkflow) : storedHandoff;
+      const executionPrompt = handoff?.source.kind === "workflow" ? `${renderTaskHandoff(handoff)}\n\n用户当前要求：\n${prompt}` : prompt;
+      await runSessionLoop(session, workspace, executionPrompt, activeRun);
+    })
     .catch(async (error) => {
       if (activeRun.controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -4180,13 +4230,16 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
       await saveState().catch((saveError) => console.error("Unexpected run failure save failed", saveError));
     })
     .finally(async () => {
-      await settleDelegatedTasksAfterParentExit(session, activeRun);
-      activeRun.claudeProcess?.close();
-      terminateTrackedProcessTrees(session.id);
-      activeRun.releaseSkillProjection?.();
-      workspaceTreeIndex.invalidate(workspace.root);
-      if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
-      dispatchAgentHook({ kind: "session", event: "session.finish", providerId: session.engine, sessionId: session.id, payload: { status: session.status } });
+      try { await settleDelegatedTasksAfterParentExit(session, activeRun); }
+      finally {
+        try { activeRun.claudeProcess?.close(); terminateTrackedProcessTrees(session.id); activeRun.releaseSkillProjection?.(); }
+        finally {
+          executionLease?.release();
+          workspaceTreeIndex.invalidate(workspace.root);
+          if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
+          dispatchAgentHook({ kind: "session", event: "session.finish", providerId: session.engine, sessionId: session.id, payload: { status: session.status } });
+        }
+      }
     });
   return activeRun;
 }
@@ -5269,6 +5322,7 @@ const orchestrationRuntime = createOrchestrationRuntime({
   workflowRepository,
   workflowStateFiles,
   eventHub,
+  onWorkflowCompleted: publishWorkflowResult,
   managedSkillManager,
   skillFileIndex,
   autoSkillCandidateBlock,
@@ -5559,8 +5613,7 @@ app.post("/api/app-update/remind", auth.requireRoles("owner", "admin"), async (r
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-// Task orchestration has its own API and state machine. It never creates or
-// mutates a free-chat Session; the shared lower layer is only the CLI runner.
+// The host links tasks while the plugin retains its independent state machine.
 registerOrchestrationRoutes(app, {
   acquireRequest: () => pluginHost.acquire(ORCHESTRATION_PLUGIN_ID),
   workspaceTreeIndex,
@@ -5570,6 +5623,26 @@ registerOrchestrationRoutes(app, {
   providerReadiness,
   uid,
   workflowStateFiles,
+  workflowTargetService: workflowTargets,
+  taskContextIdForWorkflow: (workflow) => taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId)?.id || null,
+  plannerContextForWorkflow: (workflow) => {
+    const context = taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId);
+    const handoff = latestTaskHandoffForRoot(context, workflow.executionRoot || workflow.workDirectory);
+    return handoff ? renderTaskHandoff(handoff) : "";
+  },
+  onWorkflowDeleted: (id, ownerUserId) => taskContextStore.unlink({ kind: "workflow", id }, ownerUserId),
+  prepareTaskContext: (input) => prepareWorkflowTaskContext(input, {
+    store: taskContextStore, workspaceById, sessionById,
+    executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+    workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId), targets: workflowTargets
+  }),
+  onWorkflowCreated: (workflow, taskContextId) => {
+    const source = taskContextId || (workflow.parentWorkflowId ? taskContextStore.forExecution({ kind: "workflow", id: workflow.parentWorkflowId }, workflow.ownerUserId)?.id : null);
+    const context = source
+      ? taskContextStore.link(source, { kind: "workflow", id: workflow.id, executionRoot: workflow.executionRoot || workflow.workDirectory }, workflow.ownerUserId, workflow.workspaceId)
+      : taskContextStore.ensure({ kind: "workflow", id: workflow.id, executionRoot: workflow.executionRoot || workflow.workDirectory }, workflow.ownerUserId, workflow.workspaceId, workflow.title);
+    workflow.taskContextId = context.id;
+  },
   workflowEvent,
   workflowRuntimeActive,
   activeWorkflowPlanners,
@@ -5594,6 +5667,81 @@ registerOrchestrationRoutes(app, {
   activeWorkflowPlannerRuns,
   assertWorkflowExecutionReady,
   queueWorkflowTick
+});
+
+registerOrchestrationExtensionRoutes(app, {
+  acquireRequest: () => pluginHost.acquire(ORCHESTRATION_PLUGIN_ID),
+  definitions: workflowDefinitions, targets: workflowTargets,
+  workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId),
+  workflowRuntimeActive,
+  definitionEnvironment: async (workspaceId, ownerUserId) => {
+    const workspace = workspaceById(workspaceId, ownerUserId);
+    if (!workspace) throw new Error("工作区不存在");
+    const policies = workspaceAgentConfig(workspace).skillPolicies;
+    const capabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
+    return { availableSkills: new Set(managedSkillManager.listPublic().filter((skill) => !skill.builtIn && (policies[skill.name] === "always" || policies[skill.name] === "auto")).map((skill) => skill.name)),
+      availableMcpServers: new Set(mcpServersForWorkspace(workspace).map((server) => server.name)), providerCapabilities: capabilities,
+      plannerAvailable: (providerId) => Boolean(agentAdapterRegistry.workflowPlannerRunner(providerId) && capabilities.providers[providerId]?.available) };
+  },
+  createDefinitionWorkflow: async (input) => {
+    const workspace = workspaceById(input.workspaceId, input.ownerUserId);
+    if (!workspace) throw new Error("工作区不存在");
+    const id = uid("workflow");
+    const target = await workflowTargets.prepare({ runId: id, ownerUserId: input.ownerUserId, workspaceId: workspace.id, workspaceRoot: workspace.root, executionTarget: input.executionTarget });
+    try {
+      const workflow = workflowRepository.create({ id, ownerUserId: input.ownerUserId, workspaceId: workspace.id, ...target, prompt: input.prompt, plannerEngine: input.plannerEngine });
+      workflowRepository.setPlanning(workflow.id, input.ownerUserId, workflow.revision);
+      const planned = workflowRepository.savePlan(workflow.id, input.ownerUserId, input.plan);
+      taskContextStore.ensure({ kind: "workflow", id, executionRoot: target.executionRoot }, input.ownerUserId, workspace.id, planned.title);
+      workflowStateFiles.sync(planned);
+      workflowStateFiles.appendEvent(planned, { type: "workflow.definition.instantiated", payload: { definitionId: input.definitionId, definitionRevision: input.definitionRevision, inputs: input.inputs } });
+      workflowEvent(id, "workflow.plan.ready", input.ownerUserId, workspace.id, planned.revision);
+      workflowTargets.confirmPrepared(id, input.ownerUserId);
+      return planned;
+    } catch (error) {
+      taskContextStore.unlink({ kind: "workflow", id }, input.ownerUserId);
+      if (workflowRepository.get(id, input.ownerUserId)) workflowRepository.delete(id, input.ownerUserId);
+      await workflowTargets.rollbackPrepared(id, input.ownerUserId);
+      throw error;
+    }
+  },
+  withWorkspaceWriteLock: async (workspaceId, ownerUserId, operation) => {
+    const workspace = workspaceById(workspaceId, ownerUserId);
+    if (!workspace) throw new Error("工作区不存在");
+    // Git integration mutates the repository HEAD and index, even when the
+    // selected workspace is a nested directory. Coordinate at repository root
+    // so sibling workspace tasks cannot write around this lock.
+    const repositoryRoot = await gitRoot(workspace.root);
+    const lease = workspaceExecutionCoordinator.tryAcquire({ root: repositoryRoot, ownerId: `integration:${uid("lease")}`, label: "整合方案", access: "write" });
+    if (!lease) throw new Error("项目仍有任务正在执行，请暂停或完成后再整合方案");
+    try { return await operation(); } finally { lease.release(); }
+  },
+  onWorkflowIntegrated: (workflow) => { workspaceTreeIndex.invalidate(workflow.workspaceRoot || workflow.workDirectory); workflowEvent(workflow.id, "workflow.worktree.integrated", workflow.ownerUserId, workflow.workspaceId, workflow.revision); }
+});
+
+registerTaskContextRoutes(app, {
+  store: taskContextStore,
+  sessionById,
+  executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+  workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId),
+  publishWorkflowResult,
+  createConversation: async (input) => {
+    const workspace = workspaceById(input.workspaceId, input.ownerUserId);
+    if (!workspace) throw new Error("工作区不存在，请先指定工作区");
+    const engine = normalizeProviderId(input.engine);
+    if (!agentAdapterRegistry.mainRunner(engine)) throw new Error("所选 Agent 不支持普通对话");
+    const now = new Date().toISOString();
+    const session: Session = { id: uid("task"), taskContextId: input.taskContextId, ownerUserId: input.ownerUserId,
+      title: input.title, scopeKind: "workspace", workspaceId: workspace.id, codexThreadId: null, engine,
+      engineSessionId: null, createdAt: now, updatedAt: now, usage: emptyUsage(), messages: [], pendingInputs: [], status: "idle", revision: 0 };
+    taskContextStore.link(input.taskContextId, { kind: "session", id: session.id, executionRoot: input.executionRoot || workspace.root }, input.ownerUserId, workspace.id);
+    if (input.handoff) appendMessage(session, { role: "assistant", text: input.handoff, eventType: "task.context.handoff", payload: { taskContextId: input.taskContextId } });
+    state.sessions.unshift(session);
+    try { await saveState(); }
+    catch (error) { state.sessions = state.sessions.filter((item) => item.id !== session.id); taskContextStore.unlink({ kind: "session", id: session.id }, input.ownerUserId); throw error; }
+    eventHub.publish("sessions.changed", { sessionId: session.id, action: "created" }, [session.ownerUserId]);
+    return session;
+  }
 });
 
 app.get("/api/events", (req, res) => {
@@ -5990,14 +6138,20 @@ function navigationSnapshot(ownerUserId: string) {
         agentSkillOverrides: agentConfig.skillOverrides
       };
     }),
-    sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map(({ messages, ...session }) => ({
-      ...session,
-      messageCount: messages.length,
-      deletionPolicy: taskDeletionPolicy("session", session.status, activeRuns.has(session.id))
-    })),
+    sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map((session) => {
+      const { messages, ...summary } = session;
+      return { ...summary,
+        taskContextId: taskContextStore.ensure({ kind: "session", id: session.id }, ownerUserId, session.workspaceId, session.title).id,
+        executionRoot: executionWorkspaceForSession(session)?.root,
+        messageCount: messages.length,
+        deletionPolicy: taskDeletionPolicy("session", session.status, activeRuns.has(session.id)
+      ) };
+    }),
     workflows: workflowRepository.listNavigation(ownerUserId)
       .filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId))
-      .map((workflow) => ({ ...workflow, deletionPolicy: taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id)) }))
+      .map((workflow) => ({ ...workflow,
+        taskContextId: taskContextStore.ensure({ kind: "workflow", id: workflow.id, executionRoot: workflow.workDirectory }, ownerUserId, workflow.workspaceId, workflow.title).id,
+        deletionPolicy: taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id)) }))
   };
 }
 
@@ -8252,6 +8406,7 @@ async function permanentlyDeleteWorkspaceTrash(ownerUserId: string, workspaceTra
     }
     for (const workflowId of [...snapshot.workflowIds]) {
       if (workflowRepository.get(workflowId, ownerUserId)) workflowRepository.delete(workflowId, ownerUserId);
+      taskContextStore.unlink({ kind: "workflow", id: workflowId }, ownerUserId);
       snapshot.workflowIds = snapshot.workflowIds.filter((id) => id !== workflowId);
       sessionManagementRepository.updateWorkspaceTrashSnapshot(ownerUserId, workspaceTrashId, snapshot);
     }
@@ -8315,6 +8470,7 @@ async function permanentlyDeleteTrash(ownerUserId: string, trashId: string) {
   }
   await deleteActivityArtifactsForSession(ACTIVITY_ARTIFACTS_DIR, ownerUserId, session.id);
   await deleteSessionRecoverySnapshot(trash.snapshotPath);
+  taskContextStore.unlink({ kind: "session", id: session.id }, ownerUserId);
   sessionManagementRepository.removeTrash(ownerUserId, trashId);
   sessionManagementRepository.log(ownerUserId, session.id, "purge", true, { trashId });
   return { ok: true };
@@ -8889,9 +9045,12 @@ app.get("/api/sessions", (req, res) => {
 });
 
 function sessionWithMessageWindow(session: Session, messageLimit: unknown) {
-  if (messageLimit === undefined) return session;
+  const executionRoot = executionWorkspaceForSession(session, session.ownerUserId)?.root;
+  const context = taskContextStore.ensure({ kind: "session", id: session.id, executionRoot }, session.ownerUserId, session.workspaceId, session.title);
+  const projection = { ...session, taskContextId: context.id, executionRoot };
+  if (messageLimit === undefined) return projection;
   const { messages, window } = responseMessageWindow(session.messages, undefined, messageLimit);
-  return { ...session, messages, messageWindow: window };
+  return { ...projection, messages, messageWindow: window };
 }
 
 function taskUsageSummaryForResponse(session: Session) {
@@ -9778,6 +9937,8 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
   const source = sessionById(req.params.id, req.authUser!.id);
   const workspace = source && executionWorkspaceForSession(source, req.authUser!.id);
   if (!source || !workspace) return res.status(404).json({ error: "任务或工作区不存在" });
+  const sourceContext = taskContextStore.ensure({ kind: "session", id: source.id, executionRoot: workspace.root }, req.authUser!.id, source.workspaceId, source.title);
+  const sourceExecution = sourceContext?.executions.find((execution) => execution.kind === "session" && execution.id === source.id);
   const messageId = String(req.body.messageId || "");
   const editedText = String(req.body.text || "").trim();
   const targetIndex = source.messages.findIndex((message) => message.id === messageId && (message.role === "user" || message.role === "assistant"));
@@ -9799,6 +9960,7 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
   }));
   const branch: Session = {
     id: uid("task"),
+    taskContextId: sourceContext?.id || null,
     ownerUserId: req.authUser!.id,
     title: nextBranchTitle(source),
     scopeKind: source.scopeKind,
@@ -9822,7 +9984,10 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
     pinned: false,
     archivedAt: null
   };
-  let branchWorkspace = workspace;
+  // A branch follows the source task's effective root. This matters for
+  // worktree and isolated tasks: creating a conversation branch must not
+  // silently jump back to the original project directory.
+  let branchWorkspace = sourceExecution?.executionRoot ? { ...workspace, id: branch.id, root: sourceExecution.executionRoot } : workspace;
   if (branch.scopeKind === "standalone") {
     branchWorkspace = await ensureSessionExecutionRoot(branch);
     await fsp.cp(workspace.root, branchWorkspace.root, { recursive: true, force: false });
@@ -9850,8 +10015,14 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
     transcript ? `分支前上下文：\n${transcript}` : "",
     editedText ? `用户修改后的要求：\n${attachmentPrompt(editedText, branchAttachments)}` : ""
   ].filter(Boolean).join("\n\n");
+  if (sourceContext) taskContextStore.link(sourceContext.id, { kind: "session", id: branch.id, executionRoot: branchWorkspace.root }, req.authUser!.id, source.workspaceId);
   state.sessions.unshift(branch);
-  await saveState();
+  try { await saveState(); }
+  catch (error) {
+    state.sessions = state.sessions.filter((item) => item.id !== branch.id);
+    taskContextStore.unlink({ kind: "session", id: branch.id }, req.authUser!.id);
+    throw error;
+  }
   if (editedText) launchSessionRun(branch, branchWorkspace, modelPrompt, branchPolicies, normalizeSkillNames(modePayload?.skillNames), branchMode);
   res.status(201).json(sessionWithMessageWindow(branch, req.query.messageLimit));
 });

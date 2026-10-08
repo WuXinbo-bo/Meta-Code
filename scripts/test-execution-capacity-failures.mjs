@@ -102,6 +102,8 @@ function integrationHarness({ discovery = async () => ({}), fault = "" } = {}) {
   const execute = executableFunction(runtimeSource, "server/plugins/orchestration/runtime.ts", "integrateWorkflow", {
     workflowRepository: repository,
     workspaceById: () => ({ id: "workspace", root: process.cwd() }),
+    workflowExecutionRoot: workflow => workflow.executionRoot || workflow.workDirectory,
+    workspaceExecutionCoordinator: { acquire: async () => ({ release: () => {} }) },
     activeWorkflowIntegrations: active,
     runtimeBindingForProvider: async () => { counters.discovery++; if (fault === "discovery") throw initialError; return discovery(); },
     workflowStateFiles: {

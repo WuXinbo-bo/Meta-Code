@@ -6,8 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { taskDeletionPolicy } from "../server/sessionManagement/deletionPolicy.ts";
-import { WorkflowRepository } from "../server/workflows/repository.ts";
+// This script is run after `npm run build`; load the compiled entry points so
+// it exercises the same artifacts as the child backend process.
+import { taskDeletionPolicy } from "../dist-server/sessionManagement/deletionPolicy.js";
+import { WorkflowRepository } from "../dist-server/workflows/repository.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "metacode-task-deletion-"));

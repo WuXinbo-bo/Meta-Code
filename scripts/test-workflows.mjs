@@ -26,8 +26,8 @@ const controllerSource = await fs.readFile(new URL("../server/plugins/orchestrat
 const transactionFileSource = await fs.readFile(new URL("../server/plugins/orchestration/transactionFile.ts", import.meta.url), "utf8");
 assert.match(
   serverSource,
-  /runVerificationCommands\(current\.verificationCommands, workflow\.workDirectory,/,
-  "工作流系统验收必须在独立任务目录执行，不能误用父工作区根目录"
+  /runVerificationCommands\(current\.verificationCommands, workflowExecutionRoot\(workflow\),/,
+  "工作流系统验收必须使用声明的业务执行根目录，兼容工作区、隔离目录和 Worktree"
 );
 assert.match(serverSource, /const readiness = await providerReadiness\(descriptor\.id, ownerUserId, workspace\)/, "工作流 Provider 可用性必须统一检查 CLI、连接和工作区权限");
 assert.match(controllerSource, /app\.post\("\/api\/workflows", withAdmission\(async[\s\S]*?providerReadiness\(plannerEngine, req\.authUser!\.id, workspace\)/, "创建工作流前必须验证规划 Agent 已就绪");
@@ -1149,6 +1149,6 @@ assert.match(serverSource, /workbench-workflow-result 与 workbench-workflow-pla
 assert.match(serverSource, /不要扫描插件内部事件文件/, "Validator 不得默认重扫完整事件日志");
 assert.match(serverSource, /最多执行一次合并的只读验收命令/, "Validator 必须限制重复验收命令");
 assert.match(serverSource, /省略 workdir\/cwd 参数，或只使用相对目录“\.”/, "执行 Agent 不得复制超长绝对工作目录到工具调用");
-assert.match(serverSource, /执行结果路径越出任务目录/, "节点产物必须由任务目录边界校验");
-assert.match(controllerSource, /slice\(0, 48\)\.replace\(\/\[ \.\]\+\$\/g, ""\)/, "Windows 工作流目录截断后不得保留尾随空格或点");
+assert.match(serverSource, /return resolveWorkflowResultPath\(workflow, reportedPath, mustExist\)/, "节点产物必须通过业务执行根目录与真实路径边界校验");
+assert.match(controllerSource, /targetService\.prepare\(/, "执行目标必须由平台通用的目标服务准备，不能在项目中拼接任务目录");
 console.log("workflow plan validation and approval gate OK");

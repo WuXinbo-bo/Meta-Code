@@ -2,6 +2,7 @@ import type { CanonicalActivityRecord } from "../../activity/types.js";
 import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
 
 export type WorkflowEngine = string;
+export type WorkflowExecutionTarget = "workspace" | "isolated" | "worktree";
 export const DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS = 5;
 export const GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS = 20;
 export type WorkflowStatus = "draft" | "planning" | "awaiting_approval" | "queued" | "running" | "integrating" | "completed" | "needs_review" | "paused" | "failed" | "canceled";
@@ -92,6 +93,18 @@ export type WorkflowNodeResult = {
   warnings: string[];
   unresolved: string[];
   machineResultPath: string | null;
+  fileIntegrity?: WorkflowFileIntegrity;
+};
+
+export type WorkflowFileIntegrity = {
+  schemaVersion: 1;
+  verifiedAt?: string;
+  executionRoot: string;
+  inputSnapshotPath: string;
+  excludedInputPaths: string[];
+  includedInputPaths: string[];
+  outputPaths: string[];
+  outputSignatures: Record<string, string>;
 };
 
 export type WorkflowNodeLog = {
@@ -160,8 +173,15 @@ export type WorkflowNodeAttemptRecord = {
 
 export type WorkflowRecord = {
   id: string;
+  /** Optional host-owned task context shared with free-chat sessions. */
+  taskContextId?: string | null;
   ownerUserId: string;
   workspaceId: string;
+  executionTarget: WorkflowExecutionTarget;
+  executionRoot: string;
+  workspaceRoot: string;
+  worktreeId: string | null;
+  /** Compatibility alias for executionRoot; never a plugin state directory. */
   workDirectory: string;
   originId: string;
   parentWorkflowId: string | null;
@@ -178,6 +198,14 @@ export type WorkflowRecord = {
   pausedFromStatus: WorkflowStatus | null;
   pausedPlanningMode: WorkflowPlanningMode | null;
   pausedPlanningMaintenance: boolean;
+  pauseMode?: "checkpoint" | "immediate" | null;
+  pendingMaintenance?: {
+    note: string;
+    intent: "question" | "adjust";
+    plannerEngine: WorkflowEngine;
+    requestedAt: string;
+    resumeAfter: boolean;
+  } | null;
   activePlanVersion: number;
   revision: number;
   reviewNote: string | null;
