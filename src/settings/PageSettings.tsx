@@ -1,4 +1,5 @@
 import { Layers3, PanelLeft, RotateCcw, Sparkles } from "lucide-react";
+import { ThemePreferenceControl } from "./ThemePreferenceControl";
 import {
   WORKSPACE_BROWSER_TAB_LIMIT_OPTIONS,
   type WorkspaceBrowserPreferences
@@ -51,6 +52,7 @@ export function PageSettings({ value, onChange, onResetTabs, onResetLayout }: Pa
         </select>
       </div>
     </section>
+    <ThemePreferenceControl />
     <section className="page-settings-group page-settings-actions">
       <header><PanelLeft size={17} /><div><strong>页面状态</strong><span>只重置本机界面，不会删除任务、文件或对话。</span></div></header>
       <div>
