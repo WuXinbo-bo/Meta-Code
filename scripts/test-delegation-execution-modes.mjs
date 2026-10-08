@@ -103,7 +103,7 @@ function assertTransportMode(capture, expected, cwd) {
     assert.equal(capture.options.cwd, cwd);
     assert.equal(flagValues(capture.args, "--permission-mode")[0], readOnly ? "plan" : "bypassPermissions");
     const disallowed = flagValues(capture.args, "--disallowedTools");
-    for (const tool of ["Task", "Agent"]) assert.ok(disallowed.includes(tool));
+    for (const tool of ["Task", "Agent", "Workflow"]) assert.ok(disallowed.includes(tool));
     for (const tool of ["Write", "Edit", "NotebookEdit", "Bash"]) assert.equal(disallowed.includes(tool), readOnly, tool);
     if (readOnly) {
       assert.deepEqual(flagValues(capture.args, "--allowedTools"), ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]);

@@ -27,6 +27,34 @@ function contentText(value: unknown): string {
   return "";
 }
 
+/**
+ * Classify a completed tool result from structured provider metadata only.
+ * Tool output is untrusted text: words such as "Error" or "exit code 7" in
+ * stdout do not prove that the command failed. Claude's native tool_result
+ * uses is_error, while command adapters may expose a numeric exit_code.
+ */
+export function claudeToolResultFailed(value: unknown): boolean {
+  return claudeToolResultFailedSeen(value, new WeakSet<object>());
+}
+
+function claudeToolResultFailedSeen(value: unknown, seen: WeakSet<object>): boolean {
+  if (Array.isArray(value)) return value.some(item => claudeToolResultFailedSeen(item, seen));
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!source) return false;
+  if (seen.has(source)) return false;
+  seen.add(source);
+  if (source.is_error === true) return true;
+  for (const key of ["exit_code", "exitCode"]) {
+    const candidate = source[key];
+    if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate !== 0;
+    if (typeof candidate === "string" && /^-?\d+$/.test(candidate.trim())) return Number(candidate) !== 0;
+  }
+  for (const key of ["result", "tool_result", "detail", "payload"]) {
+    if (claudeToolResultFailedSeen(source[key], seen)) return true;
+  }
+  return false;
+}
+
 export function claudeToolPermissionError(value: unknown) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   // Tool output is untrusted content: search results and files can discuss

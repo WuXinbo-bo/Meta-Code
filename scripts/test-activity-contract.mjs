@@ -105,6 +105,9 @@ const commonEvent = { type: "tool.completed", rawType: "assistant.tool_result", 
 const actorKinds = ["main", "native", "delegated", "workflow"];
 const acrossSurfaces = actorKinds.map((kind) => canonicalActivityFromEngineEvent(commonEvent, { provider: "claude", actor: { kind, id: `${kind}-1` } }));
 assert.ok(acrossSurfaces.every((entry) => entry.semanticType === "command" && entry.phase === "completed" && entry.rawType === "assistant.tool_result"));
+const failedEvent = canonicalActivityFromEngineEvent({ ...commonEvent, phase: "failed", text: "command failed" }, { provider: "claude", actor: { kind: "delegated", id: "failed-1" } });
+assert.equal(failedEvent.semanticType, "command");
+assert.equal(failedEvent.phase, "failed", "explicit Claude tool failure phase must survive canonical summary mapping");
 
 const malformedValues = [undefined, null, 0, true, "event", [], [null], { actor: [] }, { phase: "impossible" }, { semanticType: "future_type" }];
 for (let index = 0; index < 500; index += 1) assert.doesNotThrow(() => normalizeCanonicalActivity(malformedValues[index % malformedValues.length]));

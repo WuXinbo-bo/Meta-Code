@@ -3,12 +3,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildClaudeProcessArgs, runClaude } from "../dist-server/engines/claude/process.js";
 import { buildClaudeSessionArgs, ClaudeSessionHandle, runClaudeSessionTurn } from "../dist-server/engines/claude/session.js";
-import { claudeToolPermissionError, validateClaudeResult } from "../dist-server/engines/claude/result.js";
+import { claudeToolPermissionError, claudeToolResultFailed, validateClaudeResult } from "../dist-server/engines/claude/result.js";
 import { compactClaudeQuestionPayload, isClaudeQuestionTool } from "../dist-server/engines/claude/questions.js";
 import { codexActivityFromEvent, codexTurnFailure, isCodexReconnectMessage, recordCodexTurnTerminalState } from "../dist-server/engines/codex/events.js";
 import { classifyClaudeFailure, claudeRetryAllowed } from "../dist-server/engines/claude/transport.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+assert.equal(claudeToolResultFailed({ is_error: true, content: "command failed" }), true);
+assert.equal(claudeToolResultFailed({ is_error: false, content: "Error: exit code 7" }), false);
+assert.equal(claudeToolResultFailed({ exit_code: 7, output: "ordinary failure" }), true);
+assert.equal(claudeToolResultFailed({ exitCode: 0, output: "Error: exit code 7" }), false);
+assert.equal(claudeToolResultFailed({ content: "Error: exit code 7" }), false);
+assert.equal(claudeToolResultFailed({ detail: { exitCode: "7" } }), true);
+const cyclicToolResult = {}; cyclicToolResult.payload = cyclicToolResult;
+assert.equal(claudeToolResultFailed(cyclicToolResult), false);
+console.log("Claude structured tool failure classification ignores untrusted output text");
 const codexCommandActivity = codexActivityFromEvent({ type: "item.completed", item: { id: "cmd-1", type: "command_execution", command: "npm run build", aggregated_output: "ok", exit_code: 0, status: "completed" } });
 assert.deepEqual({
   id: codexCommandActivity.id,
@@ -80,8 +89,8 @@ const mainArgs = buildClaudeSessionArgs({
 }, "main-session-test");
 const disallowedIndex = mainArgs.indexOf("--disallowedTools");
 assert.ok(disallowedIndex >= 0);
-assert.deepEqual(mainArgs.slice(disallowedIndex + 1, disallowedIndex + 3), ["Task", "Agent"]);
-assert.ok(!mainArgs.slice(disallowedIndex + 1, disallowedIndex + 3).includes("Bash"));
+assert.deepEqual(mainArgs.slice(disallowedIndex + 1, disallowedIndex + 4), ["Task", "Agent", "Workflow"]);
+assert.ok(!mainArgs.slice(disallowedIndex + 1, disallowedIndex + 4).includes("Bash"));
 
 const standaloneArgs = buildClaudeSessionArgs({
   executableArgs: [],
@@ -118,7 +127,7 @@ const plannerArgs = buildClaudeSessionArgs({
 }, "planner-session-test");
 const plannerDisallowedIndex = plannerArgs.indexOf("--disallowedTools");
 assert.ok(plannerDisallowedIndex >= 0);
-assert.deepEqual(plannerArgs.slice(plannerDisallowedIndex + 1, plannerDisallowedIndex + 7), ["Task", "Agent", "Write", "Edit", "NotebookEdit", "Bash"]);
+assert.deepEqual(plannerArgs.slice(plannerDisallowedIndex + 1, plannerDisallowedIndex + 8), ["Task", "Agent", "Workflow", "Write", "Edit", "NotebookEdit", "Bash"]);
 assert.equal(plannerArgs[plannerArgs.indexOf("--permission-mode") + 1], "default");
 const plannerAllowedIndex = plannerArgs.indexOf("--allowedTools");
 assert.ok(plannerAllowedIndex >= 0);
@@ -139,6 +148,7 @@ assert.ok(readExecutorArgs.includes("--strict-mcp-config"));
 assert.ok(readExecutorArgs.includes("mcp__research__*"));
 assert.ok(readExecutorArgs.includes("Write"));
 assert.ok(readExecutorArgs.includes("Bash"));
+assert.ok(readExecutorArgs.includes("Workflow"));
 console.log("Claude workflow role permission arguments OK");
 
 const events = [];
@@ -174,6 +184,46 @@ assert.ok(!events.some((event) => event.type === "status" && ["status", "thinkin
 assert.ok(events.some((event) => event.type === "status" && event.toolName === "api_retry"));
 assert.ok(events.some((event) => event.sourceId === "system:api_retry" && event.text.includes("HTTP 503")));
 console.log(`Claude adapter OK: ${events.length} normalized events`);
+
+const toolFailureEvents = [];
+const toolFailureResult = await runClaude({
+  executable: process.execPath,
+  executableArgs: [path.join(root, "scripts", "fixtures", "fake-claude-tool-failure-continues.mjs")],
+  cwd: root,
+  prompt: "continue after a tool failure",
+  configDir: path.join(root, ".runtime", "claude-adapter-test"),
+  permissionMode: "bypassPermissions",
+  signal: new AbortController().signal,
+  onEvent: event => toolFailureEvents.push(event)
+});
+const structuredFailure = toolFailureEvents.find(event => event.sourceId === "tool_structured_failure" && event.type === "tool.completed");
+const textErrorSuccess = toolFailureEvents.find(event => event.sourceId === "tool_text_error" && event.type === "tool.completed");
+assert.equal(toolFailureResult.finalText, "完成");
+assert.equal(structuredFailure?.type, "tool.completed");
+assert.equal(structuredFailure?.phase, "failed");
+assert.equal(textErrorSuccess?.type, "tool.completed");
+assert.equal(textErrorSuccess?.phase, "completed");
+assert.ok(toolFailureEvents.some(event => event.type === "turn.completed"));
+assert.ok(!toolFailureEvents.some(event => event.type === "error"), "ordinary tool failure must not become a fatal Agent error");
+
+const toolFailureSessionEvents = [];
+const toolFailureSession = new ClaudeSessionHandle({
+  executable: process.execPath,
+  executableArgs: [path.join(root, "scripts", "fixtures", "fake-claude-tool-failure-continues.mjs")],
+  cwd: root,
+  configDir: path.join(root, ".runtime", "claude-session-test"),
+  permissionMode: "bypassPermissions",
+  signal: new AbortController().signal,
+  onEvent: event => toolFailureSessionEvents.push(event)
+});
+const toolFailureSessionResult = await toolFailureSession.nextTurn();
+assert.equal(toolFailureSessionResult.failed, false);
+assert.equal(toolFailureSessionEvents.find(event => event.sourceId === "tool_structured_failure" && event.type === "tool.completed")?.phase, "failed");
+assert.equal(toolFailureSessionEvents.find(event => event.sourceId === "tool_text_error" && event.type === "tool.completed")?.phase, "completed");
+assert.ok(toolFailureSessionEvents.some(event => event.type === "turn.completed"));
+assert.ok(!toolFailureSessionEvents.some(event => event.type === "error"));
+toolFailureSession.close();
+console.log("Claude ordinary tool failures preserve tool.completed semantics and allow the turn to continue in process/session runners");
 
 const reconnectEvents = [];
 let connectionRead = 0;
