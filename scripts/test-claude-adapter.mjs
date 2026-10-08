@@ -315,6 +315,11 @@ assert.equal(validateClaudeResult({ subtype: "success", stop_reason: "tool_use",
 assert.equal(validateClaudeResult({ subtype: "success", result: "收到。我现在开始执行。", usage: {}, modelUsage: {} }, emptyUsage, { assistantText: "收到。我现在开始执行。", toolStarted: 0, toolCompleted: 0 }).retryable, true);
 const permissionMessage = "Claude requested permissions to use mcp__workbench-workflow-plan__workflow_read_plan, but you haven't granted it yet.";
 assert.equal(claudeToolPermissionError({ content: permissionMessage }), permissionMessage);
+assert.equal(claudeToolPermissionError({ type: "tool_result", content: "An article discusses unauthorized copying and requires approval for distribution." }), "");
+assert.equal(claudeToolPermissionError({ type: "tool_result", is_error: false, content: "Permission denied" }), "");
+assert.equal(claudeToolPermissionError({ type: "tool_result", is_error: false, content: permissionMessage }), "");
+assert.equal(claudeToolPermissionError({ type: "tool_result", is_error: true, content: "Permission denied" }), "Permission denied");
+assert.equal(claudeToolPermissionError({ type: "tool_use_summary", summary: "The file explains permission denied errors." }), "");
 const permissionValidation = validateClaudeResult({ subtype: "success", result: "blocked", usage: { input_tokens: 1 } }, { ...emptyUsage, input_tokens: 1 }, { assistantText: "blocked", toolStarted: 1, toolCompleted: 1, permissionError: permissionMessage });
 assert.equal(permissionValidation.valid, false);
 assert.equal(permissionValidation.retryable, false);
@@ -340,6 +345,30 @@ assert.ok(permissionEvents.some((event) => event.type === "error" && event.text.
 assert.ok(!permissionEvents.some((event) => event.type === "tool.completed" && event.sourceId === "tool_permission"));
 assert.ok(!permissionEvents.some((event) => event.type === "turn.completed"));
 console.log("Claude permission denial classification OK");
+
+const permissionContentEvents = [];
+const permissionContentOptions = {
+  executable: process.execPath,
+  executableArgs: [path.join(root, "scripts", "fixtures", "fake-claude-permission-content.mjs")],
+  cwd: root,
+  prompt: "research authorization terms",
+  configDir: path.join(root, ".runtime", "claude-adapter-test"),
+  permissionMode: "default",
+  signal: new AbortController().signal,
+  onEvent: (event) => permissionContentEvents.push(event)
+};
+const contentResult = await runClaude(permissionContentOptions);
+assert.match(contentResult.finalText, /Research completed/);
+assert.ok(permissionContentEvents.some((event) => event.type === "tool.completed" && event.sourceId === "tool_search"));
+assert.ok(!permissionContentEvents.some((event) => event.type === "error"));
+const permissionContentSessionEvents = [];
+const permissionContentSession = new ClaudeSessionHandle({ ...permissionContentOptions, onEvent: (event) => permissionContentSessionEvents.push(event) });
+const contentSessionResult = await permissionContentSession.nextTurn();
+assert.equal(contentSessionResult.failed, false);
+assert.ok(permissionContentSessionEvents.some((event) => event.type === "turn.completed"));
+assert.ok(!permissionContentSessionEvents.some((event) => event.type === "error"));
+permissionContentSession.close();
+console.log("Claude successful research content does not become a permission failure in either runner");
 
 await assert.rejects(runClaude({
   executable: process.execPath,
