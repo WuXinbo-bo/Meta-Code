@@ -1208,13 +1208,9 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
   if (!workflow) throw new Error("工作流不存在");
   const workspace = workspaceById(workflow.workspaceId, ownerUserId);
   if (!workspace) throw new Error("工作区不存在");
-  const integrationBinding = await runtimeBindingForProvider(workflow.plannerEngine);
-  const integrationRuntime = workflowRepository.beginIntegration(workflowId, integrationBinding);
-  workflow = workflowRepository.get(workflowId, ownerUserId)!;
-  if (integrationRuntime.changed) workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "运行时已更新", "最终验收的运行时或能力已变化，已放弃旧的中间结果并从一致状态重新执行"));
-  workflowStateFiles.sync(workflow);
-  workflowStateFiles.appendEvent(workflow, { type: "integration.started", attempt: workflow.integrationAttempt });
+  if (activeWorkflowIntegrations.has(workflowId)) return;
   const controller = new AbortController();
+  // Claim the scheduler's checked slot before runtime discovery yields.
   activeWorkflowIntegrations.set(workflowId, controller);
   const appendEvent = (phase: "Integrator" | "Validator") => (event: NormalizedEngineEvent) => {
     if (!event.text) return;
@@ -1237,6 +1233,13 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
     throw lastError;
   };
   try {
+    const integrationBinding = await runtimeBindingForProvider(workflow.plannerEngine);
+    controller.signal.throwIfAborted();
+    const integrationRuntime = workflowRepository.beginIntegration(workflowId, integrationBinding);
+    workflow = workflowRepository.get(workflowId, ownerUserId)!;
+    if (integrationRuntime.changed) workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "运行时已更新", "最终验收的运行时或能力已变化，已放弃旧的中间结果并从一致状态重新执行"));
+    workflowStateFiles.sync(workflow);
+    workflowStateFiles.appendEvent(workflow, { type: "integration.started", attempt: workflow.integrationAttempt });
     let candidate = workflow.integratorResult;
     if (!candidate || !workflow.integrationPhase || workflow.integrationPhase === "started") {
       workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "开始最终整合", `由 ${workflow.plannerEngine === "claude" ? "Claude" : "Codex"} Integrator 综合节点成果`));

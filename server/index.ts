@@ -1903,10 +1903,10 @@ function mainCodexThreadOptions(session: Session, workspace: Workspace, settings
 
 // Delegated workers run unattended. Their authorization is owned by the
 // workbench, so they must never inherit an interactive approval policy.
-function delegatedThreadOptions(workspace: Workspace, settings: Settings): ThreadOptions {
+function delegatedThreadOptions(workspace: Workspace, settings: Settings, mode: "analysis" | "review" | "implementation" = "implementation"): ThreadOptions {
   return {
     ...threadOptions(workspace, settings),
-    sandboxMode: "danger-full-access",
+    sandboxMode: mode === "implementation" ? "danger-full-access" : "read-only",
     approvalPolicy: "never"
   };
 }
@@ -2001,7 +2001,17 @@ type MainAgentRunner = (session: Session, workspace: Workspace, prompt: string, 
 
 
 const agentAdapterRegistry = new ProviderHostRegistry<MainAgentRunner, WorkflowPlannerRunner, WorkflowWorkerRunner>(BUILTIN_AGENT_DESCRIPTORS);
-const delegationExecution = createDelegationExecution({ getState: () => state, isWorkbenchDelegationEnabled, runtimeBindingForProvider, agentAdapterRegistry, saveState, upsertDelegatedTask, appendMessage });
+const delegationExecution = createDelegationExecution({
+  getState: () => state,
+  isWorkbenchDelegationEnabled,
+  runtimeBindingForProvider,
+  agentAdapterRegistry,
+  saveState,
+  upsertDelegatedTask,
+  appendMessage,
+  activeDelegationTasks,
+  getExternalActiveCount: () => activeWorkflowNodes.size + activeWorkflowIntegrations.size
+});
 const delegationBroker = createDelegationBroker({ getState: () => state, agentAdapterRegistry, isWorkbenchDelegationEnabled, executionWorkspaceForSession, assertExecutionCwd, activeDelegationTasks, upsertDelegatedTask, saveState, launchDelegatedExecution });
 
 const acpSessionRuntimes = new Map<AgentProviderId, AcpMainSessionRuntime>();
@@ -2173,6 +2183,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
   if (!prompt) throw new Error("Codex 委派任务不能为空");
   const cwd = assertExecutionCwd(workspace, String(input.cwd || workspace.root));
   if (activeDelegationTasks.has(taskId)) throw new Error(`Codex 子任务 ${taskId} 已在运行`);
+  const mode = input.mode === "analysis" || input.mode === "review" ? input.mode : "implementation";
   const controller = new AbortController();
   activeDelegationTasks.set(taskId, { parentTaskId, providerId: "codex", controller });
   const persistedTask = state.delegatedTasks.find((item) => item.id === taskId);
@@ -2180,7 +2191,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     id: taskId,
     parentTaskId,
     parentThreadId: parentSession.engineSessionId || parentSession.id,
-    nickname: String(input.nickname || "Codex 执行官"),
+    nickname: String(input.nickname || (mode === "review" ? "Codex 审查官" : mode === "analysis" ? "Codex 分析官" : "Codex 执行官")),
     path: "Codex CLI · 独立线程",
     status: "running",
     updatedAt: new Date().toISOString(),
@@ -2188,20 +2199,23 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     usage: emptyUsage(),
     logs: [],
     task: prompt,
+    mode,
     cwd
   };
-  upsertCodexBridgeMessage(parentSession, agent);
-  await saveState();
   try {
+    upsertCodexBridgeMessage(parentSession, agent);
+    await saveState();
     const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [], nativeProviderHome("codex", parentSession.ownerUserId));
     const executionWorkspace = { ...workspace, root: cwd } satisfies Workspace;
-    const workerThreadOptions = delegatedThreadOptions(executionWorkspace, state.settings);
+    const workerThreadOptions = delegatedThreadOptions(executionWorkspace, state.settings, mode);
     const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map((item) => String(item).trim()).filter(Boolean) : [];
     const skillContext = delegatedSkillContextBlock(parentSession, "codex", cwd);
     const workerPrompt = [
       "你是 Meta Code 工作台中的 Codex 子 Agent。请处理下面明确委派的任务，不要擅自扩大范围、重新规划整个项目或调用其他 Agent。",
       `当前工作区根目录是：${cwd}。所有工作区产物都必须以此目录为根解析；不要把 Skill 指示库根目录当作工作区。`,
-      "直接在当前工作区检查、修改代码并运行必要的测试。完成后返回：修改摘要、测试结果、未完成事项和风险。",
+      mode === "implementation"
+        ? "直接在当前工作区检查、修改代码并运行必要的测试。完成后返回：修改摘要、测试结果、未完成事项和风险。"
+        : "本任务仅限分析或审查：不得修改任何文件，只能读取、分析和报告。完成后返回：结论、证据、未完成事项和风险。",
       skillContext,
       `具体任务：\n${prompt}`,
       acceptance.length ? `验收标准：\n${acceptance.map((item) => `- ${item}`).join("\n")}` : ""
@@ -2446,7 +2460,7 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "codex", nickname: agent.nickname,
-    cwd: agent.cwd, task: agent.task, status: agent.status, updatedAt: agent.updatedAt,
+    cwd: agent.cwd, task: agent.task, mode: agent.mode, status: agent.status, updatedAt: agent.updatedAt,
     usage: agent.usage, finalText: agent.finalText, agentRevision: agent.revision
   });
   const sourceId = `codex-worker:${agent.id}`;
@@ -2454,6 +2468,7 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
   const payload = {
     type: "codex_subagent",
     action: "spawn_agent",
+    mode: agent.mode,
     provider: "codex",
     providerId: identity.providerId,
     identity,
@@ -2805,9 +2820,9 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
     mode,
     cwd
   };
-  upsertClaudeBridgeMessage(parentSession, agent);
-  await saveState();
   try {
+    upsertClaudeBridgeMessage(parentSession, agent);
+    await saveState();
     const runtime = await getClaudeRuntime();
     if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
     const command = resolveClaudeCommand(runtime.path);
@@ -2838,7 +2853,9 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
       resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey }),
       configDir: nativeProviderHome("claude", parentSession.ownerUserId),
       mcpConfigPath,
-      permissionMode: "bypassPermissions",
+      permissionMode: mode === "implementation" ? "bypassPermissions" : "plan",
+      allowedTools: mode === "implementation" ? undefined : [...CLAUDE_WORKFLOW_READ_TOOLS],
+      disallowedTools: mode === "implementation" ? undefined : [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS],
       ownerId: taskId,
       signal: controller.signal,
       onEvent: async (event) => {
@@ -3491,8 +3508,6 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
   const controller = new AbortController();
   activeDelegationTasks.set(taskId, { parentTaskId, providerId: manifest.id, controller });
   const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map(String).map((item) => item.trim()).filter(Boolean) : [];
-  const connectionProfile = providerConnectionFor(manifest.id, parentSession.ownerUserId);
-  const configValues = providerConnectionConfigValues(connectionProfile, recordOf(input.adapterOptions?.configValues) || undefined);
   const runtimeSessionId = `delegated:${taskId}`;
   const agent: AcpBridgeAgentState = {
     id: taskId,
@@ -3510,8 +3525,6 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
     mode,
     cwd
   };
-  upsertAcpBridgeMessage(parentSession, agent);
-  await saveState();
   const delegatedPrompt = [
     `你是 Meta Code 工作台中的独立 ${manifest.displayName} 子 Agent。只处理下面明确委派的任务，不要重新规划整个项目或继续委派其他 Agent。`,
     `当前工作区根目录是：${cwd}。所有读取、修改和命令都必须限制在此目录内。`,
@@ -3523,6 +3536,10 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
   let eventIndex = 0;
   let finalText = "";
   try {
+    const connectionProfile = providerConnectionFor(manifest.id, parentSession.ownerUserId);
+    const configValues = providerConnectionConfigValues(connectionProfile, recordOf(input.adapterOptions?.configValues) || undefined);
+    upsertAcpBridgeMessage(parentSession, agent);
+    await saveState();
     await runtime.run({
       workbenchSessionId: runtimeSessionId,
       ownerUserId: parentSession.ownerUserId,
@@ -5245,6 +5262,7 @@ const orchestrationScheduler = createOrchestrationScheduler({
   activeWorkflowIntegrations,
   activeDelegationTasks,
   integrateWorkflow,
+  getDelegationActiveCount: () => delegationExecution.activeCount(),
   currentWorkflowProviderCapabilities,
   runtimeBindingForProvider,
   WORKFLOW_RUNNER_ID,

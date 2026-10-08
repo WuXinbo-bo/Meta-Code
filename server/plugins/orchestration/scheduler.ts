@@ -23,6 +23,7 @@ export type OrchestrationSchedulerPorts = {
   activeWorkflowNodes: Map<string, AbortController>;
   activeWorkflowIntegrations: Map<string, AbortController>;
   activeDelegationTasks: Map<string, { parentTaskId: string; providerId: string; controller: AbortController; }>;
+  getDelegationActiveCount?: () => number;
   integrateWorkflow: (workflowId: string, ownerUserId: string) => Promise<void>;
   currentWorkflowProviderCapabilities: (ownerUserId: string, workspace?: Workspace | undefined) => Promise<WorkflowProviderCapabilities>;
   runtimeBindingForProvider: (providerId: string) => Promise<RuntimeExecutionIdentity>;
@@ -137,7 +138,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
   const hasRunnableNode = workflow.nodes.some((node) => ["pending", "ready", "interrupted"].includes(node.status) && node.dependsOn.every((id) => completed.has(id)));
   if (hasRequiredFailure && !hasActiveNode && !hasRunnableNode) { workflowRepository.updateRun(workflowId, "needs_review"); syncWorkflowProtocolFiles(workflowId, ownerUserId); appendWorkflowProtocolEvent(workflowId, ownerUserId, "workflow.needs_review", { reason: "required_node_failed" }); workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workflow.workspaceId, workflow.revision + 1); return; }
   if (workflow.nodes.length && workflow.nodes.every((node) => node.status === "completed" || (!node.required && ["failed", "blocked", "skipped", "canceled"].includes(node.status)))) {
-    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + activeDelegationTasks.size;
+    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
     if (globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
       scheduleTick(workflowId, ownerUserId, 1_000);
       return;
@@ -154,34 +155,46 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
     if (node.workspaceAccess === "write" && running.some((other) => other.workspaceAccess === "write" && scopesOverlap(workflowAuthorizedWriteScopes(node.writeScope), workflowAuthorizedWriteScopes(other.writeScope)))) continue;
     const workflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
     const taskLimit = workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS;
-    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + activeDelegationTasks.size;
+    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
     if (workflowActive >= taskLimit || globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) break;
     if (node.provider === "auto") { node.provider = resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities); workflowRepository.updateNode(node); }
     const checkpointRoot = path.join(workflowStateFiles.directoryFor(workflow.id), "nodes", node.id, "plans", String(node.planVersion), "attempts");
     let attempt: WorkflowNodeAttemptRecord;
     try {
       const runtimeBinding = await runtimeBindingForProvider(node.provider);
+      // Runtime discovery may yield while another workflow or delegation
+      // occupies the budget. Recheck immediately before the synchronous claim.
+      const currentWorkflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
+      const currentGlobalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
+      if (currentWorkflowActive >= taskLimit || currentGlobalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
+        scheduleTick(workflowId, ownerUserId, 1_000);
+        break;
+      }
       attempt = workflowRepository.claimNodeAttempt(node.recordId, WORKFLOW_RUNNER_ID, checkpointRoot, new Date(Date.now() + 5 * 60_000).toISOString(), runtimeBinding);
     }
     catch { continue; }
     const claimedNode = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!claimedNode) continue;
-    syncWorkflowProtocolFiles(workflowId, ownerUserId);
-    appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.started", { provider: claimedNode.provider }, node.id, attempt.attempt);
     const controller = new AbortController(); const key = `${workflowId}:${node.id}`; workflowNodeIntents.delete(key); activeWorkflowNodes.set(key, controller);
-    const leaseHeartbeat = setInterval(() => {
-      const renewed = workflowRepository.renewNodeLease(claimedNode.recordId, attempt.id, WORKFLOW_RUNNER_ID, new Date(Date.now() + 5 * 60_000).toISOString());
-      if (!renewed) controller.abort(new Error("节点执行租约已失效"));
-    }, 30_000);
-    leaseHeartbeat.unref();
-    const releaseSkillProjection = skillProjectionManager.acquireTemporarySkills(
-      `${workspace.id}:workflow:${workflowId}`,
-      workflow.workDirectory,
-      claimedNode.skills
-    );
-    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
-    running.push(claimedNode);
-    workflowEvent(workflowId, "workflow.node.started", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-    void executeWorkflowNode(workflowId, ownerUserId, node.id, controller, attempt, WORKFLOW_RUNNER_ID).then((result) => {
+    let leaseHeartbeat: NodeJS.Timeout | undefined;
+    let releaseSkillProjection = () => {};
+    void Promise.resolve().then(() => {
+      controller.signal.throwIfAborted();
+      syncWorkflowProtocolFiles(workflowId, ownerUserId);
+      appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.started", { provider: claimedNode.provider }, node.id, attempt.attempt);
+      releaseSkillProjection = skillProjectionManager.acquireTemporarySkills(
+        `${workspace.id}:workflow:${workflowId}`,
+        workflow.workDirectory,
+        claimedNode.skills
+      );
+      leaseHeartbeat = setInterval(() => {
+        const renewed = workflowRepository.renewNodeLease(claimedNode.recordId, attempt.id, WORKFLOW_RUNNER_ID, new Date(Date.now() + 5 * 60_000).toISOString());
+        if (!renewed) controller.abort(new Error("节点执行租约已失效"));
+      }, 30_000);
+      leaseHeartbeat.unref();
+      workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
+      workflowEvent(workflowId, "workflow.node.started", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
+      return executeWorkflowNode(workflowId, ownerUserId, node.id, controller, attempt, WORKFLOW_RUNNER_ID);
+    }).then((result) => {
       if (workflowNodeIntents.has(key)) throw new Error("节点已收到用户控制请求");
       const latest = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!latest) return;
       const finishedAt = new Date().toISOString();
@@ -259,18 +272,22 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
       latest.nextRetryAt = retry ? new Date(Date.now() + delay).toISOString() : null;
       latest.leaseExpiresAt = null; latest.finishedAt = ["failed", "blocked", "canceled"].includes(latest.status) ? finishedAt : null; workflowRepository.updateNode(latest);
       workflowRepository.checkpointNodeAttempt(attempt.id, { status: runStatus === "canceled" ? "abandoned" : stageRetry ? "interrupted" : "failed", leaseExpiresAt: null, error: latest.error, finishedAt: stageRetry ? null : finishedAt });
+      if (retry) scheduleTick(workflowId, ownerUserId, delay);
       syncWorkflowProtocolFiles(workflowId, ownerUserId);
       appendWorkflowProtocolEvent(workflowId, ownerUserId, retry ? "node.retry_wait" : "node.failed", { error: latest.error, category, retry, stage: stageRetryError?.stage || null }, node.id, latest.attempt);
       workflowEvent(workflowId, "workflow.node.failed", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-      if (retry) scheduleTick(workflowId, ownerUserId, delay);
     }).finally(() => {
-      releaseSkillProjection();
-      workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
-      clearInterval(leaseHeartbeat);
-      activeWorkflowNodes.delete(key);
-      workflowNodeIntents.delete(key);
-      queueWorkflowTick(workflowId, ownerUserId);
-    });
+      try {
+        releaseSkillProjection();
+        workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
+      } finally {
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+        activeWorkflowNodes.delete(key);
+        workflowNodeIntents.delete(key);
+        queueWorkflowTick(workflowId, ownerUserId);
+      }
+    }).catch((error) => console.error("Workflow node state or cleanup failed", error));
+    running.push(claimedNode);
   }
 }
 
