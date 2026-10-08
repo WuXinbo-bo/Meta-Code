@@ -119,6 +119,7 @@ import type { SessionInventoryItem, SessionManagementSummary, SessionRecoverySna
 import { runTransitionConflict, type RunAbortIntent } from "./sessionRuns/transitions.js";
 import { normalizeSessionScope } from "./sessionScope.js";
 import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
+import { summarizeMessagePayload } from "./sessionMessagePayload.js";
 import {
 DEFAULT_WORKBENCH_INTERFACE_SETTINGS,
 normalizeWorkbenchInterfaceSettings
@@ -8605,15 +8606,7 @@ function messageForResponse(source: Message | null | undefined, index = 0): Mess
   if (payload) {
     const serialized = JSON.stringify(payload);
     if (serialized.length > 24_000 || ["command_execution", "file_read", "file_change", "tool_call"].includes(candidate.eventType || "")) {
-      message.payload = {
-        type: payload.type,
-        name: payload.name,
-        tool_use_id: payload.tool_use_id,
-        agent_id: payload.agent_id,
-        status: payload.status,
-        exit_code: payload.exit_code,
-        truncated: true
-      };
+      message.payload = summarizeMessagePayload(payload);
     }
   }
   return message;
