@@ -58,8 +58,19 @@ assert.match(render({ loading: true, error: "连接中断" }), /第一条回复/
 assert.match(render({ logs: [log(1, "unknown", "future event")] }), /未识别|unknown|future event/, "unknown events remain accessible");
 assert.match(render({ logs: [log(1, "error", "failed command")] }), /failed command/);
 const failedTool = render({ logs: [{ ...log(1, "command", "failed validation"), phase: "failed", detail: { command: "npm test", output: "Validation failed" } }] });
-assert.match(failedTool, /activity-summary-group[^>]*open=""|open=""[^>]*activity-summary-group/, "a failed tool is not hidden inside a completed summary");
-assert.match(failedTool, /Validation failed/, "failed tool details are initially visible");
+assert.match(failedTool, /运行 1 个命令/, "failed executions retain the same compact command disclosure");
+assert.doesNotMatch(failedTool, /<details[^>]*open=""/, "failed command groups are initially collapsed");
+assert.doesNotMatch(failedTool, /Validation failed|npm test/, "failed output remains available only after manual expansion");
+for (const status of ["running", "completed", "failed"]) {
+  for (const category of ["command", "file", "read", "search", "tool", "mcp", "unknown", "error"]) {
+    const failed = render({ status, logs: [{ ...log(1, category, "failure summary"), phase: "failed", detail: { output: "failure output" } }] });
+    assert.doesNotMatch(failed, /<details[^>]*open=""/, `${category}: ${status} does not auto-reveal a failed entry`);
+    assert.doesNotMatch(failed, /failure output/, `${category}: ${status} keeps failure detail collapsed`);
+  }
+}
+const planLog = { ...log(1, "todo", "更新计划"), phase: "running", detail: { items: [{ text: "执行计划检查", completed: false }] } };
+assert.match(render({ status: "running", logs: [planLog] }), /agent-plan-view/, "plan tool updates retain their shared plan presentation");
+assert.doesNotMatch(render({ status: "running", logs: [planLog] }), /<details[^>]*open=""/, "plan tool updates also default collapsed");
 const reply = renderToStaticMarkup(React.createElement(AssistantReply, { text: "**正文**", avatar: "Agent", actions: React.createElement("button", null, "复制") }));
 assert.match(reply, /<strong>正文<\/strong>/);
 assert.match(reply, /复制/);

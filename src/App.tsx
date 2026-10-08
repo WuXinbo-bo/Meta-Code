@@ -4190,9 +4190,7 @@ export function App() {
       if (!createdSession) {
         setPrompt(initialPrompt);
         setDraftAttachments(initialAttachments);
-        setDialog(null);
-        setView("chat");
-        setNotice(error instanceof Error ? error.message : String(error));
+        throw error;
       } else {
         setNotice(`新任务已保留，但后续处理未完成：${error instanceof Error ? error.message : String(error)}`, "warning");
       }
