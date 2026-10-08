@@ -91,6 +91,10 @@
 .action-menu-popup > button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 5px 8px; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text-secondary); background: transparent; text-align: left; font-size: 12px; cursor: pointer; }
 .action-menu-popup > button:hover { background: var(--mc-hover); color: var(--mc-text); }
 .action-menu-popup.task-more-menu { width: min(300px, calc(100vw - 16px)); }
+.topbar-actions .task-delete-trigger { color: var(--mc-text-tertiary); }
+.topbar-actions .task-delete-trigger:hover,
+.topbar-actions .task-delete-trigger:focus-visible { color: var(--mc-danger); background: color-mix(in srgb, var(--mc-danger) 10%, transparent); }
+.topbar-actions .task-delete-trigger:disabled { cursor: wait; opacity: .55; }
 .mobile-provider-summary { display: none; }
 .topbar-title { display: flex; flex: 1; min-width: 0; align-items: center; gap: 5px; overflow: hidden; }
 .topbar-title .title-block { min-width: 0; overflow: hidden; }
