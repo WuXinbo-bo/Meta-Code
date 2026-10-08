@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import readline from "node:readline";
 import type { EngineUsage, NormalizedEngineEvent } from "../types.js";
-import { claudeToolPermissionError, validateClaudeResult, type ClaudeTurnActivity } from "./result.js";
+import { claudeToolPermissionError, claudeToolResultFailed, validateClaudeResult, type ClaudeTurnActivity } from "./result.js";
 import { registerProcessTree, terminateProcessTree } from "../../processTree.js";
 import { WorkbenchTimeoutError } from "../../orchestration/timeouts.js";
 import { ClaudeTransportError, claudeApiRetryExhaustsProcess, classifyClaudeFailure, CLAUDE_DEFAULT_RETRY_POLICY, type ClaudeRetryPolicy, type ClaudeRuntimeMode } from "./transport.js";
@@ -51,8 +51,11 @@ export type ClaudeSessionTurnOutcome = {
   result: ClaudeSessionTurnResult;
 };
 
-export const CLAUDE_MAIN_DISALLOWED_TOOLS = ["Task", "Agent"] as const;
-export const CLAUDE_PLANNER_DISALLOWED_TOOLS = ["Task", "Agent", "Write", "Edit", "NotebookEdit", "Bash"] as const;
+/** Native recursive worker entry points are disabled for bridge/workflow runs.
+ * Standalone native mode passes disallowNativeAgents:false and keeps them. */
+export const CLAUDE_NATIVE_AGENT_TOOLS = ["Task", "Agent", "Workflow"] as const;
+export const CLAUDE_MAIN_DISALLOWED_TOOLS = CLAUDE_NATIVE_AGENT_TOOLS;
+export const CLAUDE_PLANNER_DISALLOWED_TOOLS = [...CLAUDE_NATIVE_AGENT_TOOLS, "Write", "Edit", "NotebookEdit", "Bash"] as const;
 
 export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "disallowNativeAgents" | "disallowedTools" | "allowedTools" | "additionalDirectories">, sessionId: string) {
   const args = [
@@ -243,15 +246,17 @@ export class ClaudeSessionHandle {
           completedTools.add(id);
           const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content || "");
           const permissionError = claudeToolPermissionError(block);
+          const failed = claudeToolResultFailed(block);
           if (permissionError) activity.permissionError = permissionError;
-          await this.options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: id, toolName: toolNames.get(id) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: block, detail: { input: toolInputs.get(id), output: text, result: block } });
+          await this.options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: id, toolName: toolNames.get(id) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: block, phase: permissionError ? "failed" : failed ? "failed" : "completed", detail: { input: toolInputs.get(id), output: text, result: block } });
         }
       } else if (item.type === "tool_progress" || item.type === "tool_use_summary") {
         const id = String(item.tool_use_id || item.uuid || crypto.randomUUID()); const name = String(item.tool_name || toolNames.get(id) || "工具"); if (item.tool_name) toolNames.set(id, name);
         const text = String(item.message || item.summary || "工具状态已更新");
         const permissionError = claudeToolPermissionError(item);
+        const failed = claudeToolResultFailed(item);
         if (permissionError) activity.permissionError = permissionError;
-        await this.options.onEvent({ type: permissionError ? "error" : item.type === "tool_progress" ? "tool.started" : "tool.completed", rawType: item.type, sourceId: id, toolName: name, text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: item, detail: { input: toolInputs.get(id), output: text, result: item } });
+        await this.options.onEvent({ type: permissionError ? "error" : item.type === "tool_progress" ? "tool.started" : "tool.completed", rawType: item.type, sourceId: id, toolName: name, text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: item, phase: permissionError ? "failed" : item.type === "tool_progress" ? "running" : failed ? "failed" : "completed", detail: { input: toolInputs.get(id), output: text, result: item } });
       } else if (item.type === "rate_limit_event" || item.type === "auth_status") {
         await this.options.onEvent({ type: "status", sourceId: String(item.uuid || item.type), toolName: item.type, text: String(item.message || "Claude 状态已更新"), payload: item });
       } else if (item.type === "result") {

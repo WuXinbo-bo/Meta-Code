@@ -145,6 +145,7 @@ flowchart TD
 规划阶段 MUST 是只读过程：
 
 - 禁用原生子 Agent。
+- Claude 规划器和编排节点执行器还必须禁用原生 `Task`、`Agent`、`Workflow` 入口；这些入口会绕过编排器的审批、额度、依赖和日志协议。独立原生会话是否开放由其 capability 明确决定。
 - 禁用工作台委派桥接。
 - Codex 使用只读 sandbox。
 - Claude 禁用写入和修改类工具。

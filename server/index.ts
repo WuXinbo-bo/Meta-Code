@@ -2548,9 +2548,9 @@ function claudeActivityMetadata(event: NormalizedEngineEvent): { category: strin
     : eventType === "todo_list" ? "todo"
     : ["engine_status", "session.started", "turn.started", "turn.completed"].includes(eventType) ? "status"
     : "tool";
-  const phase = event.type === "tool.completed" || event.type === "turn.completed" ? "completed"
+  const phase = event.phase || (event.type === "tool.completed" || event.type === "turn.completed" ? "completed"
     : event.type === "tool.started" || event.type === "turn.started" ? "running"
-    : "started";
+    : "started");
   return { category, phase };
 }
 

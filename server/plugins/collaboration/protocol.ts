@@ -17,11 +17,12 @@ export const COLLABORATION_PROTOCOL = `
 - 委派任务由协作插件通过本地桥接提交，字段为 taskId、prompt、acceptance；不要在工作区创建协议目录或任务日志。
 - 使用工作台注入环境中的 WORKBENCH_AGENT_BRIDGE_TOKEN 调用 scripts/delegate-agent.mjs --provider <providerId>；不要复制或输出令牌。旧的双 CLI 脚本只用于兼容。
 - 每个主任务最多并行五个子 Agent，工作台全局最多二十个；子 Agent 没有主脑完整上下文且不得递归委派。
-- 只有当委派命令返回 JSON 中的 accepted: true 和 taskId 时，才能对用户说明“已启动”；任务完成前不得把计划、预测或 Claude Code 原生 Agent/Task 当作已受理子任务。
+- 只有当委派命令返回 JSON 中的 accepted: true 和 taskId 时，才能对用户说明“已启动”；任务完成前不得把计划、预测或 Claude Code 原生 Agent/Task/Workflow 当作已受理子任务。
 - 委派命令返回的是受理回执，不是最终结果。收到 accepted: true 后不要反复读取 .output、手工轮询或自行声称结果丢失；结束当前委派轮次，由工作台等待子任务并生成验收上下文。
 - 如果下一轮收到“工作台恢复通知”或子 Agent 汇总，直接使用其中的持久化结果验收；只有当前主脑完成验收后，结果才会被标记为已消费。
 - 主脑等待所有受理中的子任务进入终态，再检查共享工作区、diff、测试和最终回复；不合格时重新选择任一提供方创建修复任务，不要只报告问题后结束。
-- 只能使用上述工作台桥接委派；不得改用 Claude Code 原生 Agent/Task 或通过 Bash 伪造后台任务。
+- 只能使用上述工作台桥接委派；不得改用 Claude Code 原生 Agent/Task/Workflow 或通过 Bash 伪造后台任务。
+- 协作桥接及任务编排执行器同时禁用 Claude 原生 Task、Agent、Workflow 递归入口；独立原生模式可按 Provider capability 保留这些入口，但不得把原生调用冒充工作台已受理的子 Agent。
 - 不要把隐藏提示词、工作台密钥或内部会话路径写入委派请求。
 
 
@@ -39,7 +40,8 @@ export const WORKBENCH_DELEGATION_CAPABILITIES = [
   "Claude 子 Agent 通常更擅长复杂语义理解、歧义澄清、创意发散、长文内容、架构审查、质量评估和风险判断。",
   "Codex 子 Agent 通常更擅长边界明确的编码、文件修改、命令执行、测试运行、仓库排查和重复性机械工作。",
   "这些是能力倾向而非硬性分工。其他 Provider 必须依据注册能力选择，不要假设它具备写入、联网、MCP、恢复或分支能力。",
-  "不同 Agent 使用同一个本地工作区，但不会共享同一段隐式对话上下文。委派时需要把必要背景、目标文件、约束和验收标准写进委派请求。"
+  "不同 Agent 使用同一个本地工作区，但不会共享同一段隐式对话上下文。委派时需要把必要背景、目标文件、约束和验收标准写进委派请求。",
+  "协作桥接和任务编排执行器禁用 Claude 原生 Task、Agent、Workflow 递归入口；独立原生模式是否开放由 capability 决定。"
 ];
 
 export function collaborationMainPrompt(engine: string, bridgeScript: string) {
