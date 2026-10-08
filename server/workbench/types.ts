@@ -153,6 +153,11 @@ export type State = {
 };
 
 export type DelegatedTask = {
+  requestedProvider?: AgentProviderId | "auto";
+  selectedProvider?: AgentProviderId;
+  routingPolicy?: Record<string, unknown>;
+  traceId?: string;
+  reviewProvider?: AgentProviderId;
   capabilityRequirements?: string[];
   adapterOptions?: Record<string, unknown>;
   id: string;
@@ -225,4 +230,3 @@ export type AgentThreadIdentity = {
   parentSessionId: string;
   identityVersion: 1;
 };
-

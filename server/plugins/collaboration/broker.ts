@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type { Usage } from "@openai/codex-sdk";
-import { normalizeProviderId, type AgentProviderId, type DelegationMode } from "../../agents/types.js";
+import { normalizeProviderId, type AgentDescriptor, type AgentProviderId, type DelegationMode } from "../../agents/types.js";
 import type { AgentAdapterRegistry } from "../../agents/registry.js";
 import type { State, Session, Workspace, DelegatedTask } from "../../workbench/types.js";
 import { delegationIdempotency } from "../../orchestration/contracts.js";
+import { resolveAgentRoute, type AgentRoutingPolicy } from "../../agents/routing.js";
 
 export type AgentBridgeRequest = {
   taskId?: string;
@@ -18,11 +19,12 @@ export type AgentBridgeRequest = {
   idempotencyKey?: string;
   capabilityRequirements?: string[];
   adapterOptions?: Record<string, unknown>;
+  routingPolicy?: AgentRoutingPolicy;
 };
 
 export type DelegationBrokerPorts = {
   getState: () => Pick<State, "sessions" | "delegatedTasks">;
-  agentAdapterRegistry: Pick<AgentAdapterRegistry, "requireDescriptor" | "requireCapabilities">;
+  agentAdapterRegistry: Pick<AgentAdapterRegistry, "requireDescriptor" | "requireCapabilities"> & { list?: () => AgentDescriptor[] };
   isWorkbenchDelegationEnabled: (session: Pick<Session, "id">) => boolean;
   executionWorkspaceForSession: (session: Session) => Workspace | undefined;
   assertExecutionCwd: (workspace: Workspace, cwd: string) => string;
@@ -71,7 +73,11 @@ export function createDelegationBroker(ports: DelegationBrokerPorts) {
   let tail = Promise.resolve();
 async function queueDelegatedTask(input: AgentBridgeRequest, requestedProvider: AgentProviderId) {
   if (Number(input.depth || 0) >= 1) throw new Error("子 Agent 不允许递归委派");
-  const provider = normalizeProviderId(requestedProvider);
+  const requestedRoute = requestedProvider === "auto" ? "auto" as const : normalizeProviderId(requestedProvider);
+  const route = requestedRoute === "auto"
+    ? resolveAgentRoute("auto", agentAdapterRegistry.list?.() || [], input.routingPolicy)
+    : { requestedProvider: requestedRoute, selectedProvider: requestedRoute, policy: input.routingPolicy || { strategy: "explicit" as const }, candidates: [{ providerId: requestedRoute, score: 1_000, reasons: ["用户明确指定"] }] };
+  const provider = route.selectedProvider;
   const descriptor = agentAdapterRegistry.requireDescriptor(provider);
   if (!descriptor.capabilities.delegation.worker) throw new Error(`${descriptor.displayName} 不支持工作台委派`);
   const capabilityRequirements = agentAdapterRegistry.requireCapabilities(provider, input.capabilityRequirements);
@@ -120,7 +126,9 @@ async function queueDelegatedTask(input: AgentBridgeRequest, requestedProvider: 
     ? input.mode
     : provider === "claude" ? "analysis" : "implementation";
   upsertDelegatedTask({
-    id: taskId, parentSessionId: parentTaskId, provider, adapterId: descriptor.adapterId, mode,
+    id: taskId, parentSessionId: parentTaskId, provider, requestedProvider: requestedRoute, selectedProvider: provider,
+    routingPolicy: route.policy as Record<string, unknown>, traceId: `delegation-${crypto.randomUUID()}`,
+    adapterId: descriptor.adapterId, mode,
     nickname: String(input.nickname || `${descriptor.shortName} 子 Agent`),
     cwd, task: prompt, status: "queued", updatedAt: now, usage: emptyUsage(),
     idempotencyKey, requestFingerprint: fingerprint,

@@ -26,6 +26,11 @@ export const BUILTIN_AGENT_DESCRIPTORS: AgentProviderManifestV1[] = [
       workflow: { planner: true, worker: true },
       configuration: { models: true, reasoningEffort: true, reasoningEffortValues: ["low", "medium", "high", "xhigh", "max"], permissionProfile: true }
     },
+    // Managed sessions route child work through the workbench protocol. Native
+    // Task/Agent/Workflow entry points remain available in Native mode.
+    workbenchCapabilities: { delegation: { nativeSubagents: false } },
+    transportCapabilities: { kind: "native", enhanced: true, standard: "native" },
+    versionRequirements: { minAdapterSdkVersion: AGENT_ADAPTER_SDK_VERSION, runtimeId: "claude" },
     configurationSchema: {
       modelSource: "adapter",
       defaultModel: "claude-sonnet-4-5",
@@ -60,6 +65,9 @@ export const BUILTIN_AGENT_DESCRIPTORS: AgentProviderManifestV1[] = [
       workflow: { planner: true, worker: true },
       configuration: { models: true, reasoningEffort: true, reasoningEffortValues: ["minimal", "low", "medium", "high", "xhigh"], permissionProfile: true }
     },
+    workbenchCapabilities: { delegation: { nativeSubagents: false } },
+    transportCapabilities: { kind: "native", enhanced: true, standard: "native" },
+    versionRequirements: { minAdapterSdkVersion: AGENT_ADAPTER_SDK_VERSION, runtimeId: "codex" },
     configurationSchema: {
       modelSource: "adapter",
       defaultModel: "gpt-5.4",
