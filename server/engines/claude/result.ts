@@ -28,11 +28,18 @@ function contentText(value: unknown): string {
 }
 
 export function claudeToolPermissionError(value: unknown) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  // Tool output is untrusted content: search results and files can discuss
+  // authorization without representing a CLI permission failure.
+  if (source?.is_error === false) return "";
   const text = contentText(value).replace(/\s+/g, " ").trim();
   if (!text) return "";
-  return /requested permissions? to use .*haven't granted|permission (?:isn't|wasn't|hasn't been|not) granted|requires approval|permission denied|not authorized|unauthori[sz]ed/i.test(text)
-    ? text
-    : "";
+  const explicitError = source?.is_error === true || Boolean(source?.error);
+  if (!explicitError) {
+    // Older CLI versions omit is_error for the native approval message.
+    return /^(?:Error:\s*)?(?:Claude )?requested permissions? to use [^\n]+, but you haven't granted (?:it|them) yet\.?$/i.test(text) ? text : "";
+  }
+  return /requested permissions? to use .*haven't granted|permission (?:isn't|wasn't|hasn't been|not) granted|requires approval|permission denied|not authorized|unauthori[sz]ed/i.test(text) ? text : "";
 }
 
 function isProgressOnly(text: string) {
