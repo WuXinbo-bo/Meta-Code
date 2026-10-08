@@ -1,5 +1,5 @@
 import { Layers3, PanelLeft, RotateCcw, Sparkles } from "lucide-react";
-import { ThemePreferenceControl } from "./ThemePreferenceControl";
+import { ThemePreferenceControl } from "../branding/ThemeToggle";
 import {
   WORKSPACE_BROWSER_TAB_LIMIT_OPTIONS,
   type WorkspaceBrowserPreferences

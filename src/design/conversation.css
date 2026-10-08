@@ -1,4 +1,5 @@
 .chat-view {
+  grid-template-columns: minmax(0, 1fr);
   container-name: conversation;
   container-type: inline-size;
   background: var(--mc-surface);
@@ -426,6 +427,30 @@
 .subagent-card-title b { color: var(--mc-text) !important; font-size: 11px !important; }
 .subagent-card-copy > small { color: var(--mc-text-tertiary); font-size: 11px; }
 
+.agent-task-tooltip-trigger { display: inline-flex; min-width: 0; }
+.agent-activity-rail-items > .agent-task-tooltip-trigger { flex: 0 0 auto; }
+.agent-thread-tabs > .agent-task-tooltip-trigger { flex: 0 0 auto; }
+.agent-task-tooltip {
+  position: fixed;
+  z-index: 130;
+  display: grid;
+  width: min(280px, calc(100vw - 16px));
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--mc-line);
+  border-radius: var(--mc-r-md);
+  color: var(--mc-text);
+  background: var(--mc-overlay);
+  box-shadow: var(--mc-shadow-menu);
+  text-align: left;
+  pointer-events: none;
+  animation: agent-tooltip-enter var(--mc-fast) ease-out;
+}
+.agent-task-tooltip strong { overflow: hidden; color: var(--mc-text); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.agent-task-tooltip small { color: var(--mc-text-tertiary); font-size: 11px; }
+.agent-task-tooltip p { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; margin: 2px 0 0; color: var(--mc-text-secondary); font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+@keyframes agent-tooltip-enter { from { opacity: 0; } to { opacity: 1; } }
+
 .agent-plan-view {
   margin: 5px 0;
   border-color: var(--mc-line);
@@ -478,6 +503,7 @@
 .resume-note button { border-color: var(--mc-line-strong); color: var(--mc-text); background: var(--mc-surface); }
 
 .composer-wrap {
+  min-width: 0;
   padding: 8px max(48px, calc((100% - var(--mc-content)) / 2)) 12px;
   border-top: 0;
   background: var(--mc-surface);
@@ -909,4 +935,8 @@
 
 @media (min-width: 1500px) {
   .subagent-card-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-task-tooltip { animation: none; }
 }

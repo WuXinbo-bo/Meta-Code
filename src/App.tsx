@@ -46,6 +46,7 @@ import {
   Pin,
   Plug,
   Plus,
+  Puzzle,
   RefreshCw,
   Save,
   Search,
@@ -67,11 +68,11 @@ import {
 import { ProductLogo } from "./branding/ProductLogo";
 import { ProviderIcon } from "./branding/ProviderIcon";
 import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase";
-import { ThemeToggle } from "./branding/ThemeToggle";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
 import { AgentWorkProgress } from "./components/AgentWorkProgress";
 import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
+import { AgentTaskTooltip } from "./components/AgentTaskTooltip";
 import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
 import { AssistantReply } from "./components/AssistantReply";
 import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
@@ -91,7 +92,6 @@ import {
 } from "./sessionCreation";
 import type { MarkdownBodyProps } from "./components/MarkdownBody";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
-import { useHoverPanel } from "./components/useHoverPanel";
 import { TaskLaunchControls } from "./components/TaskLaunchControls";
 import { ActionMenu } from "./components/ActionMenu";
 import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./components/WorkspaceFileSearch";
@@ -514,6 +514,7 @@ const AGENT_SELECTION_KEY_PREFIX = "modelx.agentSelection";
 // Layout defaults are versioned so an old, user-resized v2 layout cannot
 // silently override the current proportions after a visual redesign.
 const LAYOUT_WIDTHS_KEY = "modelx.workspaceLayoutWidths.v3";
+const INSPECTOR_OPEN_KEY = "modelx.taskFilePanelOpen.v1";
 const DEFAULT_LAYOUT_WIDTHS = { sidebar: 260, inspector: 320 } as const;
 const LAYOUT_MIN_WIDTH = 260;
 const LAYOUT_MAX_WIDTH = 480;
@@ -1918,10 +1919,12 @@ function SubagentDrawer({
         </header>} navigation={agentThreads && orderedAgentThreads.length > 1 && (
             <nav className="agent-thread-tabs" aria-label="切换子 Agent">
               {orderedAgentThreads.map((agent) => (
+                <AgentTaskTooltip key={agentSelectionKey(agent)} name={agent.nickname} provider={agentProviderLabel(agent.provider)} status={subagentStatusLabel(agent.status)} summary={agent.task}>
+                {(descriptionId) => (
                 <button
                   className={agentSelectionKey(agent) === selectedAgentId ? "active" : ""}
-                  key={agentSelectionKey(agent)}
                   aria-pressed={agentSelectionKey(agent) === selectedAgentId}
+                  aria-describedby={descriptionId}
                   onClick={() => setSelectedAgentId(agentSelectionKey(agent))}
                 >
                   <span className={`agent-status-dot ${agent.status}`} />
@@ -1930,6 +1933,8 @@ function SubagentDrawer({
                     <small>{agentProviderLabel(agent.provider)} · {agentModeLabel(agent.mode)}</small>
                   </span>
                 </button>
+                )}
+                </AgentTaskTooltip>
               ))}
             </nav>
           )}>
@@ -2080,9 +2085,14 @@ function EventMessage({
     // mark until the canonical Agent snapshot resolves.
     const provider = agent.provider || (agent.agentIds.length ? undefined : engine);
     const providerControl = providerControls.find((control) => control.providerId === provider);
+    const rawTask = agent.task?.trim();
+    const taskSummary = rawTask && !rawTask.startsWith("{") && !rawTask.startsWith("[")
+      ? compactLine(rawTask, 120)
+      : subagentActivityText(agent, "");
+    const providerLabel = agentProviderLabel(provider);
     return (
       <div className="event-row subagent-row">
-        <button className={`${provider || "agent"} ${provider ? "" : "no-provider"}`.trim()} title="打开子 Agent 日志" onClick={() => onOpenAgent(message.id)}>
+        <button className={`${provider || "agent"} ${provider ? "" : "no-provider"}`.trim()} title={`委派：${agent.nickname || agent.agentType || "子 Agent"} · ${providerLabel}\n任务：${taskSummary || "查看实时日志"}`} aria-label={`打开委派任务，${providerLabel}，${taskSummary || "查看实时日志"}`} onClick={() => onOpenAgent(message.id)}>
           {provider && <span className={`subagent-mark ${provider}`}><ProviderIcon provider={provider} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={18} /></span>}
           <span className="subagent-card-title">
             <b>{agent.nickname || agent.agentType || "子 Agent"}</b>
@@ -2144,6 +2154,7 @@ type AgentActivityRailItem = {
   messageId: string;
   name: string;
   provider?: string;
+  task?: string;
   status: SubagentInfo["status"];
   count: number;
   updatedAt: string;
@@ -2170,11 +2181,15 @@ function SubagentActivityRail({
       const lockedProvider = providerLocksRef.current.get(key);
       if (candidateProvider && !lockedProvider) providerLocksRef.current.set(key, candidateProvider);
       const provider = lockedProvider || candidateProvider || previous?.provider;
+      const rawTask = info.task?.trim();
+      const task = previous?.task || (rawTask && !rawTask.startsWith("{") && !rawTask.startsWith("[") ? compactLine(rawTask, 240) : undefined);
+      const stableMessage = Boolean(info.identityKey || info.agentIds.length);
       const next: AgentActivityRailItem = {
         key,
-        messageId: message.id,
-        name: info.nickname || info.agentType || "子 Agent",
+        messageId: stableMessage || !previous ? message.id : previous.messageId,
+        name: info.nickname || info.agentType || previous?.name || "子 Agent",
         provider,
+        task: task || previous?.task,
         status: info.status === "unknown" ? previous?.status || "running" : info.status,
         count: (previous?.count || 0) + 1,
         updatedAt: message.createdAt
@@ -2202,19 +2217,22 @@ function SubagentActivityRail({
         const control = providerControls.find((candidate) => candidate.providerId === item.provider);
         const live = item.status === "running" || item.status === "waiting";
         const statusLabel = subagentStatusLabel(item.status);
-        return <button
+        const providerLabel = agentProviderLabel(item.provider);
+        const taskSummary = item.task || "点击查看该委派任务的实时日志";
+        return <AgentTaskTooltip key={item.key} name={item.name} provider={providerLabel} status={statusLabel} summary={item.task}>
+          {(descriptionId) => <button
           type="button"
-          key={item.key}
           className={`agent-activity-orb ${live ? "is-live" : `is-${item.status}`}`}
-          title={`${item.name} · ${statusLabel}`}
-          aria-label={`打开 ${item.name}，${statusLabel}，${item.count} 条活动`}
+          aria-label={`打开 ${item.name}，${providerLabel}，${statusLabel}，任务：${taskSummary}`}
+          aria-describedby={descriptionId}
           onClick={() => onOpenAgent(item.messageId)}
         >
           <span className="agent-activity-orb-icon">
             {item.provider ? <ProviderIcon provider={item.provider} icon={control?.identity.icon} accent={control?.identity.accent} size={16} /> : <Bot size={16} />}
           </span>
           <span className="agent-activity-orb-dot" aria-hidden="true" />
-        </button>;
+        </button>}
+        </AgentTaskTooltip>;
       })}
     </div>
     </>}
@@ -2431,7 +2449,12 @@ export function App() {
   const [invokedSkillNames, setInvokedSkillNames] = useState<string[]>([]);
   const [tree, setTree] = useState<WorkspaceFileNode[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 720);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(() => {
+    try { return localStorage.getItem(INSPECTOR_OPEN_KEY) === "1"; }
+    catch { return false; }
+  });
+  const filePanelTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeFilePanel = () => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); };
   const [dialog, setDialog] = useState<"workspace" | "task-mode" | "agent" | "agent-import" | "agents" | null>(null);
   const [newTaskWorkspaceId, setNewTaskWorkspaceId] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
@@ -2488,8 +2511,7 @@ export function App() {
   }, [data]);
   const activeScopeBrowserResource = workspaceBrowser.tabs.find((tab) => tab.id === workspaceBrowser.activeTabId)?.resource;
   const activeFileScopeId = workspaceBrowserScopeId(activeScopeBrowserResource, taskFileScopeId);
-  const filePanel = useHoverPanel(`${view}:${activeFileScopeId}`, inspectorOpen);
-  const directoryPanelVisible = (inspectorOpen || filePanel.open) && view === "chat" && activeScopeBrowserResource?.kind !== "tool";
+  const directoryPanelVisible = inspectorOpen && view === "chat" && activeScopeBrowserResource?.kind !== "tool";
   const settlePendingSessionTab = useCallback(() => {
     const pending = sessionNavigationRef.current;
     if (pending.phase !== "loading") return;
@@ -2644,6 +2666,11 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(LAYOUT_WIDTHS_KEY, JSON.stringify(layoutWidths));
   }, [layoutWidths]);
+
+  useEffect(() => {
+    try { localStorage.setItem(INSPECTOR_OPEN_KEY, inspectorOpen ? "1" : "0"); }
+    catch { /* Storage may be unavailable in a restricted browser context. */ }
+  }, [inspectorOpen]);
 
   const setPaneWidth = (pane: ResizingPane, width: number) => {
     const otherWidth = pane === "sidebar"
@@ -2975,6 +3002,13 @@ export function App() {
     setSettingsProvider(provider);
     setSettingsTarget("ai");
     setView("settings");
+  };
+
+  const openPluginSettings = () => {
+    cancelSessionNavigation();
+    setSettingsTarget("plugins");
+    setView("settings");
+    if (window.innerWidth <= 720) setSidebarOpen(false);
   };
 
   useEffect(() => {
@@ -5132,7 +5166,7 @@ export function App() {
   const agentProviders = data.agentProviders || [];
   const sidebarVisible = sidebarOpen && view === "chat";
   const inspectorPinned = inspectorOpen && view === "chat" && !activeBrowserToolResource;
-  const inspectorVisible = (inspectorPinned || filePanel.open) && view === "chat" && !activeBrowserToolResource;
+  const inspectorVisible = inspectorPinned;
   const workspaceBrowserVisible = view === "chat" && workspaceBrowser.tabs.length > 0;
   const displayedDeletionKind = displayedWorkflowId ? "workflow" : displayedSession ? "session" : null;
   const displayedDeletionId = displayedWorkflowId || displayedSession?.id || "";
@@ -5145,10 +5179,13 @@ export function App() {
   const displayedDeletionBusy = displayedDeletionKind
     ? deletingTaskIds.has(deletionTaskKey(displayedDeletionKind, displayedDeletionId))
     : false;
+  const displayedDeleteLabel = displayedDeletionPolicy?.requiresTermination
+    ? displayedDeletionKind === "workflow" ? "取消并删除任务" : "停止并删除任务"
+    : "删除任务";
 
   return (
     <div
-      className={`app-shell ${sidebarVisible ? "" : "sidebar-collapsed"} ${inspectorPinned ? "" : "inspector-collapsed"} ${inspectorVisible && !inspectorPinned ? "inspector-peek-open" : ""} ${resizingPane ? "is-resizing" : ""} ${navigationPending ? "navigation-pending" : ""}`}
+      className={`app-shell ${sidebarVisible ? "" : "sidebar-collapsed"} ${inspectorPinned ? "" : "inspector-collapsed"} ${resizingPane ? "is-resizing" : ""} ${navigationPending ? "navigation-pending" : ""}`}
       style={{ "--sidebar-width": sidebarVisible ? `${layoutWidths.sidebar}px` : "0px", "--inspector-width": inspectorPinned ? `${layoutWidths.inspector}px` : "0px" } as React.CSSProperties}
     >
       <nav className="activity-rail" aria-label="工作台导航">
@@ -5161,7 +5198,8 @@ export function App() {
           <button type="button" className={view === "agents" ? "active" : ""} aria-label="Skill 中心" title="Skill 中心" onClick={() => { cancelSessionNavigation(); setView("agents"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Sparkles size={19} /></button>
           <button type="button" className={view === "mcp" ? "active" : ""} aria-label="MCP" title="MCP" onClick={() => { cancelSessionNavigation(); setView("mcp"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Plug size={19} /></button>
           <button type="button" className={view === "git" ? "active" : ""} aria-label="版本管理" title="版本管理" onClick={() => { cancelSessionNavigation(); setView("git"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><GitBranch size={19} /></button>
-          <button type="button" className={view === "settings" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
+          <button type="button" className={view === "settings" && settingsTarget === "plugins" ? "active" : ""} aria-label="工作台插件" title="工作台插件" onClick={openPluginSettings}><Puzzle size={19} /></button>
+          <button type="button" className={view === "settings" && settingsTarget !== "plugins" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
         </div>
       </nav>
       <aside className="sidebar">
@@ -5273,10 +5311,9 @@ export function App() {
           {displayedSession?.status === "running" && <div className="run-status" title="执行中" aria-label="执行中"><LoaderCircle className="spin" size={13} /><span>执行中</span></div>}
           {!navigationPending && displayedSession?.status === "paused" && <div className="run-status paused" title="已暂停" aria-label="已暂停"><Pause size={13} /><span>已暂停</span></div>}
           {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} />}
-          {view === "chat" && !activeBrowserToolResource && <button ref={filePanel.triggerRef} {...filePanel.triggerProps} type="button" className="icon-button task-file-trigger" title="查看任务文件" aria-label="查看任务文件" aria-expanded={inspectorVisible} aria-controls="task-file-panel"><FolderOpen size={17} /></button>}
+          {view === "chat" && !activeBrowserToolResource && <button ref={filePanelTriggerRef} type="button" className={`icon-button task-file-trigger ${inspectorOpen ? "active" : ""}`} title={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-label={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-expanded={inspectorVisible} aria-controls="task-file-panel" onClick={() => setInspectorOpen((value) => !value)}><FolderOpen size={17} /></button>}
+          {view === "chat" && !navigationPending && displayedDeletionKind && <button type="button" className="icon-button task-delete-trigger" disabled={displayedDeletionBusy} title={displayedDeleteLabel} aria-label={displayedDeleteLabel} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button>}
           <ActionMenu className="task-more-menu" label="任务详情与更多操作">
-              <ThemeToggle />
-              {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <button type="button" disabled={displayedDeletionBusy} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}{displayedDeletionPolicy?.requiresTermination ? "停止并删除任务" : "删除任务"}</button>}
               {!navigationPending && displayedSession && <section className="task-usage-details"><header><Gauge size={14} /><strong>任务 Token</strong><span>{usageLabel}</span></header><dl><div><dt>全部线程</dt><dd>{displayedTokens.toLocaleString()}</dd></div><div><dt>主线程</dt><dd>{mainTokens.toLocaleString()}</dd></div><div><dt>子 Agent（{usageSummary.agentCount}）</dt><dd>{agentTokens.toLocaleString()}</dd></div><div><dt>输入／输出</dt><dd>{usageSummary.total.input_tokens.toLocaleString()} / {usageSummary.total.output_tokens.toLocaleString()}</dd></div><div><dt>缓存输入</dt><dd>{usageSummary.total.cached_input_tokens.toLocaleString()}</dd></div><div><dt>推理输出</dt><dd>{usageSummary.total.reasoning_output_tokens.toLocaleString()}</dd></div></dl></section>}
               <div className="mobile-provider-summary"><ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} /></div>
           </ActionMenu>
@@ -5678,6 +5715,7 @@ export function App() {
         {view === "settings" && <RecoverableSectionBoundary resetKey={`${settingsTarget}:${settingsProvider}`} title="设置页面暂时无法显示"><SettingsView
           plugins={data.plugins}
           initialSection={settingsTarget}
+          onSectionChange={setSettingsTarget}
           settings={data.settings}
           dataHome={data.runtime.dataHome}
           codexHome={data.runtime.codexHome}
@@ -5712,8 +5750,8 @@ export function App() {
         )}
       </main>
 
-      {inspectorPinned && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => setInspectorOpen(false)} />}
-        <aside id="task-file-panel" ref={filePanel.panelRef} {...filePanel.panelProps} className={`inspector ${!inspectorPinned ? "is-preview" : ""} ${navigationPending ? "navigation-pending" : ""}`} hidden={!inspectorVisible} inert={!inspectorVisible || undefined} aria-label="任务文件" aria-busy={navigationPending}>
+      {inspectorPinned && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); }} />}
+        <aside id="task-file-panel" className={`inspector ${navigationPending ? "navigation-pending" : ""}`} hidden={!inspectorVisible} inert={!inspectorVisible || undefined} aria-label="任务文件" aria-busy={navigationPending} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFilePanel(); } }}>
           <div className="inspector-header">
             <span>
               <strong title={fileScopeWorkspace?.name}>{fileScopeStandalone ? "临时目录" : "文件"}</strong>
@@ -5724,9 +5762,8 @@ export function App() {
                 <RefreshCw className={treeLoading ? "spin" : undefined} size={15} />
               </IconButton>
               <IconButton label="搜索文件" disabled={!activeFileScopeId} onClick={() => { setTreeSearchOpen(true); requestAnimationFrame(() => treeSearchRef.current?.focus()); }}><Search size={15} /></IconButton>
-              <IconButton label={inspectorPinned ? "取消固定文件区" : "固定文件区"} onClick={() => { filePanel.close(); setInspectorOpen((value) => !value); }}><Pin size={15} /></IconButton>
               <ActionMenu className="file-more-menu" label="文件区更多操作" ownerId="task-file-panel">{fileScopeWorkspace && <button type="button" aria-label="编辑 AGENTS.md" onClick={openAgents}><FileCode2 size={14} />项目指令</button>}<button type="button" disabled={!activeFileScopeId} onClick={() => openWorkspaceFolder()}><FolderOpen size={14} />在文件管理器中打开</button></ActionMenu>
-              <IconButton label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanel.close(true); }}><X size={15} /></IconButton>
+              <IconButton label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); }}><X size={15} /></IconButton>
             </span>
           </div>
           <label className={`tree-search ${treeSearchOpen || treeQuery ? "is-expanded" : ""}`}>
@@ -6345,6 +6382,7 @@ function McpDialog({ server, workspaces, activeWorkspaceId, onClose, onDone }: {
 function SettingsView({
   plugins,
   initialSection,
+  onSectionChange,
   settings,
   dataHome,
   codexHome,
@@ -6365,6 +6403,7 @@ function SettingsView({
 }: {
   plugins: Bootstrap["plugins"];
   initialSection: SettingsSectionName;
+  onSectionChange: (section: SettingsSectionName) => void;
   settings: SettingsData;
   dataHome: string;
   codexHome: string;
@@ -6800,7 +6839,7 @@ function SettingsView({
   return <section className="content-view settings-view">
     <div className="section-heading settings-sticky-heading"><div><h1>设置</h1><p>管理 Agent、会话、页面、个人数据与软件版本。</p></div>{!(["updates", "sessions", "data", "plugins"] as SettingsSectionName[]).includes(settingsSection) && <div className="settings-save-actions">{saveError && <span role="alert">{saveError}</span>}<button className="primary" disabled={saveState === "clean" || saveState === "saving"} onClick={() => void save()}>{saveState === "saving" ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saveLabel}</button></div>}</div>
     <div className="settings-shell">
-    <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={setSettingsSection} onAgentPageChange={setAiSettingsPage} />
+    <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={(section) => { setSettingsSection(section); onSectionChange(section); }} onAgentPageChange={setAiSettingsPage} />
     <div className="settings-page-content">
     {settingsSection === "plugins" && <PluginSettings plugins={plugins} request={api} onChanged={onChanged} />}
     {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
