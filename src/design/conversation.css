@@ -340,7 +340,7 @@
 .agent-stream-event > summary:hover,
 .agent-stream-cluster > summary:hover { background: var(--mc-surface-subtle); }
 .agent-stream-event summary strong,
-.agent-stream-copy strong { color: var(--mc-text-secondary); font-size: 12px; font-weight: 500; }
+.agent-stream-copy strong { color: var(--mc-text-secondary) !important; font-size: 12px; font-weight: 500; }
 .agent-stream-event summary small,
 .agent-stream-copy small,
 .agent-stream-event summary time,
@@ -357,9 +357,7 @@
 .agent-event-icon.running { color: var(--mc-success) !important; }
 .agent-stream-event.phase-failed .agent-event-icon,
 .agent-stream-event.error .agent-event-icon,
-.agent-stream-event.category-error .agent-event-icon { color: var(--mc-danger) !important; }
-.agent-stream-event.phase-failed summary strong,
-.agent-stream-event.category-error summary strong { color: var(--mc-danger); }
+.agent-stream-event.category-error .agent-event-icon { color: var(--mc-text-tertiary) !important; }
 .agent-event-chevron { color: var(--mc-text-tertiary); }
 .agent-stream-cluster-items { margin-left: 9px; padding-left: 8px; border-color: var(--mc-line); }
 
@@ -439,6 +437,8 @@
 .agent-plan-icon { color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
 .agent-plan-heading strong { color: var(--mc-text-secondary); }
 .agent-plan-progress { color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
+.agent-plan-content li:is(.completed, .blocked, .failed) { color: var(--mc-text-secondary) !important; }
+.agent-plan-content li:is(.completed, .blocked, .failed) > span { color: var(--mc-text-tertiary) !important; }
 
 .command-preview-line {
   border-color: var(--mc-line);
@@ -448,9 +448,9 @@
 }
 .command-preview-line code { color: var(--mc-text); font: 11px/1.55 ui-monospace, "SFMono-Regular", Consolas, monospace; }
 .command-preview-meta { color: var(--mc-text-tertiary); }
-.command-preview-meta .completed { color: var(--mc-success); }
+.command-preview-meta .completed,
+.command-preview-meta .failed { color: var(--mc-text-tertiary); }
 .command-preview-meta .running { color: var(--mc-info); }
-.command-preview-meta .failed { color: var(--mc-danger); }
 .command-output-preview {
   border-color: #30322f;
   border-radius: var(--mc-r-sm);
@@ -859,7 +859,7 @@
 .activity-timeline-controls input { flex: 1; }
 .activity-timeline-controls input:focus, .activity-timeline-controls select:focus { outline: none; }
 .activity-timeline-controls button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
-.activity-timeline-controls .activity-failure-filter { width: auto; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--mc-danger) 40%, var(--mc-line)); border-radius: 999px; color: var(--mc-danger); }
+.activity-timeline-controls .activity-failure-filter { width: auto; padding: 0 6px; border: 1px solid var(--mc-line); border-radius: 999px; color: var(--mc-text-secondary); }
 .activity-timeline-no-results { margin: 12px 8px; color: var(--mc-text-tertiary); font-size: 11px; text-align: center; }
 .activity-timeline-result-count { margin: -3px 0 6px; color: var(--mc-text-tertiary); font-size: 11px; }
 .agent-drawer .agent-task p { max-height: none; overflow: visible; }

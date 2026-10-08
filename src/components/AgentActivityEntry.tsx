@@ -202,6 +202,7 @@ export function AgentActivityEntry({
   expanded?: boolean;
 }) {
   const [open, setOpen] = useState(expanded);
+  useEffect(() => setOpen(expanded), [expanded]);
   const [copied, setCopied] = useState(false);
   const time = new Date(log.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const eventProvider = log.provider || log.activity?.provider || provider;
@@ -277,7 +278,7 @@ export function AgentActivityEntry({
       setCopied(false);
     }
   };
-  return <details className={`agent-stream-event activity-visual-${visualTier} ${log.kind} category-${log.category || "status"} phase-${phase}`} open={expanded || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`agent-stream-event activity-visual-${visualTier} ${log.kind} category-${log.category || "status"} phase-${phase}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>
       <span className={`agent-event-icon ${entryStatus}`}>{icon}</span>
       <span><strong>{log.title}</strong><small>{summary.length > 160 ? `${summary.slice(0, 160)}...` : summary}</small></span>

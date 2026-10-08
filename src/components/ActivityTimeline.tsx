@@ -11,7 +11,7 @@ type ActivityItem =
   | { type: "current"; log: ActivityViewLog }
   | { type: "group"; id: string; logs: ActivityViewLog[] }
   | { type: "summary"; id: string; category: ActivityViewLog["category"]; logs: ActivityViewLog[] }
-  | { type: "plan"; id: string; snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] };
+  | { type: "plan"; id: string; disclosureKey: string; snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] };
 
 const COLLAPSIBLE_CATEGORIES = new Set(["command", "file", "read", "search", "tool", "mcp", "todo", "status"]);
 const SUMMARY_CATEGORIES = new Set<ActivityViewLog["category"]>(["command", "file", "read", "search", "tool", "mcp", "todo"]);
@@ -49,7 +49,7 @@ function planAwareActivities(logs: ActivityViewLog[], provider: string): Activit
     const source = item.type === "group" ? item.logs[0] : item.type === "log" ? item.log : null;
     return source ? logs.findIndex((log) => log.id === source.id) > latestIndex : false;
   });
-  const plan: ActivityItem = { type: "plan", id: `agent-plan-${latest.snapshot.id}`, snapshot: latest.snapshot, history: snapshots.slice(0, -1).map(({ snapshot }) => snapshot) };
+  const plan: ActivityItem = { type: "plan", id: `agent-plan-${latest.snapshot.id}`, disclosureKey: `todo:${snapshots[0].log.id}`, snapshot: latest.snapshot, history: snapshots.slice(0, -1).map(({ snapshot }) => snapshot) };
   items.splice(insertionIndex < 0 ? items.length : insertionIndex, 0, plan);
   return items;
 }
@@ -280,22 +280,6 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   const items = useMemo<ActivityItem[]>(() => hasFilters
     ? filteredLogs.map((log) => ({ type: "log", log: { ...log, transient: false } }))
     : minimalActivities(filteredLogs, provider, status), [filteredLogs, provider, status, hasFilters]);
-  const observedFailuresRef = useRef(new Set<string>());
-  useEffect(() => {
-    const revealed: Record<string, boolean> = {};
-    for (const item of items) {
-      const logs = item.type === "group" || item.type === "summary" ? item.logs : item.type === "log" || item.type === "current" ? [item.log] : [];
-      for (const log of logs) {
-        if ((log.phase !== "failed" && log.kind !== "error") || observedFailuresRef.current.has(log.id)) continue;
-        observedFailuresRef.current.add(log.id);
-        revealed[`log:${log.id}`] = true;
-        if (item.type === "group" || item.type === "summary") revealed[activityDisclosureKey(item)] = true;
-      }
-    }
-    // A new failure must become visible even if its live group was previously
-    // closed. Once inspected, the user's subsequent manual close is retained.
-    if (Object.keys(revealed).length) setDisclosures((current) => ({ ...current, ...revealed }));
-  }, [items]);
   const virtualized = items.length > 40;
   const [scrollMargin, setScrollMargin] = useState(0);
   const [externalScrollElement, setExternalScrollElement] = useState<HTMLDivElement | null>(null);
@@ -346,16 +330,16 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
     const props = { log, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider, showReasoning: hasFilters };
     if (log.kind === "message") return <ActivityRenderer key={log.id} {...props} />;
     const key = `log:${log.id}`;
-    return <PreservedActivityRenderer key={log.id} {...props} open={disclosures[key] ?? (log.phase === "failed" || log.kind === "error")} onOpenChange={(open) => recordDisclosure(key, open)} />;
+    return <PreservedActivityRenderer key={log.id} {...props} open={disclosures[key] ?? false} onOpenChange={(open) => recordDisclosure(key, open)} />;
   };
   const renderItem = (item: ActivityItem) => item.type === "group"
-    ? <CollapsedActivityGroup key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
+    ? <CollapsedActivityGroup key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? false} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "summary"
-      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? activityItemHasFailure(item)} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
+      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? false} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "current"
       ? <div className="activity-live-current" key={`current-${item.log.id}`}>{renderLog(item.log)}</div>
     : item.type === "plan"
-      ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
+      ? <AgentPlanView key={item.disclosureKey} snapshot={item.snapshot} history={item.history} expanded={disclosures[item.disclosureKey] ?? false} onOpenChange={(open) => recordDisclosure(item.disclosureKey, open)} />
     : renderLog(item.log);
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
