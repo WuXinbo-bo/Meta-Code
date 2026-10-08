@@ -31,12 +31,35 @@ export type DelegationBrokerPorts = {
   saveState: () => Promise<void>;
   launchDelegatedExecution: (task: DelegatedTask) => void;
 };
-function delegationFingerprint(input: AgentBridgeRequest, provider: AgentProviderId, parentTaskId: string, cwd: string, prompt: string) {
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalValue(item)]));
+  }
+  return value;
+}
+function executionRequirements(input: Pick<AgentBridgeRequest, "capabilityRequirements" | "adapterOptions">) {
+  return {
+    capabilityRequirements: [...new Set(input.capabilityRequirements || [])].sort(),
+    adapterOptions: canonicalValue(input.adapterOptions || {})
+  };
+}
+function delegationFingerprints(input: AgentBridgeRequest, provider: AgentProviderId, parentTaskId: string, cwd: string, prompt: string) {
   const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map(String).map((item) => item.trim()).filter(Boolean) : [];
   const mode = input.mode === "analysis" || input.mode === "review" || input.mode === "implementation"
     ? input.mode
     : provider === "claude" ? "analysis" : "implementation";
-  return crypto.createHash("sha256").update(JSON.stringify({ provider, parentTaskId, cwd: path.resolve(cwd), prompt, acceptance, mode })).digest("hex");
+  const contract = { provider, parentTaskId, cwd: path.resolve(cwd), prompt, acceptance, mode };
+  const hash = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return { legacy: hash(contract), current: `v2:${hash({ ...contract, ...executionRequirements(input) })}` };
+}
+function sameDelegation(existing: DelegatedTask, input: AgentBridgeRequest, fingerprint: ReturnType<typeof delegationFingerprints>) {
+  if (existing.requestFingerprint?.startsWith("v2:")) return !delegationIdempotency(existing.requestFingerprint, fingerprint.current).conflict;
+  const legacy = existing.requestFingerprint || delegationFingerprints({ prompt: existing.task, acceptance: existing.acceptance, mode: existing.mode }, existing.provider, existing.parentSessionId, existing.cwd, existing.task).legacy;
+  // Keep old receipts reusable, but never silently change their effective
+  // capability/configuration contract when upgrading their fingerprint.
+  return !delegationIdempotency(legacy, fingerprint.legacy).conflict
+    && JSON.stringify(executionRequirements(existing)) === JSON.stringify(executionRequirements(input));
 }
 
 const MAX_DELEGATED_TASKS_PER_PARENT = 5;
@@ -63,19 +86,21 @@ async function queueDelegatedTask(input: AgentBridgeRequest, requestedProvider: 
   const prompt = String(input.prompt || "").trim();
   if (!prompt) throw new Error("委派任务不能为空");
   const cwd = assertExecutionCwd(workspace, String(input.cwd || workspace.root));
-  const fingerprint = delegationFingerprint(input, provider, parentTaskId, cwd, prompt);
-  const idempotencyKey = String(input.idempotencyKey || input.taskId || fingerprint).trim();
+  const fingerprints = delegationFingerprints(input, provider, parentTaskId, cwd, prompt);
+  const fingerprint = fingerprints.current;
+  // Keep automatically generated request IDs stable across the upgrade.
+  const idempotencyKey = String(input.idempotencyKey || input.taskId || fingerprints.legacy).trim();
   const existingIdempotent = getState().delegatedTasks.find((task) => task.parentSessionId === parentTaskId && task.provider === provider && task.idempotencyKey === idempotencyKey);
   if (existingIdempotent) {
-    if (delegationIdempotency(existingIdempotent.requestFingerprint, fingerprint).conflict) {
+    if (!sameDelegation(existingIdempotent, input, fingerprints)) {
       throw new Error(`幂等键 ${idempotencyKey} 已被不同的委派内容使用`);
     }
     return { ok: true, accepted: true, deduplicated: true, taskId: existingIdempotent.id, parentTaskId, status: existingIdempotent.status };
   }
-  const taskId = String(input.taskId || `${provider}-worker-${fingerprint.slice(0, 16)}`).trim();
+  const taskId = String(input.taskId || `${provider}-worker-${fingerprints.legacy.slice(0, 16)}`).trim();
   const existingTaskId = getState().delegatedTasks.find((task) => task.id === taskId);
   if (activeDelegationTasks.has(taskId) || existingTaskId) {
-    if (existingTaskId?.requestFingerprint === fingerprint) {
+    if (existingTaskId && sameDelegation(existingTaskId, input, fingerprints) && existingTaskId.parentSessionId === parentTaskId && existingTaskId.provider === provider) {
       return { ok: true, accepted: true, deduplicated: true, taskId, parentTaskId, status: existingTaskId.status };
     }
     throw new Error(`子任务 ID ${taskId} 已被其他委派使用`);
