@@ -32,7 +32,10 @@ const events = [];
 const gates = new Map();
 const calls = [];
 let planRequests = 0;
+let questionRequests = 0;
+let semanticQuestionGate;
 let readinessGate;
+const originalReaddir = fs.readdir;
 const planNotes = [];
 const binding = { capabilityFingerprint: "test-runtime", providerId: "codex" };
 const result = { outcome: "completed", humanSummary: "verified result", outputs: [], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [], machineResultPath: null };
@@ -108,6 +111,11 @@ registerOrchestrationRoutes(app, {
   plannerSkillContext: () => "", workflowPlannerFailureMessage: (error) => String(error), retryableWorkflowPlannerFailure: () => false,
   activeWorkflowPlannerRuns: new Map(), assertWorkflowExecutionReady: async () => {}, queueWorkflowTick: scheduler.queueWorkflowTick,
   workflowTargetService: new WorkflowTargetService(runtime)
+  ,answerWorkflowQuestion: async (snapshot, question, _provider, signal) => {
+    questionRequests += 1;
+    if (semanticQuestionGate) await semanticQuestionGate(signal);
+    return `Snapshot ${snapshot.revision}: ${question}; the implementation depends on the research findings.`;
+  }
 });
 const server = app.listen(0, "127.0.0.1");
 await new Promise((resolve) => server.once("listening", resolve));
@@ -149,7 +157,25 @@ try {
   createApproved("question");
   scheduler.queueWorkflowTick("question", "owner");
   await until(() => gates.has("question:research"), "question first node");
-  await post("/api/workflows/question/plan", { source: "maintenance", mode: "refine", intent: "question", note: "What remains?" });
+  const planningBeforeQuestion = planRequests;
+  const query = await post("/api/workflows/question/plan", { source: "maintenance", mode: "refine", intent: "question", note: "What remains?" });
+  assert.equal(query.queriedSnapshot, true);
+  assert.equal(query.workflow.status, "running", "Status queries must not pause running work");
+  assert.equal(query.workflow.pendingMaintenance, null);
+  assert.equal(questionRequests, 0, "Simple progress questions need no model");
+  assert.equal(planRequests, planningBeforeQuestion, "Questions must not enter planner transactions");
+  const semantic = await post("/api/workflows/question/plan", { source: "maintenance", mode: "refine", intent: "question", note: "Why does implementation depend on research?" });
+  assert.match(semantic.queryAnswer, /depends on the research/);
+  assert.equal(questionRequests, 1, "Semantic questions must reach a real answerer");
+  assert.equal(semantic.workflow.status, "running");
+  let waitingForQuestion = false;
+  semanticQuestionGate = (signal) => new Promise((_resolve, reject) => { waitingForQuestion = true; signal.addEventListener("abort", () => reject(signal.reason), { once: true }); });
+  const pendingQuestion = fetch(`${baseUrl}/api/workflows/question/plan`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: "maintenance", intent: "question", note: "Explain the implementation constraints" }) });
+  await until(() => waitingForQuestion, "semantic question starts");
+  await post("/api/workflows/question/question/cancel", {});
+  assert.equal((await pendingQuestion).status, 409, "Canceling a question cancels only that request");
+  assert.equal(repository.get("question", "owner").status, "running");
+  semanticQuestionGate = undefined;
   gates.get("question:research")();
   await until(() => gates.has("question:implement"), "question resumes unchanged plan");
   const questioned = repository.get("question", "owner");
@@ -216,6 +242,30 @@ try {
     }
     readinessGate = undefined;
   }
+  for (const action of ["cancel", "pause"]) {
+    const id = `maintenance-impact-${action}`;
+    const created = createApproved(id);
+    repository.pause(id, "owner", created.revision);
+    let entered;
+    let release;
+    const waiting = new Promise((resolve) => { entered = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    fs.readdir = async (...args) => {
+      if (args[0] === project) { entered(); await gate; }
+      return originalReaddir(...args);
+    };
+    await post(`/api/workflows/${id}/plan`, { source: "maintenance", mode: "refine", intent: "adjust", note: "Change while impact is being scanned" });
+    await waiting;
+    assert.equal(repository.get(id, "owner").activePlanVersion, 1, "Impact computation must finish before publishing a candidate plan");
+    await post(`/api/workflows/${id}/${action}`, action === "pause" ? { mode: "immediate" } : {});
+    release();
+    fs.readdir = originalReaddir;
+    await until(() => !activePlanners.has(id), "canceled impact scan releases planner");
+    const stopped = repository.get(id, "owner");
+    assert.equal(stopped.activePlanVersion, 1, "A stopped maintenance scan cannot publish a new plan version");
+    assert.equal(stopped.status, action === "cancel" ? "canceled" : "paused");
+    assert.ok(!events.some((event) => event.id === id && event.type === "workflow.plan.ready"), "Canceled candidates cannot emit a ready event");
+  }
   createApproved("restart");
   const restartRun = repository.get("restart", "owner");
   repository.requestMaintenance("restart", "owner", restartRun.revision, { note: "Persisted change", intent: "adjust", plannerEngine: "claude", requestedAt: new Date().toISOString(), resumeAfter: true });
@@ -224,6 +274,7 @@ try {
   assert.equal(repository.get("restart", "owner").status, "paused");
   console.log("Workflow checkpoint, question, approval and execution-root checks passed");
 } finally {
+  fs.readdir = originalReaddir;
   for (const release of gates.values()) release();
   await until(() => activeNodes.size === 0, "test cleanup nodes").catch(() => undefined);
   scheduler.dispose();

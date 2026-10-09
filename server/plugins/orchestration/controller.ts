@@ -20,9 +20,11 @@ import { abortWorkflowPlanTransaction, openWorkflowPlanTransaction, readWorkflow
 import { WorkflowRepository } from "./repository.js";
 import { WorkflowTargetService, type PreparedWorkflowTarget } from "./targets.js";
 import { pathKey } from "../../pathBoundary.js";
-import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./stateFiles.js";
+import { WorkflowStateFiles } from "./stateFiles.js";
+import { calculateWorkflowPlanImpactAsync } from "./fileIntegrityAsync.js";
 import { captureWorkspaceSnapshot } from "./enforcement.js";
 import type { WorkflowRecord } from "./types.js";
+import { isWorkflowStatusQuestion, workflowQuestionSnapshot, workflowStatusAnswer, type WorkflowQuestionAnswerer } from "./questions.js";
 import { GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS, type WorkflowPlan, type WorkflowPlanningMode } from "./types.js";
 
 export type OrchestrationControllerPorts = {
@@ -64,6 +66,7 @@ export type OrchestrationControllerPorts = {
   plannerContextForWorkflow?: (workflow: WorkflowRecord) => string;
   taskContextIdForWorkflow?: (workflow: WorkflowRecord) => string | null;
   workflowTargetService?: WorkflowTargetService;
+  answerWorkflowQuestion?: WorkflowQuestionAnswerer;
 };
 
 export function registerOrchestrationRoutes(app: Express, ports: OrchestrationControllerPorts) {
@@ -298,12 +301,20 @@ async function executeWorkflowPlanningRun(input: {
   let transactionFinished = false;
   let executionLease: WorkspaceExecutionLease | undefined;
   let shouldResume = false;
+  const assertPlanningOwnership = () => {
+    controller.signal.throwIfAborted();
+    const current = workflowRepository.get(workflowId, ownerUserId);
+    if (activeWorkflowPlanners.get(workflowId) !== controller || !current) throw new Error("规划运行已失效");
+    if (current.activePlanVersion !== baseWorkflow.activePlanVersion) throw new Error("规划基线版本已变化，请刷新后重新维护");
+    if (current.status === "canceled" || (!maintenance && current.status !== "planning")) throw new Error("规划运行状态已变化");
+    return current;
+  };
   try {
     const workspace = workspaceById(baseWorkflow.workspaceId, ownerUserId); if (!workspace) throw new Error("工作区不存在");
     executionLease = await workspaceExecutionCoordinator.acquire({ root: baseWorkflow.executionRoot || baseWorkflow.workDirectory || workspace.root, ownerId: `workflow:${workflowId}`, label: `${baseWorkflow.title} · 规划`, access: "read" }, { signal: controller.signal });
-    controller.signal.throwIfAborted();
-    let snapshot = workflowRepository.get(workflowId, ownerUserId)!;
+    let snapshot = assertPlanningOwnership();
     const plannerBinding = await runtimeBindingForProvider(snapshot.plannerEngine);
+    assertPlanningOwnership();
     const plannerRuntime = workflowRepository.bindPlannerRuntime(workflowId, ownerUserId, plannerBinding);
     if (plannerRuntime.changed) {
       workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("status", "运行时已更新", "规划器运行时或能力已变化，已清除旧原生会话并从持久化任务上下文重新开始"));
@@ -321,6 +332,7 @@ async function executeWorkflowPlanningRun(input: {
     const availableMcpServers = mcpServersForWorkspace(workspace).map((server) => server.name);
     const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
     await fsp.mkdir(WORKFLOW_PLANNER_TRANSACTION_DIR, { recursive: true });
+    assertPlanningOwnership();
     transactionPath = path.join(WORKFLOW_PLANNER_TRANSACTION_DIR, `${workflowId}-${mode}.json`);
     const openedTransaction = openWorkflowPlanTransaction(transactionPath, {
       workflowId, mode, baseRevision: snapshot.revision, basePlanVersion: baseWorkflow.activePlanVersion,
@@ -340,6 +352,7 @@ async function executeWorkflowPlanningRun(input: {
       ...(intent === "question" ? { reviewNote: `本轮只回答用户问题，禁止修改任务图或提交候选计划。请通过无修改结束机制提交回答。用户问题：${note || ""}` } : {})
     };
     const planned = await requestWorkflowPlan(planningSnapshot, workspace, allowedSkills, availableMcpServers, plannerSkillContext(workspace, policies), providerCapabilities, controller, transactionPath, (event) => {
+      if (controller.signal.aborted || activeWorkflowPlanners.get(workflowId) !== controller || !workflowRepository.get(workflowId, ownerUserId)) return;
       const eventKey = event.sourceId ? `engine:${event.sourceId}` : "event";
       if (event.type === "assistant") {
         const now = Date.now();
@@ -352,8 +365,8 @@ async function executeWorkflowPlanningRun(input: {
       workflowStateFiles.appendEvent(current, { type: "planner.engine_event", payload: { type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text } });
       workflowEvent(workflowId, "workflow.planner.log", ownerUserId, workspace.id, current.revision);
     }, mode, previousPlan);
+    assertPlanningOwnership();
     if (planned.engineSessionId) workflowRepository.setPlannerSession(workflowId, ownerUserId, snapshot.plannerSessionId || `workflow-planner:${workflowId}`, planned.engineSessionId);
-    if (activeWorkflowPlanners.get(workflowId) !== controller) throw new Error("规划运行已失效");
     if (planned.noChange || intent === "question") {
       if (!maintenance) throw new Error("首次规划和全新重做不能以无修改结束");
       const message = intent === "question" ? planned.finalText || planned.note || "已完成当前计划的只读询问，执行计划保持不变" : planned.note || planned.finalText || "没有检测到需要修改计划的明确要求";
@@ -371,11 +384,13 @@ async function executeWorkflowPlanningRun(input: {
     workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("tool", "校验任务图", `规划事务已提交，共 ${plan.nodes.length} 个节点，正在执行服务端复核`));
     const errors = validateWorkflowPlan(plan, new Set(allowedSkills), new Set(availableMcpServers), providerCapabilities);
     if (errors.length) throw new Error(`计划校验失败：${errors.join("；")}`);
+    const impact = maintenance ? await calculateWorkflowPlanImpactAsync(baseWorkflow, plan, await captureWorkspaceSnapshot(baseWorkflow.executionRoot || baseWorkflow.workDirectory)) : null;
+    assertPlanningOwnership();
     workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("message", "规划完成", `候选计划已原子提交，共 ${plan.nodes.length} 个节点，等待用户审批`));
     const saved = maintenance
       ? workflowRepository.saveMaintenancePlan(workflowId, ownerUserId, plan, note || undefined)
       : workflowRepository.savePlan(workflowId, ownerUserId, plan, note || undefined);
-    if (maintenance) workflowStateFiles.finishMaintenance(saved, plan, calculateWorkflowPlanImpact(baseWorkflow, plan, await captureWorkspaceSnapshot(baseWorkflow.executionRoot || baseWorkflow.workDirectory)), planned.finalText);
+    if (maintenance && impact) workflowStateFiles.finishMaintenance(saved, plan, impact, planned.finalText);
     else workflowStateFiles.sync(saved);
     workflowStateFiles.appendEvent(saved, { type: "plan.ready", payload: { version: saved.activePlanVersion, mode, transactionId: transaction.id, digest: transaction.digest } });
     workflowEvent(workflowId, "workflow.plan.ready", ownerUserId, workspace.id, saved.revision);
@@ -383,6 +398,7 @@ async function executeWorkflowPlanningRun(input: {
   } catch (error) {
     try {
       const current = workflowRepository.get(workflowId, ownerUserId);
+      if (activeWorkflowPlanners.get(workflowId) !== controller || !current) return;
       const message = workflowPlannerFailureMessage(error, controller);
       if (current?.status === "canceled" || current?.status === "paused" && controller.signal.aborted) {
         if (current.status === "canceled" && transactionPath && fs.existsSync(transactionPath)) abortWorkflowPlanTransaction(transactionPath, message);
@@ -390,8 +406,6 @@ async function executeWorkflowPlanningRun(input: {
       }
       const retryable = retryableWorkflowPlannerFailure(message) || controller.signal.aborted && Boolean(timeoutReason(controller.signal));
       if (!retryable && transactionPath && fs.existsSync(transactionPath)) abortWorkflowPlanTransaction(transactionPath, message);
-      const ownsPlanningRun = activeWorkflowPlanners.get(workflowId) === controller;
-      if (!ownsPlanningRun || !current) return;
       if (/工具权限未授权|permission (?:isn't|wasn't|hasn't been|not) granted|requires approval|not authorized|unauthori[sz]ed/i.test(message)) {
         workflowRepository.clearPlannerEngineSession(workflowId, ownerUserId);
       }
@@ -405,14 +419,19 @@ async function executeWorkflowPlanningRun(input: {
       shouldResume = maintenance && resumeAfter;
     } catch (recoveryError) { console.error("Workflow planner failure recovery failed", recoveryError); }
   } finally {
-    if (activeWorkflowPlanners.get(workflowId) === controller) activeWorkflowPlanners.delete(workflowId);
-    activeWorkflowPlannerRuns.delete(workflowId);
+    const ownsCleanup = activeWorkflowPlanners.get(workflowId) === controller;
+    // Keep ownership while deleting the completed transaction; a new planner
+    // must not create the same file before the old cleanup has finished.
+    if (ownsCleanup && transactionFinished && transactionPath) await fsp.rm(transactionPath, { force: true }).catch(() => undefined);
+    if (activeWorkflowPlanners.get(workflowId) === controller) {
+      activeWorkflowPlanners.delete(workflowId);
+      activeWorkflowPlannerRuns.delete(workflowId);
+    }
     executionLease?.release();
-    if (transactionFinished && transactionPath) await fsp.rm(transactionPath, { force: true }).catch(() => undefined);
     const workspace = workspaceById(baseWorkflow.workspaceId, ownerUserId);
     if (workspace) workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, baseWorkflow.workDirectory));
     const current = workflowRepository.get(workflowId, ownerUserId);
-    if (shouldResume && current?.status === "paused" && !current.pendingMaintenance && current.pauseMode === "checkpoint") {
+    if (ownsCleanup && shouldResume && current?.status === "paused" && !current.pendingMaintenance && current.pauseMode === "checkpoint") {
       const resumed = workflowRepository.resume(workflowId, ownerUserId, current.revision);
       workflowStateFiles.sync(resumed);
       workflowEvent(workflowId, "workflow.resumed", ownerUserId, resumed.workspaceId, resumed.revision);
@@ -475,9 +494,51 @@ setImmediate(() => {
   for (const workflow of workflowRepository.listAll()) if (workflow.pendingMaintenance && workflow.pauseMode !== "immediate") queuePendingMaintenance(workflow.id, workflow.ownerUserId);
 });
 
+const activeQuestions = new Map<string, AbortController>();
+app.post("/api/workflows/:id/question/cancel", withAdmission((req, res) => {
+  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
+  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
+  activeQuestions.get(workflow.id)?.abort(new Error("询问已取消"));
+  return res.json({ canceled: true });
+}));
+
 app.post("/api/workflows/:id/plan", withAdmission(async (req, res) => {
   const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
   if (!workflow) return res.status(404).json({ error: "工作流不存在" });
+  if (req.body?.source === "maintenance" && req.body?.intent === "question") {
+    const question = String(req.body?.note || "").trim();
+    if (!question) return res.status(400).json({ error: "请输入问题" });
+    if (question.length > 12_000) return res.status(400).json({ error: "问题过长，请聚焦一个具体问题" });
+    const snapshot = workflowQuestionSnapshot(workflow);
+    const provider = normalizeProviderId(req.body?.plannerEngine || workflow.plannerEngine);
+    const controller = new AbortController();
+    activeQuestions.get(workflow.id)?.abort(new Error("已有新的询问"));
+    activeQuestions.set(workflow.id, controller);
+    const timeout = setTimeout(() => controller.abort(new Error("询问超时，请稍后重试")), 120_000);
+    timeout.unref();
+    const disconnected = () => { if (!res.writableEnded) controller.abort(new Error("询问连接已关闭")); };
+    res.on("close", disconnected);
+    try {
+      const statusQuestion = isWorkflowStatusQuestion(question);
+      if (!statusQuestion && !ports.answerWorkflowQuestion) return res.status(409).json({ error: "当前执行器不支持无工具快照问答；可先询问任务进度，或在普通对话中分析这个问题", code: "snapshot-question-unsupported" });
+      const answer = statusQuestion ? workflowStatusAnswer(snapshot) : await ports.answerWorkflowQuestion!(snapshot, question, provider, controller.signal);
+      controller.signal.throwIfAborted();
+      if (!answer.trim()) throw new Error("询问没有返回有效回答");
+      const current = workflowRepository.get(workflow.id, req.authUser!.id);
+      if (!current) return res.status(404).json({ error: "工作流已删除" });
+      workflowRepository.appendPlannerLog(workflow.id, req.authUser!.id, workflowLog("message", "任务问答", answer));
+      const answered = workflowRepository.get(workflow.id, req.authUser!.id)!;
+      workflowEvent(workflow.id, "workflow.question.answered", req.authUser!.id, workflow.workspaceId, answered.revision);
+      return res.json({ accepted: true, queriedSnapshot: true, queryAnswer: answer, answer, snapshotRevision: snapshot.revision, capturedAt: snapshot.capturedAt, workflow: answered });
+    } catch (error) {
+      if (!res.destroyed) return res.status(controller.signal.aborted ? 409 : 502).json({ error: error instanceof Error ? error.message : String(error), code: "snapshot-question-failed" });
+      return;
+    } finally {
+      clearTimeout(timeout);
+      res.off("close", disconnected);
+      if (activeQuestions.get(workflow.id) === controller) activeQuestions.delete(workflow.id);
+    }
+  }
   const existingController = activeWorkflowPlanners.get(workflow.id);
   if (existingController || workflow.status === "planning") {
     return res.status(202).json({ accepted: true, alreadyRunning: true, workflow: workflowRepository.get(workflow.id, req.authUser!.id) });
@@ -540,7 +601,10 @@ app.post("/api/workflows/:id/approve", withAdmission(async (req, res) => {
     if (workflowRuntimeActive(workflow.id)) throw new Error("规划仍在结束，请稍后批准执行");
     await assertWorkflowExecutionReady(workflow, req.authUser!.id);
     const snapshot = workflow.activePlanVersion > 1 ? await captureWorkspaceSnapshot(workflow.executionRoot || workflow.workDirectory) : undefined;
-    const approved = workflowRepository.approve(workflow.id, req.authUser!.id, Number(req.body?.revision), { snapshot });
+    const validationMode = req.body?.validationMode;
+    if (validationMode !== undefined && !["standard", "strict", "deterministic"].includes(validationMode)) throw new Error("无效的验收方式");
+    if (workflow.plan?.validationMode === "deterministic" && validationMode === undefined) throw new Error("机器验收需要在计划审批时明确选择；可选择标准或严格验收");
+    const approved = await workflowRepository.approveWithEvidence(workflow.id, req.authUser!.id, Number(req.body?.revision), snapshot, validationMode);
     workflowStateFiles.sync(approved);
     workflowStateFiles.applyMaintenance(approved);
     workflowStateFiles.appendEvent(approved, { type: "plan.approved", payload: { version: approved.activePlanVersion } });

@@ -9,7 +9,8 @@ import { promisify } from "node:util";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { normalizeWorkflowPlan, plannerTurnPrompt, planSystemPrompt, validateWorkflowPlan } from "../dist-server/workflows/plan.js";
-import { failedDependencyReason, missingRequiredArtifacts, normalizeWorkflowNodeResult, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowRetryLimit, workflowResultArtifactPaths } from "../dist-server/workflows/execution.js";
+import { failedDependencyReason, missingRequiredArtifacts, normalizeWorkflowNodeResult, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowNodeResultGateIssues, workflowRetryLimit, workflowResultArtifactPaths } from "../dist-server/workflows/execution.js";
+import { parseWorkflowArtifactDeclaration, workflowRequiredArtifactMatches } from "../dist-server/plugins/orchestration/artifactDeclarations.js";
 import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommand, snapshotEntryIgnored, tokenizeVerificationCommand, validateVerificationCommand, verificationSpawnSpec } from "../dist-server/workflows/enforcement.js";
 import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent } from "../dist-server/workflows/logs.js";
 import { compactPlannerLogs, WorkflowRepository } from "../dist-server/workflows/repository.js";
@@ -129,6 +130,15 @@ assert.match(codexWorkflowPlannerToolInstructions(), /不能调用 tools\.workfl
 assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_read_node_contract/);
 assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_commit_result/);
 assert.match(planSystemPrompt([], [], "", 3), /验证命令必须具有能力闭环/);
+assert.deepEqual(parseWorkflowArtifactDeclaration("src/math.js"), { kind: "path", path: "src/math.js" });
+assert.deepEqual(parseWorkflowArtifactDeclaration("src/math.js with corrected addition operator"), { kind: "described", path: "src/math.js", description: "corrected addition operator" });
+assert.equal(parseWorkflowArtifactDeclaration("src/math.js and tests/math.test.js").kind, "ambiguous", "多个路径不能作为一个交付声明");
+assert.equal(parseWorkflowArtifactDeclaration("研究摘要").kind, "text", "纯文本成果不应被误判成文件路径");
+assert.equal(workflowRequiredArtifactMatches("report.md", ["deliverables/report.md"]), true, "旧版 basename 依赖仅在唯一匹配时兼容");
+assert.equal(workflowRequiredArtifactMatches("report.md", ["a/report.md", "b/report.md"]), false, "重复 basename 不得模糊匹配");
+const gateResult = normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "完成", outputs: [{ id: "report", type: "file", path: "deliverables/report.md", mediaType: "text/markdown", description: "报告", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] });
+assert.deepEqual(workflowNodeResultGateIssues(gateResult, { downstreamNodeIds: [], deliverables: ["report.md"], executionRoot: "/tmp/project" }), [], "唯一 basename 交付声明应兼容已登记产物");
+assert.match(workflowNodeResultGateIssues(gateResult, { downstreamNodeIds: [], deliverables: ["src/math.js with corrected addition operator"] }).join("；"), /计划产物声明存在歧义|缺少计划要求的文件产物声明/, "描述混入路径时必须阻止错误提交");
 assert.match(planSystemPrompt([], [], "", 3, { claudeAvailable: true, codexAvailable: false }), /Claude（claude）：可用、可写；Codex（codex）：不可用、可写/);
 const missingProviderReason = normalizeWorkflowPlan({ ...validPlan, nodes: [{ ...validPlan.nodes[0], providerReason: "" }] });
 assert.match(validateWorkflowPlan(missingProviderReason, new Set()).join("；"), /缺少模型选择理由/);
@@ -921,7 +931,7 @@ assert.deepEqual(missingRequiredArtifacts(approved.nodes[1], approved.nodes), ["
 approved.nodes[0].summary.outputs = [{ id: "research", type: "document", path: "artifacts/research.md", mediaType: "text/markdown", description: "研究结果", consumableBy: ["implement"] }];
 assert.deepEqual(missingRequiredArtifacts(approved.nodes[1], approved.nodes), []);
 const transitiveArtifactNodes = [
-  { ...approved.nodes[0], id: "source", status: "completed", dependsOn: [], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "祖先产物", outputs: [{ id: "evidence", type: "document", path: "task/work/source/evidence.md", description: "证据", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
+  { ...approved.nodes[0], id: "source", status: "completed", dependsOn: [], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "祖先产物", outputs: [{ id: "evidence", type: "document", path: "work/source/evidence.md", description: "证据", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
   { ...approved.nodes[0], id: "middle", status: "completed", dependsOn: ["source"], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "中间交接", outputs: [], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
   { ...approved.nodes[1], id: "consumer", status: "pending", dependsOn: ["middle"], requiredArtifacts: ["work/source/evidence.md"] }
 ];

@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { normalizeWorkflowNodeResult } from "./execution.js";
 import { captureWorkspaceSnapshotSync, type WorkspaceSnapshot } from "./enforcement.js";
 import { workflowCompletedFileIntegrityIssues, workflowResultFileIntegrityIssue } from "./fileIntegrity.js";
+import { workflowCompletedFileIntegrityIssuesAsync, workflowResultFileIntegrityIssueAsync } from "./fileIntegrityAsync.js";
 import { reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction } from "./nodeResultTransactions.js";
 import { normalizeWorkflowPlan, workflowNodeContractDigest } from "./plan.js";
 import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowExecutionTarget, type WorkflowIntegrationPhase, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowRecord, type WorkflowStatus } from "./types.js";
@@ -370,11 +371,42 @@ export class WorkflowRepository {
     return this.get(id, ownerUserId)!;
   }
 
-  approve(id: string, ownerUserId: string, revision: number, options: { snapshot?: WorkspaceSnapshot } = {}) {
+  /** Product path: expensive evidence scans yield without holding a SQLite transaction. */
+  async approveWithEvidence(id: string, ownerUserId: string, revision: number, snapshot?: WorkspaceSnapshot, validationMode?: WorkflowPlan["validationMode"]) {
+    const row = this.require(id, ownerUserId);
+    if (row.revision !== revision || row.status !== "awaiting_approval") throw new Error("工作流已更新或不在待审批状态，请刷新后重试");
+    const workflow = this.get(id, ownerUserId)!;
+    const prior = row.active_plan_version > 1 ? this.hydrate({ ...row, active_plan_version: row.active_plan_version - 1 }, true) : null;
+    const previousRows = this.db.prepare("SELECT * FROM workflow_nodes WHERE workflow_id = ? AND plan_version < ? ORDER BY plan_version DESC, rowid").all(id, row.active_plan_version) as any[];
+    const previousById = new Map<string, any>();
+    for (const previous of previousRows) if (!previousById.has(previous.node_key)) previousById.set(previous.node_key, previous);
+    const eligible = new Set(workflow.plan!.nodes.filter((node) => previousById.get(node.id)?.contract_digest === workflowNodeContractDigest(node)).map((node) => node.id));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of workflow.plan!.nodes) if (eligible.has(node.id) && node.dependsOn.some((dependency) => !eligible.has(dependency))) { eligible.delete(node.id); changed = true; }
+    }
+    const priorIssues = prior && snapshot ? await workflowCompletedFileIntegrityIssuesAsync(prior, snapshot, eligible) : null;
+    const fileIssues = new Map<string, string | null>();
+    for (const previous of previousById.values()) {
+      if (previous.status !== "completed" || !previous.summary_json || !previous.result_digest) continue;
+      const issue = priorIssues && previous.plan_version === prior?.activePlanVersion
+        ? priorIssues.get(previous.node_key) || null
+        : await workflowResultFileIntegrityIssueAsync(workflow, normalizeWorkflowNodeResult(parse(previous.summary_json, {})), snapshot);
+      fileIssues.set(previous.id, issue);
+    }
+    return this.approve(id, ownerUserId, revision, { snapshot, fileIssues, validationMode });
+  }
+
+  approve(id: string, ownerUserId: string, revision: number, options: { snapshot?: WorkspaceSnapshot; fileIssues?: Map<string, string | null>; validationMode?: WorkflowPlan["validationMode"] } = {}) {
     const row = this.require(id, ownerUserId); if (row.revision !== revision) throw new Error("工作流已更新，请刷新后重试");
     if (row.status !== "awaiting_approval") throw new Error("当前计划不在待审批状态");
     const planRow = this.db.prepare("SELECT plan_json FROM workflow_plan_versions WHERE workflow_id = ? AND version = ?").get(id, row.active_plan_version) as { plan_json: string };
     const plan = normalizeWorkflowPlan(JSON.parse(planRow.plan_json)); const now = new Date().toISOString();
+    if (options.validationMode) {
+      if (!["standard", "strict", "deterministic"].includes(options.validationMode)) throw new Error("无效的验收方式");
+      plan.validationMode = options.validationMode;
+    }
     const previousRows = this.db.prepare("SELECT * FROM workflow_nodes WHERE workflow_id = ? AND plan_version < ? ORDER BY plan_version DESC, rowid").all(id, row.active_plan_version) as any[];
     const previousById = new Map<string, any>();
     for (const previous of previousRows) if (!previousById.has(previous.node_key)) previousById.set(previous.node_key, previous);
@@ -394,7 +426,7 @@ export class WorkflowRepository {
         eligibleWriters.delete(node.id); writerEligibilityChanged = true;
       }
     }
-    const priorIssues = currentSnapshot && priorWorkflow ? workflowCompletedFileIntegrityIssues(priorWorkflow, currentSnapshot, eligibleWriters) : null;
+    const priorIssues = !options.fileIssues && currentSnapshot && priorWorkflow ? workflowCompletedFileIntegrityIssues(priorWorkflow, currentSnapshot, eligibleWriters) : null;
     const reusable = new Set<string>();
     let expanded = true;
     while (expanded) {
@@ -404,7 +436,7 @@ export class WorkflowRepository {
         const previous = previousById.get(node.id);
         if (!previous || previous.status !== "completed" || !previous.summary_json || !previous.result_digest) continue;
         if (String(previous.contract_digest || "") !== workflowNodeContractDigest(node)) continue;
-        const fileIssue = priorIssues && previous.plan_version === priorWorkflow?.activePlanVersion
+        const fileIssue = options.fileIssues?.has(previous.id) ? options.fileIssues.get(previous.id) : priorIssues && previous.plan_version === priorWorkflow?.activePlanVersion
           ? priorIssues.get(node.id)
           : workflowResultFileIntegrityIssue(workflow, normalizeWorkflowNodeResult(parse(previous.summary_json, {})), currentSnapshot);
         if (snapshotIssue || fileIssue) continue;
@@ -413,7 +445,9 @@ export class WorkflowRepository {
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE workflow_plan_versions SET status = 'approved', approved_at = ? WHERE workflow_id = ? AND version = ?").run(now, id, row.active_plan_version);
+      const lockedRow = this.require(id, ownerUserId);
+      if (lockedRow.revision !== revision || lockedRow.status !== "awaiting_approval" || lockedRow.active_plan_version !== row.active_plan_version) throw new Error("工作流已更新，请刷新后重试");
+      this.db.prepare("UPDATE workflow_plan_versions SET status = 'approved', approved_at = ?, plan_json = ? WHERE workflow_id = ? AND version = ?").run(now, JSON.stringify(plan), id, row.active_plan_version);
       const insert = this.db.prepare("INSERT INTO workflow_nodes (id, workflow_id, plan_version, node_key, status, provider, provider_reason, contract_digest, prompt, non_goals_json, constraints_json, depends_json, skill_names_json, mcp_servers_json, mcp_required, workspace_access, write_scope_json, required_artifacts_json, deliverables_json, acceptance_json, verification_commands_json, failure_policy, required, logs_json) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')");
       const reuse = this.db.prepare("UPDATE workflow_nodes SET status = 'completed', attempt = ?, summary_json = ?, result_digest = ?, logs_json = ?, started_at = ?, finished_at = ? WHERE id = ?");
       for (const node of plan.nodes) {
@@ -757,8 +791,9 @@ export class WorkflowRepository {
           const resolvedCheckpointRoot = path.resolve(checkpointRoot);
           const preserveHostVerification = fs.existsSync(path.join(checkpointDirectory, "host-verification.json"));
           if (checkpointDirectory !== resolvedCheckpointRoot && checkpointDirectory.startsWith(`${resolvedCheckpointRoot}${path.sep}`)) {
-            if (preserveHostVerification) {
-              for (const name of fs.readdirSync(checkpointDirectory)) if (!["host-verification.json", "before-snapshot.json"].includes(name)) fs.rmSync(path.join(checkpointDirectory, name), { recursive: true, force: true });
+            if (preserveHostVerification || fs.existsSync(path.join(checkpointDirectory, "recovery-guard.json"))) {
+              const preserved = ["recovery-guard.json", ...(preserveHostVerification ? ["host-verification.json", "host-command-evidence.json", "before-snapshot.json"] : [])];
+              for (const name of fs.readdirSync(checkpointDirectory)) if (!preserved.includes(name)) fs.rmSync(path.join(checkpointDirectory, name), { recursive: true, force: true });
             } else fs.rmSync(checkpointDirectory, { recursive: true, force: true });
           }
           this.db.prepare("UPDATE workflow_node_attempts SET status = 'running', phase = 'claimed', runner_id = ?, lease_expires_at = ?, raw_output = NULL, parsed_result_json = NULL, verified_result_json = NULL, result_repair_count = 0, verification_run_count = CASE WHEN ? THEN verification_run_count ELSE 0 END, finished_at = NULL, updated_at = ?, error = NULL WHERE id = ?")
@@ -982,14 +1017,16 @@ export class WorkflowRepository {
   private hydrate(row: WorkflowRow, detail: boolean): WorkflowRecord {
     const planRow = row.active_plan_version ? this.db.prepare("SELECT plan_json FROM workflow_plan_versions WHERE workflow_id = ? AND version = ?").get(row.id, row.active_plan_version) as { plan_json: string } | undefined : undefined;
     const plan = planRow ? normalizeWorkflowPlan(JSON.parse(planRow.plan_json)) : null;
+    const planNodes = new Map(plan?.nodes.map((node) => [node.id, node]));
     const nodeRows = detail ? this.db.prepare("SELECT * FROM workflow_nodes WHERE workflow_id = ? AND plan_version = ? ORDER BY rowid").all(row.id, row.active_plan_version) as any[] : [];
     const repairableNodes = new Set<string>();
     if (detail) for (const attempt of this.db.prepare("SELECT node_record_id, raw_output, parsed_result_json, verified_result_json, checkpoint_directory FROM workflow_node_attempts WHERE workflow_id = ? ORDER BY node_record_id, attempt DESC").all(row.id) as any[]) {
       if (attempt.raw_output || recoverableAttemptResult(attempt)) repairableNodes.add(attempt.node_record_id);
     }
     const nodes: WorkflowNodeRecord[] = nodeRows.map((node) => ({
-      id: node.node_key, title: plan?.nodes.find((item) => item.id === node.node_key)?.title || node.node_key, objective: node.prompt,
-      nonGoals: parse(node.non_goals_json, []), constraints: parse(node.constraints_json, []), dependsOn: parse(node.depends_json, []), provider: node.provider, providerReason: String(node.provider_reason || plan?.nodes.find((item) => item.id === node.node_key)?.providerReason || ""), skills: parse(node.skill_names_json, []), mcpServers: parse(node.mcp_servers_json, []), mcpRequired: Boolean(node.mcp_required), workspaceAccess: node.workspace_access,
+      id: node.node_key, title: planNodes.get(node.node_key)?.title || node.node_key, objective: node.prompt,
+      ...(planNodes.get(node.node_key)?.contractRefs !== undefined ? { contractRefs: planNodes.get(node.node_key)!.contractRefs } : {}),
+      nonGoals: parse(node.non_goals_json, []), constraints: parse(node.constraints_json, []), dependsOn: parse(node.depends_json, []), provider: node.provider, providerReason: String(node.provider_reason || planNodes.get(node.node_key)?.providerReason || ""), skills: parse(node.skill_names_json, []), mcpServers: parse(node.mcp_servers_json, []), mcpRequired: Boolean(node.mcp_required), workspaceAccess: node.workspace_access,
       writeScope: parse(node.write_scope_json, []), requiredArtifacts: parse(node.required_artifacts_json, []), deliverables: parse(node.deliverables_json, []), acceptance: parse(node.acceptance_json, []), verificationCommands: parse(node.verification_commands_json, []), failurePolicy: node.failure_policy, required: Boolean(node.required),
       recordId: node.id, workflowId: row.id, planVersion: node.plan_version, status: node.status, attempt: node.attempt, engineThreadId: node.engine_thread_id || null, contextRecoveryCount: node.context_recovery_count || 0, contextRecoveryMode: node.context_recovery_mode || null, idempotencyKey: node.idempotency_key,
       summary: node.summary_json ? normalizeWorkflowNodeResult(parse(node.summary_json, {})) : null, resultDigest: node.result_digest, staleReason: node.stale_reason, logs: parse(node.logs_json, []), error: node.error, resultRepairable: repairableNodes.has(node.id), leaseExpiresAt: node.lease_expires_at, nextRetryAt: node.next_retry_at, startedAt: node.started_at, finishedAt: node.finished_at

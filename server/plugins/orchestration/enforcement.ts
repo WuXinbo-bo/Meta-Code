@@ -232,7 +232,8 @@ function appendEvidence(current: string, chunk: Buffer | string) {
   return next.length > MAX_EVIDENCE_CHARS ? `${next.slice(0, MAX_EVIDENCE_CHARS)}\n...[输出已截断]` : next;
 }
 
-export async function runVerificationCommand(command: string, cwd: string, signal: AbortSignal, ownerId: string): Promise<WorkflowNodeCheck> {
+export async function runVerificationCommand(command: string, cwd: string, signal: AbortSignal, ownerId: string, observation?: { onStarted?: () => void; onStartFailure?: () => void }): Promise<WorkflowNodeCheck> {
+  signal.throwIfAborted();
   let executable: string;
   let args: string[];
   try {
@@ -248,10 +249,13 @@ export async function runVerificationCommand(command: string, cwd: string, signa
     try {
       child = spawn(launch.executable, launch.args, { cwd, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
     } catch (error) {
+      observation?.onStartFailure?.();
       resolve({ name: command, command, status: "failed", exitCode: null, evidence: error instanceof Error ? error.message : String(error) });
       return;
     }
     registerProcessTree(ownerId, child);
+    let started = false;
+    child.once("spawn", () => { started = true; observation?.onStarted?.(); });
     child.stdout?.on("data", (chunk) => { evidence = appendEvidence(evidence, chunk); });
     child.stderr?.on("data", (chunk) => { evidence = appendEvidence(evidence, chunk); });
     const finish = (status: "passed" | "failed", exitCode: number | null, suffix?: string) => {
@@ -266,7 +270,7 @@ export async function runVerificationCommand(command: string, cwd: string, signa
     const timer = setTimeout(() => { terminateProcessTree(child); finish("failed", null, `验收命令超过 ${VERIFICATION_TIMEOUT_MS / 60_000} 分钟`); }, VERIFICATION_TIMEOUT_MS);
     timer.unref();
     signal.addEventListener("abort", onAbort, { once: true });
-    child.once("error", (error) => finish("failed", null, error.message));
+    child.once("error", (error) => { if (!started) observation?.onStartFailure?.(); finish("failed", null, error.message); });
     child.once("close", (code) => finish(code === 0 ? "passed" : "failed", code));
   });
 }

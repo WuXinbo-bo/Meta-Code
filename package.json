@@ -156,7 +156,13 @@
     "desktop:package:dir": "node scripts/build-desktop-package.mjs --dir-only",
     "install:blender-mcp": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-blender-mcp.ps1",
     "test:plugin-lifecycle": "node --import tsx scripts/test-plugin-lifecycle.mjs",
-    "test:plugin-api": "node scripts/test-plugin-api.mjs"
+    "test:plugin-api": "node scripts/test-plugin-api.mjs",
+    "test:workflow-protocol-v2": "node --import tsx scripts/test-workflow-protocol-v2.mjs",
+    "test:workflow-transaction-lock": "node --import tsx scripts/test-workflow-transaction-lock.mjs",
+    "test:task-history-ledger": "node --import tsx scripts/test-task-history-ledger.mjs",
+    "test:workflow-live-metrics": "node scripts/test-workflow-live-metrics.mjs",
+    "test:workflow-file-integrity-async": "node --import tsx scripts/test-workflow-file-integrity-async.mjs",
+    "test:workflow-runtime-policies": "node --import tsx scripts/test-workflow-runtime-policies.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

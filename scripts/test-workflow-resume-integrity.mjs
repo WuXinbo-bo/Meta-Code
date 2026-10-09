@@ -19,14 +19,17 @@ const workspaces = new Map();
 const activeNodes = new Map();
 const calls = [];
 const originalReaddir = fs.readdir;
+const workflowTicks = new Set();
+let capabilityGate;
+let bindingGate;
 const scheduler = createOrchestrationScheduler({
-  workflowRepository: repository, workflowStateFiles: stateFiles, workflowTicks: new Set(),
+  workflowRepository: repository, workflowStateFiles: stateFiles, workflowTicks,
   workspaceById: (id) => workspaces.get(id), isEnabled: () => true,
   activeWorkflowNodes: activeNodes, activeWorkflowIntegrations: new Map(), activeDelegationTasks: new Map(), workflowNodeIntents: new Map(),
   syncWorkflowProtocolFiles: () => {}, appendWorkflowProtocolEvent: () => {}, workflowEvent: () => {},
   integrateWorkflow: async (id) => { calls.push(`${id}:integration`); repository.updateRun(id, "completed"); },
-  currentWorkflowProviderCapabilities: async () => DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES,
-  runtimeBindingForProvider: async () => ({ capabilityFingerprint: "fixture" }), WORKFLOW_RUNNER_ID: "fixture",
+  currentWorkflowProviderCapabilities: async () => { if (capabilityGate) await capabilityGate(); return DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES; },
+  runtimeBindingForProvider: async () => { if (bindingGate) await bindingGate(); return { capabilityFingerprint: "fixture" }; }, WORKFLOW_RUNNER_ID: "fixture",
   skillProjectionManager: { acquireTemporarySkills: () => () => {} }, workspaceTreeIndex: { invalidate: () => {} },
   executeWorkflowNode: async (id, _owner, nodeId) => { calls.push(`${id}:${nodeId}`); return result(); },
   workflowResultDigest: (value) => JSON.stringify(value)
@@ -208,6 +211,74 @@ try {
   fs.readdir = originalReaddir;
   assert.equal(repository.get(cancelActive.id, "owner").status, "canceled", "Snapshot errors cannot overwrite a concurrent user cancellation");
   assert.ok(!calls.includes(`${cancelActive.id}:consumer`));
+
+  const cycleRoot = await prepare("pause-resume-during-snapshot");
+  let cycleEntered;
+  let rejectOldSnapshot;
+  const cycleWaiting = new Promise((resolve) => { cycleEntered = resolve; });
+  fs.readdir = async (...args) => {
+    if (args[0] !== cycleRoot) return originalReaddir(...args);
+    cycleEntered();
+    return new Promise((_resolve, reject) => { rejectOldSnapshot = () => reject(new Error("Obsolete snapshot failure")); });
+  };
+  const cycle = repository.get("pause-resume-during-snapshot", "owner");
+  repository.resume(cycle.id, "owner", cycle.revision);
+  scheduler.queueWorkflowTick(cycle.id, "owner");
+  await cycleWaiting;
+  const cycling = repository.get(cycle.id, "owner");
+  repository.pause(cycle.id, "owner", cycling.revision);
+  repository.resume(cycle.id, "owner", repository.get(cycle.id, "owner").revision);
+  fs.readdir = originalReaddir;
+  rejectOldSnapshot();
+  await until(() => ["completed", "needs_review"].includes(repository.get(cycle.id, "owner").status));
+  assert.equal(repository.get(cycle.id, "owner").status, "completed", "A previous pause/resume generation cannot apply its stale snapshot error to the resumed run");
+  await until(() => activeNodes.size === 0 && workspaceExecutionCoordinator.snapshot().active.length === 0);
+
+  for (const boundary of ["capability", "binding"]) {
+    const id = `pause-node-during-${boundary}`;
+    await prepare(id);
+    const consumer = repository.get(id, "owner").nodes.find((node) => node.id === "consumer");
+    consumer.provider = "auto";
+    repository.updateNode(consumer);
+    let release;
+    let entered;
+    const waiting = new Promise((resolve) => { entered = resolve; });
+    const promise = new Promise((resolve) => { release = resolve; });
+    const gate = async () => { entered(); await promise; };
+    if (boundary === "capability") capabilityGate = gate; else bindingGate = gate;
+    const paused = repository.get(id, "owner");
+    repository.resume(id, "owner", paused.revision);
+    scheduler.queueWorkflowTick(id, "owner");
+    await waiting;
+    repository.requestNodePause(id, "owner", "consumer");
+    release();
+    await until(() => !workflowTicks.has(id));
+    const after = repository.get(id, "owner").nodes.find((node) => node.id === "consumer");
+    assert.equal(after.status, "paused", `${boundary} discovery must not overwrite a concurrent node pause`);
+    assert.equal(after.provider, "auto", "A stopped node must not be rewritten using a stale dispatch record");
+    assert.ok(!calls.includes(`${id}:consumer`));
+    capabilityGate = undefined; bindingGate = undefined;
+    const current = repository.get(id, "owner");
+    repository.cancel(id, "owner", current.revision);
+    scheduler.queueWorkflowTick(id, "owner");
+    await until(() => workspaceExecutionCoordinator.snapshot().active.length === 0);
+  }
+
+  for (const action of ["cancel", "replace"]) {
+    const id = `${action}-during-approval-evidence`;
+    const approvalRoot = await prepare(id);
+    const approvalBase = repository.get(id, "owner");
+    const approvalCandidate = repository.saveMaintenancePlan(id, "owner", approvalBase.plan);
+    const approvalSnapshot = await captureWorkspaceSnapshot(approvalRoot);
+    const pendingApproval = repository.approveWithEvidence(id, "owner", approvalCandidate.revision, approvalSnapshot);
+    if (action === "cancel") repository.cancel(id, "owner", approvalCandidate.revision);
+    else repository.saveMaintenancePlan(id, "owner", normalizeWorkflowPlan({ ...approvalBase.plan, title: "A newer candidate" }));
+    await assert.rejects(pendingApproval, /已更新|待审批/);
+    const current = repository.get(id, "owner");
+    assert.equal(current.status, action === "cancel" ? "canceled" : "awaiting_approval", "Async approval evidence cannot approve a canceled or replaced revision");
+    assert.equal(current.activePlanVersion, action === "cancel" ? 2 : 3);
+    assert.equal(current.nodes.length, 0, "A rejected approval must not insert executable nodes");
+  }
 
   const tampered = await prepare("tampered-refinement", true);
   await fs.writeFile(path.join(tampered, "shared.txt"), "external edit after refinement");

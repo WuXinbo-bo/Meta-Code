@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { WorkflowNodeCheck, WorkflowNodeOutput, WorkflowNodeRecord, WorkflowNodeResult } from "./types.js";
+import { parseWorkflowArtifactDeclaration, workflowArtifactPathKey, workflowRequiredArtifactMatches } from "./artifactDeclarations.js";
 
 const stringList = (value: unknown) => Array.isArray(value) ? value.map((item) => String(item || "").trim()).filter(Boolean) : [];
 const nullableString = (value: unknown) => String(value || "").trim() || null;
@@ -113,6 +114,7 @@ export function workflowResultArtifactPaths(result: WorkflowNodeResult | null | 
 export type WorkflowNodeResultGateOptions = {
   downstreamNodeIds: string[];
   deliverables?: string[];
+  executionRoot?: string;
   artifactIssue?: (reportedPath: string) => string | null;
 };
 
@@ -133,25 +135,19 @@ export function workflowNodeResultGateIssues(result: WorkflowNodeResult, options
     if (issue) issues.push(issue);
   }
   if (result.outcome === "completed") {
-    const available = workflowResultArtifactPaths(result);
-    const missingDeliverables = (options.deliverables || []).filter(looksLikeArtifactPath).filter((required) => !artifactMatches(required, available));
+    const availablePaths = workflowResultArtifactPaths(result);
+    const declarations = (options.deliverables || []).map((value) => ({ value, declaration: parseWorkflowArtifactDeclaration(value) }));
+    const ambiguous = declarations.filter(({ declaration }) => declaration.kind === "ambiguous");
+    if (ambiguous.length) issues.push(`计划产物声明存在歧义，须调整计划为单独的精确路径，描述放入 objective 或 acceptance：${ambiguous.map(({ value }) => value).join(", ")}`);
+    const missingDeliverables = declarations.filter(({ declaration }) => (declaration.kind === "path" || declaration.kind === "described")
+      && !workflowRequiredArtifactMatches(declaration.path, availablePaths.map((value) => workflowArtifactPathKey(value, options.executionRoot)))).map(({ declaration }) => declaration.kind === "path" || declaration.kind === "described" ? declaration.path : "");
     if (missingDeliverables.length) issues.push(`缺少计划要求的文件产物声明：${missingDeliverables.join(", ")}`);
   }
   return [...new Set(issues)];
 }
 
-function looksLikeArtifactPath(value: string) {
-  return /[\\/]/.test(value) || /\.[a-z0-9]{1,10}$/i.test(value.trim());
-}
-
-const normalizedArtifact = (value: string) => value.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
-
 export function artifactMatches(required: string, available: string[]) {
-  const target = normalizedArtifact(required);
-  return available.some((item) => {
-    const candidate = normalizedArtifact(item);
-    return candidate === target || candidate.endsWith(`/${target}`) || target.endsWith(`/${candidate}`);
-  });
+  return workflowRequiredArtifactMatches(required, available);
 }
 
 export function missingRequiredArtifacts(node: WorkflowNodeRecord, nodes: WorkflowNodeRecord[]) {

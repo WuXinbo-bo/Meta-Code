@@ -170,6 +170,7 @@ export function workflowNodeResultTransactionIssues(transaction: WorkflowNodeRes
   errors.push(...workflowNodeResultGateIssues(transaction.draftResult, {
     downstreamNodeIds: transaction.downstreamNodeIds,
     deliverables: contract.outputs?.deliverables || [],
+    executionRoot: workDirectory || undefined,
     artifactIssue: workDirectory ? (reportedPath) => {
       try { resolveWorkflowResultPath({ workDirectory }, reportedPath, true); return null; }
       catch (error) { return error instanceof Error ? error.message : String(error); }

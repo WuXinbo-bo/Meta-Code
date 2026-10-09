@@ -14,7 +14,7 @@ import "/src/design/workflow.css";
 
 const scenario = new URLSearchParams(location.search).get("scenario") || "running";
 const isWorktree = scenario.startsWith("worktree");
-const now = "2026-10-08T12:00:00.000Z";
+const now = "2026-10-09T12:00:00.000Z";
 const workspaceId = "visual-workspace";
 const providers = ["codex", "claude"].map((id, index) => ({
   id, adapterId: id, runtimeId: id, displayName: id === "codex" ? "Codex" : "Claude", shortName: id === "codex" ? "Codex" : "Claude",
@@ -38,6 +38,7 @@ const planNodes = [
   { id: "implement", title: "实现与回归验证", objective: "更新 payments 接口并验证兼容性", nonGoals: [], constraints: [], dependsOn: ["research"], provider: "codex", providerReason: "实现代码并运行回归验证", skills: [], mcpServers: [], mcpRequired: false, workspaceAccess: "write", writeScope: ["src/payments/**", "tests/payments/**"], requiredArtifacts: [], deliverables: ["兼容接口"], acceptance: ["现有测试通过"], verificationCommands: ["npm test"] }
 ];
 const plan = {
+  validationMode: "standard",
   title: "支付接口维护", summary: "保留现有接口合同，先检查现有实现，再进行代码与测试更新。", assumptions: [], questions: [], risks: [],
   finalDelivery: { required: false, directory: "", primary: null, format: "", additional: [], producerNodeId: null, reason: "直接修改现有项目" },
   audit: { status: "passed", checks: [{ key: "write-scope", status: "passed", note: "写入范围已限制在支付模块和对应测试" }], changes: [] }, nodes: planNodes
@@ -93,18 +94,23 @@ window.fetch = async (input, options = {}) => {
   if (path === `/api/workflows/${workflow.id}/branches`) return response([workflow]);
   if (path === `/api/workflows/${workflow.id}/artifacts`) return response({ items: [] });
   if (path === `/api/workflows/${workflow.id}/plan`) {
+    if (body.source === "maintenance" && body.intent === "question") {
+      const snapshotRevision = workflow.revision;
+      const answer = `截至快照版本 ${snapshotRevision}：项目结构研究已完成，实现与回归仍在执行。问题不会暂停节点。`;
+      workflow.plannerLogs.push({ id: `question-${workflow.revision}`, createdAt: now, kind: "message", title: "任务问答", text: answer });
+      workflow.revision++;
+      return response({ accepted: true, queriedSnapshot: true, queryAnswer: answer, answer, snapshotRevision, capturedAt: now, workflow });
+    }
     if (body.source === "maintenance") {
-      if (scenario !== "conversation") {
-        workflow.pendingMaintenance = { note: body.note, intent: body.intent, plannerEngine: body.plannerEngine, requestedAt: now, resumeAfter: true };
-        workflow.pauseMode = "checkpoint";
-      }
+      workflow.pendingMaintenance = { note: body.note, intent: body.intent, plannerEngine: body.plannerEngine, requestedAt: now, resumeAfter: true };
+      workflow.pauseMode = "checkpoint";
       workflow.revision++;
       maintenance = { ...maintenance, messages: [...maintenance.messages, { id: "maintenance-user", role: "user", text: body.note, createdAt: now }] };
       return response({ accepted: true, alreadyRunning: false, queuedUntilCheckpoint: true, workflow });
     }
     return response({ accepted: true, alreadyRunning: false, workflow });
   }
-  if (path === `/api/workflows/${workflow.id}/approve`) { workflow.status = "running"; workflow.revision++; return response(workflow); }
+  if (path === `/api/workflows/${workflow.id}/approve`) { workflow.plan.validationMode = body.validationMode || workflow.plan.validationMode; workflow.status = "running"; workflow.revision++; return response(workflow); }
   if (path === `/api/workflows/${workflow.id}/pause`) { workflow.pauseMode = "checkpoint"; workflow.status = "paused"; workflow.revision++; return response(workflow); }
   if (path === `/api/workflows/${workflow.id}/resume`) { workflow.status = "running"; workflow.revision++; return response(workflow); }
   if (path === `/api/workflows/${workflow.id}/worktree/compare`) return response(comparison);

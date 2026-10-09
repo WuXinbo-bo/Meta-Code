@@ -176,7 +176,7 @@ function schedulerHarness({ fallback = false, startupFault = "", persistentStart
     get: () => workflow,
     updateRun: (_id, status) => { workflow.status = status; },
     updateNode: () => {},
-    claimNodeAttempt: () => { counters.claims++; node.status = "running"; node.attempt++; const attempt = { id: `attempt-${node.attempt}`, attempt: node.attempt, status: "running" }; attempts.push(attempt); return attempt; },
+    claimNodeAttempt: (_nodeId, _runnerId, checkpointRoot) => { counters.claims++; node.status = "running"; node.attempt++; const attempt = { id: `attempt-${node.attempt}`, attempt: node.attempt, status: "running", checkpointDirectory: path.join(checkpointRoot, `attempt-${node.attempt}`) }; attempts.push(attempt); return attempt; },
     checkpointNodeAttempt: (id, update) => { const attempt = attempts.find(item => item.id === id); if (attempt) Object.assign(attempt, update); },
     invalidateCompletedDependents: () => {}
   };

@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { Workspace } from "../../workbench/types.js";
-import type { WorkflowRecord, WorkflowNodeResult, WorkflowNodeAttemptRecord } from "./types.js";
+import type { WorkflowRecord, WorkflowNodeRecord, WorkflowNodeResult, WorkflowNodeAttemptRecord } from "./types.js";
 import { DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS } from "./types.js";
 import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
 import type { WorkflowProviderCapabilities } from "./plan.js";
@@ -15,7 +15,8 @@ import { timeoutReason } from "../../orchestration/timeouts.js";
 import { WorkflowNodeOutcomeError, WorkflowNodeStageRetryError } from "./errors.js";
 import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "../../runtime/workspaceExecutionCoordinator.js";
 import { captureWorkspaceSnapshot } from "./enforcement.js";
-import { workflowCompletedFileIntegrityIssues } from "./fileIntegrity.js";
+import { workflowCompletedFileIntegrityIssuesAsync } from "./fileIntegrityAsync.js";
+import { workflowRecoveryReplayIssue } from "./recoveryGuard.js";
 
 export type OrchestrationSchedulerPorts = {
   workflowTicks: Set<string>;
@@ -135,11 +136,12 @@ function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: stri
 }
 
 async function tickWorkflow(workflowId: string, ownerUserId: string) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!isEnabled() || !workflow || ["completed", "canceled", "failed", "paused", "awaiting_approval", "planning", "draft", "needs_review"].includes(workflow.status)) {
+  const initialWorkflow = workflowRepository.get(workflowId, ownerUserId);
+  if (!isEnabled() || !initialWorkflow || ["completed", "canceled", "failed", "paused", "awaiting_approval", "planning", "draft", "needs_review"].includes(initialWorkflow.status)) {
     releaseIdleExecution(workflowId);
     return;
   }
+  let workflow: WorkflowRecord = initialWorkflow;
   const workspace = workspaceById(workflow.workspaceId, workflow.ownerUserId); if (!workspace) { releaseIdleExecution(workflowId); return; }
   if (!executionLeases.has(workflowId)) {
     const workflowAccess = workflow.nodes.some((node) => node.workspaceAccess === "write") ? "write" : "read";
@@ -152,7 +154,8 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
         snapshot = await captureWorkspaceSnapshot(workflow.executionRoot || workflow.workDirectory || workspace.root);
       } catch (error) {
         const latest = workflowRepository.get(workflowId, ownerUserId);
-        if (!latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
+        if (!isEnabled() || executionLeases.get(workflowId) !== lease || !latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
+        if (latest.revision !== workflow.revision) { releaseIdleExecution(workflowId); queueWorkflowTick(workflowId, ownerUserId); return; }
         const reason = `恢复前无法读取业务执行目录，已停止消费已完成结果：${error instanceof Error ? error.message : String(error)}`;
         const current = workflowRepository.blockStaleFileResults(workflowId, ownerUserId, new Map(latest.nodes.filter((node) => node.status === "completed").map((node) => [node.id, reason])));
         syncWorkflowProtocolFiles(workflowId, ownerUserId);
@@ -162,8 +165,12 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
         return;
       }
       const latest = workflowRepository.get(workflowId, ownerUserId);
-      if (!latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
-      const issues = workflowCompletedFileIntegrityIssues(latest, snapshot);
+      if (!isEnabled() || executionLeases.get(workflowId) !== lease || !latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
+      if (latest.revision !== workflow.revision) { releaseIdleExecution(workflowId); queueWorkflowTick(workflowId, ownerUserId); return; }
+      const issues = await workflowCompletedFileIntegrityIssuesAsync(latest, snapshot);
+      const checked = workflowRepository.get(workflowId, ownerUserId);
+      if (!isEnabled() || executionLeases.get(workflowId) !== lease || !checked || !["queued", "running", "integrating"].includes(checked.status)) { releaseIdleExecution(workflowId); return; }
+      if (checked.revision !== latest.revision) { releaseIdleExecution(workflowId); queueWorkflowTick(workflowId, ownerUserId); return; }
       if (issues.size) {
         const current = workflowRepository.blockStaleFileResults(workflowId, ownerUserId, issues);
         for (const [nodeId, issue] of issues) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.result_stale", { reason: issue }, nodeId);
@@ -172,6 +179,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
         releaseIdleExecution(workflowId);
         return;
       }
+      workflow = checked;
     }
   }
   const nowMs = Date.now();
@@ -225,13 +233,23 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
     return;
   }
   if (workflow.status === "queued") { workflowRepository.updateRun(workflowId, "running"); syncWorkflowProtocolFiles(workflowId, ownerUserId); }
-  const running = workflow.nodes.filter((node) => node.status === "running" || node.status === "queued");
+  const dispatchLease = executionLeases.get(workflowId);
   const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
-  if (workflowRepository.get(workflowId, ownerUserId)?.status !== "running") return;
-  for (const node of workflow.nodes) {
-    if (node.status !== "pending" && node.status !== "ready" && node.status !== "interrupted") continue;
-    if (!node.dependsOn.every((id) => completed.has(id))) continue;
-    if (node.workspaceAccess === "write" && running.some((other) => other.workspaceAccess === "write" && workflowWriteScopesOverlap(workflowAuthorizedWriteScopes(node.writeScope, workflow.executionTarget), workflowAuthorizedWriteScopes(other.writeScope, workflow.executionTarget)))) continue;
+  const readyWorkflow = workflowRepository.get(workflowId, ownerUserId);
+  if (!isEnabled() || !dispatchLease || executionLeases.get(workflowId) !== dispatchLease || !readyWorkflow || readyWorkflow.status !== "running") { releaseIdleExecution(workflowId); return; }
+  if (readyWorkflow.activePlanVersion !== workflow.activePlanVersion) { releaseIdleExecution(workflowId); queueWorkflowTick(workflowId, ownerUserId); return; }
+  workflow = readyWorkflow;
+  const canDispatch = (current: WorkflowRecord, node: WorkflowNodeRecord) => {
+    if (!["pending", "ready", "interrupted"].includes(node.status)) return false;
+    if (!node.dependsOn.every((id) => current.nodes.some((item) => item.id === id && item.status === "completed"))) return false;
+    if (missingRequiredArtifacts(node, current.nodes).length) return false;
+    return node.workspaceAccess !== "write" || !current.nodes.some((other) => ["running", "queued"].includes(other.status) && other.workspaceAccess === "write" && workflowWriteScopesOverlap(workflowAuthorizedWriteScopes(node.writeScope, current.executionTarget), workflowAuthorizedWriteScopes(other.writeScope, current.executionTarget)));
+  };
+  for (const plannedNode of workflow.nodes) {
+    const current = workflowRepository.get(workflowId, ownerUserId);
+    if (!isEnabled() || executionLeases.get(workflowId) !== dispatchLease || current?.status !== "running" || current.activePlanVersion !== workflow.activePlanVersion) break;
+    const node = current.nodes.find((item) => item.id === plannedNode.id);
+    if (!node || !canDispatch(current, node)) continue;
     const workflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
     const taskLimit = workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS;
     const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
@@ -239,20 +257,26 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
       scheduleTick(workflowId, ownerUserId, 1_000);
       break;
     }
-    if (node.provider === "auto") { node.provider = resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities); workflowRepository.updateNode(node); }
+    const provider = node.provider === "auto" ? resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities) : node.provider;
     const checkpointRoot = path.join(workflowStateFiles.directoryFor(workflow.id), "nodes", node.id, "plans", String(node.planVersion), "attempts");
     let attempt: WorkflowNodeAttemptRecord;
     try {
-      const runtimeBinding = await runtimeBindingForProvider(node.provider);
+      const runtimeBinding = await runtimeBindingForProvider(provider);
       // Runtime discovery may yield while another workflow or delegation
       // occupies the budget. Recheck immediately before the synchronous claim.
       const currentWorkflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
       const currentGlobalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
-      if (workflowRepository.get(workflowId, ownerUserId)?.status !== "running") break;
+      const currentWorkflow = workflowRepository.get(workflowId, ownerUserId);
+      if (!isEnabled() || executionLeases.get(workflowId) !== dispatchLease || currentWorkflow?.status !== "running") break;
+      if (currentWorkflow.activePlanVersion !== workflow.activePlanVersion) { queueWorkflowTick(workflowId, ownerUserId); break; }
+      const currentNode = currentWorkflow.nodes.find((item) => item.recordId === node.recordId);
+      if (!currentNode || !canDispatch(currentWorkflow, currentNode)) continue;
+      if (currentNode.provider !== node.provider) { queueWorkflowTick(workflowId, ownerUserId); continue; }
       if (currentWorkflowActive >= taskLimit || currentGlobalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
         scheduleTick(workflowId, ownerUserId, 1_000);
         break;
       }
+      if (currentNode.provider === "auto") { currentNode.provider = provider; workflowRepository.updateNode(currentNode); }
       attempt = workflowRepository.claimNodeAttempt(node.recordId, WORKFLOW_RUNNER_ID, checkpointRoot, new Date(Date.now() + 5 * 60_000).toISOString(), runtimeBinding);
     }
     catch { continue; }
@@ -344,7 +368,12 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
       const stageRetryError = error instanceof WorkflowNodeStageRetryError ? error : null;
       const stageRetry = Boolean(stageRetryError);
       const automaticRetryAllowed = !(error instanceof WorkflowNodeOutcomeError) || error.allowAutomaticRetry;
-      const retry = runStatus !== "canceled" && !blocked && automaticRetryAllowed && (stageRetry || workflowAgentRetryAllowed(latest.provider, latest.failurePolicy, latest.attempt, retryLimit));
+      const replayIssue = stageRetry ? null : workflowRecoveryReplayIssue(path.join(attempt.checkpointDirectory, "recovery-guard.json"));
+      if (replayIssue) {
+        latest.error = `${latest.error}\n${replayIssue}`;
+        latest.logs.push(workflowLog("status", "需要核对已有执行结果", replayIssue));
+      }
+      const retry = runStatus !== "canceled" && !blocked && !replayIssue && automaticRetryAllowed && (stageRetry || workflowAgentRetryAllowed(latest.provider, latest.failurePolicy, latest.attempt, retryLimit));
       latest.status = runStatus === "canceled" ? "canceled" : blocked ? "blocked" : retry ? "retry_wait" : "failed";
       const stageRetryText = stageRetryError?.stage === "snapshot"
         ? "仅重新运行工作区快照与后续文件验收，不重新执行 Agent，也不消耗新的尝试次数"
@@ -372,8 +401,9 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
         queueWorkflowTick(workflowId, ownerUserId);
       }
     }).catch((error) => console.error("Workflow node state or cleanup failed", error));
-    running.push(claimedNode);
   }
+  const dispatchStatus = workflowRepository.get(workflowId, ownerUserId)?.status;
+  if (!isEnabled() || !dispatchStatus || !["queued", "running", "integrating"].includes(dispatchStatus)) releaseIdleExecution(workflowId);
 }
 
 return { queueWorkflowTick, reopenRecoveredWorkflowDependents, dispose };

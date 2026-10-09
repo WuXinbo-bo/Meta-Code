@@ -69,7 +69,7 @@ import { ProductLogo } from "./branding/ProductLogo";
 import { ProviderIcon } from "./branding/ProviderIcon";
 import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
-import { TaskModeBar, CompactWorkflowProgress } from "./workflow/TaskModeBar";
+import { HandoffCard, TaskModeBar, CompactWorkflowProgress } from "./workflow/TaskModeBar";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
 import { AgentWorkProgress } from "./components/AgentWorkProgress";
 import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
@@ -1108,6 +1108,16 @@ function visibleConversationMessages(messages: Message[], sessionStatus?: Sessio
   }
   if (pendingReasoning >= 0 && sessionStatus !== "running") visible[pendingReasoning] = completedReasoningMessage(visible[pendingReasoning]);
   return visible;
+}
+
+function isWorkflowHandoffMessage(message: Pick<Message, "eventType" | "text">) {
+  const text = message.text.trim();
+  // Older task-context handoffs were persisted as ordinary assistant messages
+  // without eventType. Recognize their durable prefix so history upgrades to
+  // the same compact card and duplicate copies can be collapsed on read.
+  return message.eventType === "task.context.handoff"
+    || /^编排进度交接[：:]/u.test(text)
+    || /^同一任务的上下文交接[：:]/u.test(text);
 }
 
 function sessionSummariesSnapshot(sessions: SessionSummary[]) {
@@ -5089,7 +5099,20 @@ export function App() {
     () => locallyHiddenMessageCount > 0 ? activeMessages.slice(-messageRenderLimit) : activeMessages,
     [activeMessages, locallyHiddenMessageCount, messageRenderLimit]
   );
-  const displayMessages = useMemo(() => groupMessages(visibleMessages), [visibleMessages]);
+  const displayMessages = useMemo(() => {
+    // A workflow handoff can be delivered once by the task-context route and
+    // once again during the realtime reconciliation. Keep the newest copy so
+    // the conversation shows one durable card instead of repeated transcripts.
+    const seenHandoffs = new Set<string>();
+    const deduped = [...visibleMessages].reverse().filter((message) => {
+      if (!isWorkflowHandoffMessage(message)) return true;
+      const key = `task.context.handoff:${message.text.trim()}`;
+      if (seenHandoffs.has(key)) return false;
+      seenHandoffs.add(key);
+      return true;
+    }).reverse();
+    return groupMessages(deduped);
+  }, [visibleMessages]);
   const agentDrawerMessage = useMemo(
     () => activeSession?.messages.find((message) => message.id === agentDrawerMessageId && message.role === "event") || null,
     [activeSession?.messages, agentDrawerMessageId]
@@ -5224,6 +5247,13 @@ export function App() {
   const inspectorPinned = inspectorOpen && view === "chat" && !activeBrowserToolResource;
   const inspectorVisible = inspectorPinned;
   const workspaceBrowserVisible = view === "chat" && workspaceBrowser.tabs.length > 0;
+  const activeConversationWorkflowId = displayedSession
+    ? linkedWorkflowId({
+      ...displayedSession,
+      taskContextId: displayedSession.taskContextId || data.sessions.find((session) => session.id === displayedSession.id)?.taskContextId,
+      executionRoot: displayedSession.executionRoot || data.sessions.find((session) => session.id === displayedSession.id)?.executionRoot
+    }, data.workflows, taskWorkflowLink)
+    : "";
   const displayedDeletionKind = displayedWorkflowId ? "workflow" : displayedSession ? "session" : null;
   const displayedDeletionId = displayedWorkflowId || displayedSession?.id || "";
   const displayedDeletionTarget = displayedDeletionKind === "workflow"
@@ -5433,7 +5463,7 @@ export function App() {
 
           {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench key={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || `draft:${activeWorkspaceId}`} workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
-            {displayedSession && (() => { const summary = data.sessions.find((session) => session.id === displayedSession.id); const linkedId = linkedWorkflowId({ ...displayedSession, taskContextId: displayedSession.taskContextId || summary?.taskContextId, executionRoot: displayedSession.executionRoot || summary?.executionRoot }, data.workflows, taskWorkflowLink); return linkedId ? <CompactWorkflowProgress workflowId={linkedId} onOpen={() => selectWorkflow(linkedId)} /> : null; })()}
+            {displayedSession && activeConversationWorkflowId && <CompactWorkflowProgress workflowId={activeConversationWorkflowId} onOpen={() => selectWorkflow(activeConversationWorkflowId)} onContinueConversation={() => composerRef.current?.focus()} />}
             <SubagentActivityRail key={activeSession?.id || "draft"} messages={activeMessages} providerControls={data.providerControls} onOpenAgent={setAgentDrawerMessageId} />
             <div
               className="messages"
@@ -5521,6 +5551,12 @@ export function App() {
                         onAnswerQuestion={answerClaudeQuestion}
                       />
                     ) : (() => {
+                      if (isWorkflowHandoffMessage(message)) return <HandoffCard
+                        text={message.text}
+                        dataMessageId={message.id}
+                        workflowId={activeConversationWorkflowId || undefined}
+                        onOpenWorkflow={activeConversationWorkflowId ? () => selectWorkflow(activeConversationWorkflowId) : undefined}
+                      />;
                       if (message.role === "assistant") return <AssistantReply
                         text={message.text}
                         avatar={<Bot size={17} />}
