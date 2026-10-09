@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { captureWorkspaceSnapshot } from "../server/plugins/orchestration/enforcement.ts";
 import { buildWorkflowFileIntegrity, workflowResultFileIntegrityIssue } from "../server/plugins/orchestration/fileIntegrity.ts";
-import { buildWorkflowFileIntegrityAsync, workflowResultFileIntegrityIssueAsync, workflowCompletedFileIntegrityIssuesAsync } from "../server/plugins/orchestration/fileIntegrityAsync.ts";
+import { buildWorkflowArtifactRecordsAsync, buildWorkflowFileIntegrityAsync, workflowResultFileIntegrityIssueAsync, workflowCompletedFileIntegrityIssuesAsync } from "../server/plugins/orchestration/fileIntegrityAsync.ts";
 import { createWorkflowReadObserver } from "../server/plugins/orchestration/readDependencies.ts";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "metacode-integrity-worker-"));
@@ -94,6 +95,13 @@ try {
   await fs.writeFile(path.join(outputDir, "node_modules", "asset-1799.txt"), "external output edit");
   assert.match(await workflowResultFileIntegrityIssueAsync(workflow, output), /产物已被修改或删除/);
   await fs.writeFile(path.join(outputDir, "node_modules", "asset-1799.txt"), "asset 1799\n".repeat(100));
+  const restoredAsset = path.join(outputDir, "node_modules", "asset-1799.txt");
+  await workflowResultFileIntegrityIssueAsync(workflow, output);
+  const priorStat = await fs.stat(restoredAsset);
+  await fs.writeFile(restoredAsset, "alter 1799\n".repeat(100));
+  await fs.utimes(restoredAsset, priorStat.atime, priorStat.mtime);
+  assert.match(await workflowResultFileIntegrityIssueAsync(workflow, output), /产物已被修改或删除/, "Cached hashes must notice same-size edits with restored mtime through ctime");
+  await fs.writeFile(restoredAsset, "asset 1799\n".repeat(100));
   await fs.writeFile(path.join(outputDir, "added.txt"), "external addition");
   assert.match(await workflowResultFileIntegrityIssueAsync(workflow, output), /产物已被修改或删除/);
   await fs.rm(path.join(outputDir, "added.txt"));
@@ -113,5 +121,32 @@ try {
     await fs.symlink(path.join(project, "unrelated.txt"), path.join(outputDir, "link.txt"));
     assert.match(await workflowResultFileIntegrityIssueAsync(workflow, linkedOutput), /产物已被修改或删除/);
   } catch (error) { if (error.code !== "EPERM") throw error; }
-  console.log(JSON.stringify({ test: "workflow-file-integrity-async", outputFiles: count + 1, elapsedMs: Math.round(elapsedMs), responsiveTimerTicks: ticks, nativeReadDependencies: "conservative", passed: true }));
+  const largePaths = ["large-a.bin", "large-b.bin"];
+  const expectedHashes = [];
+  for (const [index, file] of largePaths.entries()) {
+    const data = Buffer.alloc(25 * 1024 * 1024, index + 1);
+    expectedHashes.push(crypto.createHash("sha256").update(data).digest("hex"));
+    await fs.writeFile(path.join(project, file), data);
+  }
+  const aboveLimit = path.join(project, "above-limit.bin");
+  await fs.writeFile(aboveLimit, ""); await fs.truncate(aboveLimit, 25 * 1024 * 1024 + 1);
+  let artifactTicks = 0;
+  const artifactTimer = setInterval(() => { artifactTicks += 1; }, 1);
+  const artifactStarted = performance.now();
+  let records;
+  try { records = await buildWorkflowArtifactRecordsAsync(project, [...largePaths, "above-limit.bin", "output"], "s".repeat(600)); }
+  finally { clearInterval(artifactTimer); }
+  const artifactElapsedMs = performance.now() - artifactStarted;
+  assert.ok(artifactTicks > 0, "Artifact indexing must not hash 25 MB deliveries on the HTTP event loop");
+  assert.deepEqual(records.slice(0, 2).map((record) => record.hash), expectedHashes);
+  assert.equal(records[2].hash, null, "Artifacts above the existing 25 MB cutoff retain null hashes");
+  assert.equal(records[3].kind, "directory");
+  assert.equal(records[3].hash, null);
+  assert.ok(records.every((record) => record.summary.length === 500));
+  await fs.writeFile(path.join(project, largePaths[0]), "changed artifact");
+  const freshRecords = await buildWorkflowArtifactRecordsAsync(project, [largePaths[0]], "updated");
+  assert.equal(freshRecords[0].hash, crypto.createHash("sha256").update("changed artifact").digest("hex"));
+  await assert.rejects(buildWorkflowArtifactRecordsAsync(project, ["../outside.txt"], "invalid"), /越出业务执行目录/);
+  assert.equal((await buildWorkflowArtifactRecordsAsync(project, [largePaths[0]], "after error"))[0].hash, freshRecords[0].hash);
+  console.log(JSON.stringify({ test: "workflow-file-integrity-async", outputFiles: count + 1, elapsedMs: Math.round(elapsedMs), responsiveTimerTicks: ticks, artifactHashBytes: 50 * 1024 * 1024, artifactElapsedMs: Math.round(artifactElapsedMs), artifactResponsiveTimerTicks: artifactTicks, nativeReadDependencies: "conservative", passed: true }));
 } finally { await fs.rm(root, { recursive: true, force: true }); }

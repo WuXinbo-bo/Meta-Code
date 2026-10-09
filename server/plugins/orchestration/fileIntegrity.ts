@@ -6,6 +6,45 @@ import { resolveWorkflowResultPath, workflowExecutionRoot } from "./executionRoo
 import type { WorkflowReadEvidence } from "./readDependencies.js";
 import type { WorkflowFileIntegrity, WorkflowNodeRecord, WorkflowNodeResult, WorkflowRecord } from "./types.js";
 
+const HASH_CACHE_LIMIT = 30_000;
+const contentHashCache = new Map<string, { fingerprint: string; hash: string }>();
+
+function hashFingerprint(stat: fs.BigIntStats) {
+  return stat.ino > 0n && stat.mtimeNs > 0n && stat.ctimeNs > 0n
+    ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : null;
+}
+
+function contentHash(absolute: string, maximumBytes: number, useCache = true): string | null {
+  const descriptor = fs.openSync(absolute, "r");
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size > BigInt(maximumBytes)) return null;
+    const fingerprint = hashFingerprint(before);
+    const cached = useCache && fingerprint ? contentHashCache.get(absolute) : undefined;
+    if (cached?.fingerprint === fingerprint) return cached.hash;
+    const hash = crypto.createHash("sha256").update(fs.readFileSync(descriptor)).digest("hex");
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (hashFingerprint(after) !== fingerprint || after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) throw new Error(`产物在哈希检查过程中发生变化：${absolute}`);
+    if (useCache && fingerprint) {
+      if (contentHashCache.size >= HASH_CACHE_LIMIT) contentHashCache.delete(contentHashCache.keys().next().value!);
+      contentHashCache.set(absolute, { fingerprint, hash });
+    }
+    return hash;
+  } finally { fs.closeSync(descriptor); }
+}
+
+/** Artifact indexing retains its 25 MB content-hash contract, off the HTTP thread. */
+export function buildWorkflowArtifactRecords(executionRoot: string, paths: string[], summary: string) {
+  return paths.map((file) => {
+    const { absolute, relative } = resolveWorkflowResultPath({ executionRoot, workDirectory: executionRoot }, file, true);
+    const stat = fs.statSync(absolute);
+    // Index hashes historically read every file; do not weaken that freshness
+    // guarantee by sharing the metadata-based output-tree cache.
+    const hash = stat.isFile() ? contentHash(absolute, 25 * 1024 * 1024, false) : null;
+    return { path: relative, kind: stat.isDirectory() ? "directory" : "file", hash, summary: summary.slice(0, 500) };
+  });
+}
+
 function relevantInputs(snapshot: WorkspaceSnapshot, integrity: Pick<WorkflowFileIntegrity, "excludedInputPaths" | "includedInputPaths" | "executionRoot" | "outputPaths" | "inputMode" | "readPaths">) {
   const included = new Set(integrity.includedInputPaths);
   const directories = integrity.includedInputPaths.filter((file) => file.startsWith("directory:")).map((file) => file.slice("directory:".length));
@@ -24,7 +63,7 @@ function outputSignatures(workflow: WorkflowRecord, outputPaths: string[], snaps
   const signatures = Object.fromEntries([...snapshot].filter(([file]) => outputMatches(file)));
   const recordFile = (absolute: string, relative: string, stat: fs.Stats) => {
     signatures[relative] = stat.isSymbolicLink() ? `symlink:${fs.readlinkSync(absolute)}`
-      : stat.size <= 2 * 1024 * 1024 ? crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex")
+      : stat.size <= 2 * 1024 * 1024 ? contentHash(absolute, 2 * 1024 * 1024)!
       : `metadata:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
   };
   const recordDirectory = (absolute: string, relative: string) => {

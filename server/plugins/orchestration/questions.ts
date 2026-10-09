@@ -46,11 +46,18 @@ export function workflowQuestionSnapshot(workflow: WorkflowRecord) {
 export type WorkflowQuestionSnapshot = ReturnType<typeof workflowQuestionSnapshot>;
 export type WorkflowQuestionAnswerer = (snapshot: WorkflowQuestionSnapshot, question: string, provider: string, signal: AbortSignal) => Promise<string>;
 
-// Deliberately narrow: semantic questions must reach a real model, not a canned answer.
-export function isWorkflowStatusQuestion(question: string) {
-  const text = question.trim().replace(/[?？。.!！\s]+$/g, "").toLowerCase();
+// Every clause must be a status query; mixed questions still need the model.
+function isWorkflowStatusClause(text: string) {
+  const chineseStatusList = /^(?:(?:请|请问|帮我|麻烦|现在|目前|当前)\s*)*(?:报告|汇报|列出|显示|告诉我|查看)\s*(?:(?:已完成|完成|运行中|执行中|进行中|正在运行|等待中?|待运行|待执行|待完成|未完成|失败|阻塞|暂停|已取消|跳过)(?:的(?:节点|任务))?\s*(?:[、，,]|和|及|以及|与)\s*)*(?:已完成|完成|运行中|执行中|进行中|正在运行|等待中?|待运行|待执行|待完成|未完成|失败|阻塞|暂停|已取消|跳过)(?:的)?(?:节点|任务)(?:列表|状态|情况)?$/;
+  const englishStatusList = /^(?:please\s+)?(?:report|list|show)\s+(?:(?:completed|done|running|in progress|waiting|pending|queued|failed|blocked|paused|canceled|skipped)\s*(?:,\s*(?:and\s+)?|and\s+))*(?:completed|done|running|in progress|waiting|pending|queued|failed|blocked|paused|canceled|skipped)\s+(?:nodes|tasks)(?:\s+(?:and\s+)?(?:their\s+)?status)?$/;
   return /^(?:(?:现在|目前|当前|请问|请|帮我|这个任务|任务|编排|工作流|执行)(?:的)?\s*)*(?:进度|状态|进展|做到哪(?:里|一步)?了?|完成了(?:哪些|什么|多少)?|还剩(?:哪些|什么|多少)?|剩余任务|有哪些(?:未完成|完成|失败)任务|是否完成|完成了吗|卡在哪(?:里)?|为什么(?:暂停|停止|阻塞)|运行情况)(?:如何|怎么样|是什么)?$/.test(text)
-    || /^(?:(?:what(?:'s| is) (?:the )?(?:current )?)?(?:status|progress)|what remains|what is left|what has completed|is it done|which tasks (?:are done|remain|failed))$/.test(text);
+    || /^(?:(?:what(?:'s| is) (?:the )?(?:current )?)?(?:status|progress)|what remains|what is left|what has completed|is it done|which tasks (?:are done|remain|failed))$/.test(text)
+    || chineseStatusList.test(text) || englishStatusList.test(text);
+}
+
+export function isWorkflowStatusQuestion(question: string) {
+  const clauses = question.toLowerCase().split(/[?？。.!！;；\r\n]+/).map((clause) => clause.trim()).filter(Boolean);
+  return clauses.length > 0 && clauses.every(isWorkflowStatusClause);
 }
 
 export function workflowStatusAnswer(snapshot: WorkflowQuestionSnapshot) {

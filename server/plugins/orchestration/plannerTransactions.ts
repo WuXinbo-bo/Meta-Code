@@ -28,6 +28,7 @@ export type WorkflowPlanTransaction = {
   availableMcpServers: string[];
   providerCapabilities: WorkflowProviderCapabilitiesInput;
   requestKey?: string;
+  submissionBudget?: { failures: number; sameErrors: number; errorDigest: string | null; stopped: boolean; lastToolEventId?: string };
   operations: Array<{ id: string; createdAt: string; operation: WorkflowPlanEditOperation }>;
   validationErrors: string[];
   note: string | null;
@@ -38,6 +39,11 @@ export type WorkflowPlanTransaction = {
 
 const emptyPlan = (): WorkflowPlan => normalizeWorkflowPlan({
   title: "任务编排",
+  // This is an unapproved placeholder, not a user delivery contract. Keep
+  // the planner from inferring strict validation or creating a deliverables
+  // directory before the model has understood the request.
+  validationMode: "standard",
+  finalDelivery: { required: false, directory: ".", primary: null, format: "", additional: [], producerNodeId: null, reason: "尚待规划确认用户成果" },
   summary: "",
   assumptions: [],
   questions: [],
@@ -53,11 +59,22 @@ function planDigest(plan: WorkflowPlan) {
 /** Fill mechanical fields without inventing goals, permissions or evidence. */
 export function compileWorkflowPlanDraft(value: unknown, capabilities: WorkflowProviderCapabilitiesInput): WorkflowPlan {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const usedIds = new Set(Array.isArray(source.nodes) ? source.nodes.flatMap((item) => item && typeof item === "object" && item.id !== undefined ? [String(item.id).trim()] : []) : []);
   const nodes = Array.isArray(source.nodes) ? source.nodes.map((item) => {
     const node = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const access = node.workspaceAccess === "write" ? "write" : "read";
     const provider = String(node.provider || "auto");
-    return { ...node, title: node.title || node.id, provider,
+    // IDs for unreferenced steps are mechanical. Existing references are never
+    // remapped; referenced nodes should still carry an explicit stable ID.
+    const generatedId = `step-${crypto.createHash("sha256").update(JSON.stringify([node.title || "", node.objective || "", access, node.writeScope || [], node.acceptance || []])).digest("hex").slice(0, 16)}`;
+    let id = node.id;
+    if (id === undefined) {
+      let occurrence = 1;
+      id = generatedId;
+      while (usedIds.has(String(id))) id = `${generatedId}-${++occurrence}`;
+      usedIds.add(String(id));
+    }
+    return { ...node, id, title: node.title || id, provider,
       providerReason: node.providerReason || `使用${provider === "auto" ? `工作区 ${access} 默认引擎 ${resolveWorkflowProvider(provider, access, capabilities)}` : `计划指定引擎 ${provider}`}；用户审批后执行` };
   }) : [];
   const plan = normalizeWorkflowPlan({ ...source, validationMode: source.validationMode || "standard", nodes });
@@ -87,17 +104,62 @@ export function compileWorkflowPlanDraft(value: unknown, capabilities: WorkflowP
 export function submitWorkflowPlan(target: string, plan: unknown) {
   return withTransactionFileLock(target, () => {
     const transaction = readWorkflowPlanTransaction(target);
-    const candidate = compileWorkflowPlanDraft(plan, transaction.providerCapabilities);
+    let candidate: WorkflowPlan;
+    try { candidate = compileWorkflowPlanDraft(plan, transaction.providerCapabilities); }
+    catch (error) {
+      if (!["editing", "validated"].includes(transaction.status)) throw error;
+      const issue = workflowPlannerSubmissionIssue(transaction);
+      if (issue) throw new Error(issue);
+      transaction.validationErrors = [error instanceof Error ? error.message : String(error)];
+      recordSubmissionValidation(transaction, transaction.validationErrors);
+      transaction.status = "editing";
+      transaction.digest = null;
+      return writeTransaction(target, transaction);
+    }
     if (transaction.status === "committed") {
       if (planDigest(candidate) !== transaction.digest) throw new Error("候选计划已封存，不能覆盖已提交版本");
       return transaction;
     }
     if (!["editing", "validated"].includes(transaction.status)) throw new Error("规划事务已经结束，不能继续修改");
+    const budgetIssue = workflowPlannerSubmissionIssue(transaction);
+    if (budgetIssue) throw new Error(budgetIssue);
     transaction.draftPlan = candidate;
     transaction.validationErrors = validateWorkflowPlan(candidate, new Set(transaction.availableSkills), new Set(transaction.availableMcpServers), transaction.providerCapabilities);
+    recordSubmissionValidation(transaction, transaction.validationErrors);
     transaction.status = transaction.validationErrors.length ? "editing" : "committed";
     transaction.digest = transaction.validationErrors.length ? null : planDigest(candidate);
     transaction.operations.push({ id: `operation-${crypto.randomUUID()}`, createdAt: new Date().toISOString(), operation: { type: "set_plan_fields", fields: { fullReplacement: true } } });
+    return writeTransaction(target, transaction);
+  });
+}
+
+function recordSubmissionValidation(transaction: WorkflowPlanTransaction, errors: string[]) {
+  const previous = transaction.submissionBudget || { failures: 0, sameErrors: 0, errorDigest: null, stopped: false };
+  if (!errors.length) {
+    transaction.submissionBudget = { ...previous, sameErrors: 0, errorDigest: null };
+    return;
+  }
+  // Changing a title or summary cannot make a repeated format failure progress.
+  const errorDigest = crypto.createHash("sha256").update(JSON.stringify([...new Set(errors)].sort())).digest("hex");
+  const failures = previous.failures + 1;
+  const sameErrors = previous.errorDigest === errorDigest ? previous.sameErrors + 1 : 1;
+  transaction.submissionBudget = { failures, sameErrors, errorDigest, stopped: sameErrors >= 3 || failures >= 12 };
+}
+
+export function workflowPlannerSubmissionIssue(transaction: WorkflowPlanTransaction): string | null {
+  return transaction.submissionBudget?.stopped
+    ? "规划格式修复连续无进展或超过预算，已停止自动提交；请根据字段错误调整任务后显式重新规划"
+    : null;
+}
+
+/** Schema failures before the MCP handler must count toward the same budget. */
+export function recordWorkflowPlannerToolFailure(target: string, eventId: string, message: string) {
+  return withTransactionFileLock(target, () => {
+    const transaction = readWorkflowPlanTransaction(target);
+    if (!["editing", "validated"].includes(transaction.status) || transaction.submissionBudget?.lastToolEventId === eventId) return transaction;
+    const safeMessage = message.replace(/(?:sk-|sess-)[A-Za-z0-9._-]{12,}/gi, "[REDACTED]").slice(0, 2000);
+    recordSubmissionValidation(transaction, [safeMessage || "规划工具参数格式错误"]);
+    transaction.submissionBudget!.lastToolEventId = eventId;
     return writeTransaction(target, transaction);
   });
 }
@@ -184,6 +246,8 @@ export function replaceWorkflowPlanDraft(target: string, plan: unknown) {
   return withTransactionFileLock(target, () => {
     const transaction = readWorkflowPlanTransaction(target);
     if (!["editing", "validated"].includes(transaction.status)) throw new Error("规划事务已经结束，不能继续修改");
+    const budgetIssue = workflowPlannerSubmissionIssue(transaction);
+    if (budgetIssue) throw new Error(budgetIssue);
     transaction.draftPlan = normalizeWorkflowPlan(plan);
     transaction.status = "editing";
     transaction.validationErrors = [];
@@ -197,6 +261,8 @@ export function applyWorkflowPlanOperations(target: string, operations: Workflow
   return withTransactionFileLock(target, () => {
     const transaction = readWorkflowPlanTransaction(target);
     if (!["editing", "validated"].includes(transaction.status)) throw new Error("规划事务已经结束，不能继续修改");
+    const budgetIssue = workflowPlannerSubmissionIssue(transaction);
+    if (budgetIssue) throw new Error(budgetIssue);
     const raw = JSON.parse(JSON.stringify(transaction.draftPlan)) as Record<string, unknown>;
     const nodes = Array.isArray(raw.nodes) ? raw.nodes as Array<Record<string, unknown>> : [];
     for (const operation of operations) {
@@ -247,6 +313,8 @@ export function validateWorkflowPlanTransaction(target: string) {
 function validateWorkflowPlanTransactionUnlocked(target: string) {
   const transaction = readWorkflowPlanTransaction(target);
   if (!["editing", "validated"].includes(transaction.status)) throw new Error("规划事务已经结束，不能执行校验");
+  const budgetIssue = workflowPlannerSubmissionIssue(transaction);
+  if (budgetIssue) throw new Error(budgetIssue);
   transaction.draftPlan = normalizeWorkflowPlan(transaction.draftPlan);
   transaction.validationErrors = validateWorkflowPlan(
     transaction.draftPlan,
@@ -254,6 +322,7 @@ function validateWorkflowPlanTransactionUnlocked(target: string) {
     new Set(transaction.availableMcpServers),
     transaction.providerCapabilities
   );
+  recordSubmissionValidation(transaction, transaction.validationErrors);
   transaction.status = transaction.validationErrors.length ? "editing" : "validated";
   transaction.digest = transaction.validationErrors.length ? null : planDigest(transaction.draftPlan);
   writeTransaction(target, transaction);

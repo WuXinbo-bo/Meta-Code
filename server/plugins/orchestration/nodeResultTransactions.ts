@@ -69,6 +69,8 @@ export type WorkflowNodeResultTransaction = WorkflowNodeResultContract & {
   draftResult: WorkflowNodeResult;
   operations: Array<{ id: string; type: string; createdAt: string }>;
   validationErrors: string[];
+  submissionProgress?: { signature: string; repeatedFailures: number; totalFailures: number };
+  lastSubmissionToolEventId?: string;
   selfReview: WorkflowNodeSelfReview | null;
   digest: string | null;
   createdAt: string;
@@ -204,8 +206,42 @@ export function workflowNodeResultReceipt(transaction: WorkflowNodeResultTransac
     revision: transaction.baseRevision,
     outcome: transaction.draftResult.outcome,
     digest: transaction.digest,
-    errors: transaction.validationErrors
+    errors: transaction.validationErrors,
+    ...(workflowNodeResultSubmissionIssue(transaction) ? { repairBlocked: true, nextAction: "停止重复提交，保留成果并等待人工检查" } : {})
   };
+}
+
+export function workflowNodeResultSubmissionIssue(transaction: WorkflowNodeResultTransaction): string | null {
+  if (transaction.status === "committed") return null;
+  const progress = transaction.submissionProgress;
+  return progress && (progress.repeatedFailures >= 3 || progress.totalFailures >= 8)
+    ? "结果协议修复没有进展或已达到失败预算；保留业务成果，等待人工检查"
+    : null;
+}
+
+function recordSubmissionFailure(transaction: WorkflowNodeResultTransaction, errors: string[]) {
+  const signature = crypto.createHash("sha256").update(JSON.stringify([...new Set(errors)].sort())).digest("hex");
+  const previous = transaction.submissionProgress;
+  transaction.submissionProgress = {
+    signature,
+    repeatedFailures: previous?.signature === signature ? previous.repeatedFailures + 1 : 1,
+    totalFailures: (previous?.totalFailures || 0) + 1
+  };
+}
+
+/** MCP input-schema errors happen before the submission handler. */
+export function recordWorkflowNodeResultToolFailure(target: string, eventId: string, message: string) {
+  return withTransactionFileLock(target, () => {
+    const transaction = readWorkflowNodeResultTransaction(target);
+    if (transaction.status === "committed" || transaction.lastSubmissionToolEventId === eventId) return transaction;
+    const safeMessage = message.replace(/(?:sk-|sess-)[A-Za-z0-9._-]{12,}/gi, "[REDACTED]").slice(0, 2000);
+    transaction.validationErrors = [safeMessage || "结果工具参数格式错误"];
+    recordSubmissionFailure(transaction, transaction.validationErrors);
+    transaction.lastSubmissionToolEventId = eventId;
+    transaction.updatedAt = new Date().toISOString();
+    writeJsonAtomically(target, transaction);
+    return transaction;
+  });
 }
 
 function applyResultSubmission(transaction: WorkflowNodeResultTransaction, input: WorkflowResultSubmission, checkpoint: boolean) {
@@ -242,7 +278,17 @@ export function submitWorkflowNodeResult(target: string, input: WorkflowResultSu
   return withTransactionFileLock(target, () => {
     const transaction = readWorkflowNodeResultTransaction(target);
     if (transaction.resultProtocolVersion !== 2) throw new Error("当前节点使用旧版结果协议，请使用原事务工具完成提交");
-    const candidate = applyResultSubmission(transaction, input, checkpoint);
+    let candidate: WorkflowNodeResult;
+    try { candidate = applyResultSubmission(transaction, input, checkpoint); }
+    catch (error) {
+      if (!checkpoint && transaction.status !== "committed") {
+        transaction.validationErrors = [error instanceof Error ? error.message : String(error)];
+        recordSubmissionFailure(transaction, transaction.validationErrors);
+        transaction.updatedAt = new Date().toISOString();
+        writeJsonAtomically(target, transaction);
+      }
+      throw error;
+    }
     if (transaction.status === "committed") {
       if (checkpoint || resultDigest(candidate) !== transaction.digest) throw new Error("节点结果已经提交，不能覆盖已封存结果");
       return workflowNodeResultReceipt(transaction);
@@ -255,6 +301,7 @@ export function submitWorkflowNodeResult(target: string, input: WorkflowResultSu
     transaction.updatedAt = new Date().toISOString();
     transaction.operations.push({ id: `result-operation-${crypto.randomUUID()}`, type: checkpoint ? "checkpoint_result" : "submit_result", createdAt: transaction.updatedAt });
     transaction.validationErrors = checkpoint ? [] : workflowNodeResultTransactionIssues(transaction);
+    if (!checkpoint && transaction.validationErrors.length) recordSubmissionFailure(transaction, transaction.validationErrors);
     transaction.status = checkpoint || transaction.validationErrors.length ? "editing" : "committed";
     if (transaction.status === "committed") transaction.digest = resultDigest(transaction.draftResult);
     writeJsonAtomically(target, transaction);

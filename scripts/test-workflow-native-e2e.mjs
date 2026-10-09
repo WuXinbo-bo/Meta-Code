@@ -13,6 +13,13 @@ import { resolveWorkbenchPaths } from "../dist-server/appPaths.js";
 import { SecretVault } from "../dist-server/secretVault.js";
 import { CliRuntimeManager } from "../dist-server/runtime/manager.js";
 import { redactTaskText } from "../dist-server/tasks/context.js";
+import {
+  assertNoWorkflowDirectories,
+  copyExistingWorkflowProject,
+  existingWorkflowProjects,
+  observedNodeConcurrency,
+  sourceManifest
+} from "./lib/workflow-existing-fixtures.mjs";
 
 // Opt-in live-model test: use configured native adapters/credentials without
 // changing the user's running service, account profiles or source workspace.
@@ -59,11 +66,25 @@ child.stdout.on("data", (chunk) => { output = `${output}${redactTaskText(String(
 child.stderr.on("data", (chunk) => { output = `${output}${redactTaskText(String(chunk))}`.slice(-50_000); });
 const deadlineMs = Number(process.env.METACODE_NATIVE_TEST_TIMEOUT_MS || 30 * 60_000);
 const report = { schemaVersion: 2, liveModels: true, startedAt: new Date().toISOString(), runtimes: Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, { version: runtime.version, source: runtime.source }])), models: { codex: testSettings.model, claude: testSettings.claude.model }, tests: [] };
+const openGoalPrompt = "这个现有的小项目导出的 CSV 在客户姓名含逗号、双引号或换行时会错列，而且金额为 0 会丢失。请定位原因并修复，保持同步的公开 API 和输入数据不变，补充适当测试并验证。直接改现有项目，不额外创建任务目录，也不安装依赖。按标准验收，不跳过必要检查。";
 let baseUrl;
 const selectedCases = new Set((process.env.METACODE_NATIVE_TEST_CASES || "").split(",").map((value) => value.trim()).filter(Boolean));
 const includeCase = (name) => !selectedCases.size || selectedCases.has(name);
+// Existing-project and baseline runs are additional paid scenarios. They must
+// be named explicitly so the established default suite stays portable.
+const includeOptionalCase = (name) => selectedCases.has(name);
 const observedWorkflows = new Map();
 const apiObservations = { requestCount: 0, responseBytes: 0, elapsedMs: 0, routes: {} };
+const existingSourceRoot = process.env.METACODE_NATIVE_EXISTING_ROOT || "";
+const existingFixtures = [];
+const existingSource = async (key, suffix = key) => {
+  if (!existingSourceRoot) throw new Error(`Set METACODE_NATIVE_EXISTING_ROOT to the parent of the existing trial projects before selecting ${key}`);
+  const project = existingWorkflowProjects.find((item) => item.key === key);
+  if (!project) throw new Error(`Unknown existing project key: ${key}`);
+  const fixture = await copyExistingWorkflowProject(existingSourceRoot, path.join(testRoot, "existing-projects", suffix), key);
+  existingFixtures.push(fixture);
+  return fixture;
+};
 const until = async (condition, timeout, label) => {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -89,7 +110,7 @@ const request = async (route, body, method = "POST") => {
   assert.ok(response.ok, `${method} ${route}: ${redactTaskText(JSON.stringify(value))}`);
   return value;
 };
-const summarize = (workflow) => ({ id: workflow.id, status: workflow.status, revision: workflow.revision, executionTarget: workflow.executionTarget, executionRoot: workflow.executionRoot, plannerTools: workflow.plannerLogs.filter((log) => log.kind === "tool").length, nodes: workflow.nodes.map((node) => ({ id: node.id, provider: node.provider, status: node.status, attempt: node.attempt, error: redactTaskText(node.error || ""), outcome: node.summary?.outcome, tools: node.logs.filter((log) => log.kind === "tool").length })), finalOutcome: workflow.finalResult?.outcome, metrics: measureWorkflowRun(workflow) });
+const summarize = (workflow) => ({ id: workflow.id, status: workflow.status, revision: workflow.revision, executionTarget: workflow.executionTarget, executionRoot: workflow.executionRoot, plannerTools: workflow.plannerLogs.filter((log) => log.kind === "tool").length, nodes: workflow.nodes.map((node) => ({ id: node.id, provider: node.provider, status: node.status, attempt: node.attempt, startedAt: node.startedAt, finishedAt: node.finishedAt, error: redactTaskText(node.error || ""), outcome: node.summary?.outcome, tools: node.logs.filter((log) => log.kind === "tool").length })), observedConcurrency: observedNodeConcurrency(workflow.nodes), finalOutcome: workflow.finalResult?.outcome, metrics: measureWorkflowRun(workflow) });
 const toolShapes = (workflow) => [...new Map([...workflow.plannerLogs, ...workflow.nodes.flatMap((node) => node.logs)].filter((log) => log.kind === "tool").map((log) => {
   const shape = { title: log.title, detailKeys: log.detail ? Object.keys(log.detail).sort() : [], server: log.detail?.server, tool: log.detail?.tool };
   return [JSON.stringify(shape), shape];
@@ -136,6 +157,9 @@ const checkRetainedSecrets = async () => {
   };
   await visit(testRoot);
   assert.deepEqual(leaks, [], "The independent live test must retain no plaintext credentials");
+};
+const checkExistingSourcesUnchanged = async () => {
+  for (const fixture of existingFixtures) assert.deepEqual(await sourceManifest(fixture.source), fixture.originalManifest, "Existing source projects must remain unchanged during copied-project trials");
 };
 for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
   void stopBackend().then(checkRetainedSecrets).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
@@ -379,7 +403,7 @@ async function runOpenGoalProject() {
   await fs.writeFile(path.join(root, "export.js"), brokenInvoiceExportSource);
   const initialEntries = await projectEntries(root);
   const workspace = await request("/api/workspaces", { root });
-  let workflow = await request("/api/workflows", { workspaceId: workspace.id, plannerEngine: "codex", prompt: "这个现有的小项目导出的 CSV 在客户姓名含逗号、双引号或换行时会错列，而且金额为 0 会丢失。请定位原因并修复，保持同步的公开 API 和输入数据不变，补充适当测试并验证。直接改现有项目，不额外创建任务目录，也不安装依赖。按标准验收，不跳过必要检查。" });
+  let workflow = await request("/api/workflows", { workspaceId: workspace.id, plannerEngine: "codex", prompt: openGoalPrompt });
   await request(`/api/workflows/${workflow.id}/plan`, { mode: "initial" });
   workflow = await until(async () => {
     const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
@@ -405,6 +429,133 @@ async function runOpenGoalProject() {
   report.tests.push({ testCase: "open-user-goal-invoice-csv", plannerEngine: "codex", projectRoot: root, ...summarize(workflow), goalStyle: "normal-user-request", hiddenBehaviorOraclePassed: true, noPrescribedNodeIdsProvidersOrScopes: true, derivedNodeCount: originalPlan.nodes.length, derivedProviders: originalPlan.nodes.map((node) => node.provider), initialEntries, finalEntries: entries, noExtraProjectDirectory: true, completedAt: new Date().toISOString() });
   await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log("codex: open user goal independently verified CSV behavior passed");
+}
+
+async function runExistingReviewProject() {
+  const key = process.env.METACODE_NATIVE_EXISTING_REVIEW_PROJECT || process.env.METACODE_NATIVE_EXISTING_PROJECT || "research";
+  const fixture = await existingSource(key, `${key}-review`);
+  const { project, root, originalManifest } = fixture;
+  const workspace = await request("/api/workspaces", { root });
+  const providers = project.plannerEngine === "codex" ? ["codex", "claude", "codex"] : ["claude", "codex", "claude"];
+  const prompt = `对当前复制的已有 ${project.folder} 项目做一次只读跨模型审查。严格生成恰好三个互相独立、无依赖的节点：inspect-contract=${providers[0]} 只读 PROJECT_REQUIREMENTS.md 与 README.md，核查公开合同；inspect-tests=${providers[1]} 只读 package.json 与 test/ 现有测试，核查验收覆盖和标准入口；inspect-runtime=${providers[2]} 只读 ${project.readScope.filter((file) => file.startsWith("src/")).join("、")}，核查实际实现和风险。所有节点 workspaceAccess=read、writeScope=[]、requiredArtifacts=[]、deliverables=[]、verificationCommands=[]，不得运行命令、不得编辑或创建文件目录，不添加 Skill 或 MCP，finalDelivery.required=false，validationMode=standard。按只读范围减少重复上下文，提交结构化文字结果与真实读取证据。三个节点完成后保留标准的多节点模型整合和语义验收，不创建业务产物或报告文件。`;
+  let workflow = await request("/api/workflows", { workspaceId: workspace.id, plannerEngine: project.plannerEngine, maxConcurrentAgents: 3, prompt });
+  await request(`/api/workflows/${workflow.id}/plan`, { mode: "initial" });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Existing ${key} review planning failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "awaiting_approval" ? current : null;
+  }, deadlineMs, `Existing ${key} review planning`);
+  assert.equal(workflow.executionTarget, "workspace");
+  assert.equal(workflow.executionRoot, await fs.realpath(root));
+  assert.equal(workflow.plan.nodes.length, 3, "Cross-model existing-project review must contain exactly three nodes");
+  for (const [index, id] of ["inspect-contract", "inspect-tests", "inspect-runtime"].entries()) assert.equal(workflow.plan.nodes.find((node) => node.id === id)?.provider, providers[index], `${id} must retain the requested Provider`);
+  assert.ok(workflow.plan.nodes.every((node) => node.workspaceAccess === "read" && node.dependsOn.length === 0 && node.writeScope.length === 0 && node.requiredArtifacts.length === 0 && node.deliverables.length === 0 && node.verificationCommands.length === 0));
+  await request(`/api/workflows/${workflow.id}/approve`, { revision: workflow.revision });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Existing ${key} review execution failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "completed" ? current : null;
+  }, deadlineMs, `Existing ${key} review execution`);
+  assert.ok(workflow.nodes.every((node) => node.status === "completed" && node.summary?.outcome === "completed"));
+  const finalManifest = await sourceManifest(root, { sourceOnly: false });
+  assert.deepEqual(finalManifest, originalManifest, "Read-only cross-model review must leave the existing project copy unchanged");
+  assertNoWorkflowDirectories(finalManifest, originalManifest);
+  assert.equal(observedNodeConcurrency(workflow.nodes).peak, 3, "Three independent review nodes must actually overlap, rather than only being listed as parallel");
+  const independentTest = await promisify(execFile)(process.platform === "win32" ? "npm.cmd" : "npm", ["test"], { cwd: root, timeout: 180_000, encoding: "utf8", maxBuffer: 2_000_000 });
+  assert.match(`${independentTest.stdout}\n${independentTest.stderr}`, /tests|pass|suites/i);
+  const independentAcceptance = await runExistingProductAcceptance(fixture, "readonly");
+  report.tests.push({ testCase: "existing-project-cross-model-readonly-review", project: project.folder, plannerEngine: project.plannerEngine, projectRoot: root, ...summarize(workflow), requestedProviders: providers, exactIndependentNodes: 3, independentNpmTest: "passed", independentAcceptance, sourceTreeUnchanged: true, noExtraProjectDirectory: true, completedAt: new Date().toISOString() });
+  await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  console.log(`${project.folder}: cross-model three-node read-only review and independent npm test passed`);
+}
+
+async function runExistingMaintenanceProject() {
+  const key = process.env.METACODE_NATIVE_EXISTING_MAINTENANCE_PROJECT || process.env.METACODE_NATIVE_EXISTING_PROJECT || "ledger";
+  const fixture = await existingSource(key, `${key}-maintenance`);
+  const { project, root, originalManifest } = fixture;
+  const workspace = await request("/api/workspaces", { root });
+  const prompt = `维护当前复制的已有 ${project.folder} 项目，目标是补充一个有实际价值的回归用例并验证公开合同。${project.goal} 直接在当前工作区执行，不创建任务目录、协议目录、报告目录或 audit 目录，不安装依赖。规划完成后等待用户审批；审批后才执行。必须把真实修改和每个测试命令登记到结构化结果，不能只凭口头说明完成。`;
+  let workflow = await request("/api/workflows", { workspaceId: workspace.id, plannerEngine: project.plannerEngine, prompt });
+  await request(`/api/workflows/${workflow.id}/plan`, { mode: "initial" });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Existing ${key} maintenance planning failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "awaiting_approval" ? current : null;
+  }, deadlineMs, `Existing ${key} maintenance planning`);
+  assert.equal(workflow.executionRoot, await fs.realpath(root));
+  assert.ok(workflow.plan.nodes.length > 0);
+  await request(`/api/workflows/${workflow.id}/approve`, { revision: workflow.revision });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Existing ${key} maintenance execution failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "completed" ? current : null;
+  }, deadlineMs, `Existing ${key} maintenance execution`);
+  assert.ok(workflow.nodes.every((node) => node.status === "completed" && node.summary?.outcome === "completed"));
+  const finalManifest = await sourceManifest(root, { sourceOnly: false });
+  assertNoWorkflowDirectories(finalManifest, originalManifest);
+  const changed = finalManifest.filter((entry) => !originalManifest.some((previous) => previous.path === entry.path && previous.type === entry.type && previous.sha256 === entry.sha256));
+  assert.ok(changed.some((entry) => entry.path.startsWith("test/")), "Existing maintenance must leave a real regression test in the copied project");
+  const independentTest = await promisify(execFile)(process.platform === "win32" ? "npm.cmd" : "npm", ["test"], { cwd: root, timeout: 180_000, encoding: "utf8", maxBuffer: 2_000_000 });
+  assert.match(`${independentTest.stdout}\n${independentTest.stderr}`, /tests|pass|suites/i);
+  const independentAcceptance = await runExistingProductAcceptance(fixture, "maintenance");
+  report.tests.push({ testCase: "existing-project-open-maintenance", project: project.folder, plannerEngine: project.plannerEngine, projectRoot: root, ...summarize(workflow), changedEntries: changed.map((entry) => entry.path), independentNpmTest: "passed", independentAcceptance, noExtraProjectDirectory: true, completedAt: new Date().toISOString() });
+  await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  console.log(`${project.folder}: existing-project maintenance and independent npm test passed`);
+}
+
+async function runExistingProductAcceptance(fixture, tag) {
+  // The pre-existing independent black-box harness stays outside the model's
+  // copied business root. Its reports target the trial, never the original.
+  const script = path.resolve(process.env.METACODE_NATIVE_EXISTING_ACCEPTANCE_SCRIPT || path.join(existingSourceRoot, "verification", "product-acceptance.mjs"));
+  await fs.access(script);
+  const args = [script, "--root", path.dirname(fixture.root), "--only", fixture.project.folder, "--tag", `workflow-${tag}`];
+  const playwright = process.env.METACODE_PLAYWRIGHT_MODULE || process.env.PLAYWRIGHT_MODULE;
+  const browser = process.env.METACODE_BROWSER_EXECUTABLE || process.env.BROWSER_EXECUTABLE;
+  if (playwright) args.push("--playwright", playwright);
+  if (browser) args.push("--browser", browser);
+  const result = await promisify(execFile)(process.execPath, args, { cwd: testRoot, timeout: 300_000, encoding: "utf8", maxBuffer: 2_000_000, env: { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}` } });
+  const reportPath = path.join(path.dirname(fixture.root), "reports", `acceptance-workflow-${tag}`, "report.json");
+  const acceptance = JSON.parse(await fs.readFile(reportPath, "utf8"));
+  assert.ok(acceptance.summary?.total > 0, "Independent product acceptance must run real checks");
+  assert.equal(acceptance.summary.failed, 0, `Independent product acceptance failed: ${reportPath}`);
+  assert.deepEqual(await sourceManifest(fixture.source), fixture.originalManifest, "Independent acceptance cannot alter the original project");
+  assert.match(result.stdout, /PASS/);
+  return { reportPath, summary: acceptance.summary, testDiscovery: acceptance.projects.map((project) => ({ name: project.name, npm: project.npm, allTests: project.allTests, omittedFiles: project.npmCoverage?.omitted || null })), trustedHarnessOutsideBusinessRoot: true };
+}
+
+async function runNativeBaseline() {
+  const providers = (process.env.METACODE_NATIVE_BASELINE_PROVIDERS || "codex,claude").split(",").map((value) => value.trim()).filter((value) => ["codex", "claude"].includes(value));
+  assert.ok(providers.length, "METACODE_NATIVE_BASELINE_PROVIDERS must include codex and/or claude");
+  for (const provider of providers) {
+    const root = path.join(testRoot, `${provider}-native-invoice-export`);
+    await fs.mkdir(root);
+    await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "invoice-export-fixture", private: true, type: "module" }));
+    await fs.writeFile(path.join(root, "README.md"), invoiceExportReadme);
+    await fs.writeFile(path.join(root, "export.js"), brokenInvoiceExportSource);
+    const workspace = await request("/api/workspaces", { root });
+    await request(`/api/workspaces/${workspace.id}/agent-config`, { executionMode: "native" }, "PUT");
+    const session = await request("/api/sessions", { workspaceId: workspace.id, scopeKind: "workspace", engine: provider, title: `CSV export native baseline ${provider}` });
+    const startedAt = new Date().toISOString();
+    await request(`/api/sessions/${session.id}/run`, { prompt: openGoalPrompt });
+    const completed = await until(async () => {
+      const current = await request(`/api/sessions/${session.id}`, undefined, "GET");
+      if (["failed", "interrupted", "stopped"].includes(current.status) || current.lastError) throw new Error(`Native baseline ${provider} failed: ${redactTaskText(current.lastError || current.status)}`);
+      return current.status === "completed" && current.messages.some((message) => message.role === "assistant") ? current : null;
+    }, deadlineMs, `Native ${provider} baseline`);
+    const oracle = path.join(testRoot, `verify-native-${provider}-open-goal.mjs`);
+    await fs.writeFile(oracle, invoiceExportOracle);
+    const oracleResult = await promisify(execFile)(process.execPath, [oracle, path.join(root, "export.js")], { cwd: testRoot, timeout: 30_000, encoding: "utf8" });
+    assert.match(oracleResult.stdout, /Independent CSV behavior checks passed/);
+    const manifest = await sourceManifest(root, { sourceOnly: false });
+    assertNoWorkflowDirectories(manifest);
+    const tools = completed.messages.filter((message) => ["command", "file", "read", "search", "mcp", "tool"].includes(message.activity?.semanticType || message.activityCategory));
+    const firstBusinessActionAt = tools.map((message) => message.activity?.occurredAt || message.createdAt).sort().at(0) || null;
+    const finishedAt = completed.runFinishedAt || new Date().toISOString();
+    const usage = completed.usage && Object.values(completed.usage).some((value) => typeof value === "number" && value > 0) ? completed.usage : null;
+    report.tests.push({ testCase: "native-open-goal-invoice-csv-baseline", provider, projectRoot: root, sessionId: session.id, status: completed.status, sameFixtureAndPromptAs: "open-user-goal-invoice-csv", executionMode: "native", hiddenBehaviorOraclePassed: true, noExtraProjectDirectory: true, metrics: { businessToolCallsObserved: tools.length, firstBusinessActionAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), usage, measurementNotes: ["One fresh native conversation uses the same fixture bytes, user prompt, provider settings and hidden oracle as open-goal.", "Missing or zero-only native usage remains null; event counts are observations and not token estimates."] }, completedAt: new Date().toISOString() });
+    await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    console.log(`${provider}: native open-goal CSV baseline independently verified`);
+  }
 }
 
 async function finalizeObservations() {
@@ -438,8 +589,14 @@ try {
   catch (error) { report.tests.push({ testCase: "native-paused-external-output-change", plannerEngine: "claude", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`native-paused-external-change: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
   try { if (includeCase("open-goal")) await runOpenGoalProject(); }
   catch (error) { report.tests.push({ testCase: "open-user-goal-invoice-csv", plannerEngine: "codex", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`open-user-goal: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
+  try { if (includeOptionalCase("existing-review")) await runExistingReviewProject(); }
+  catch (error) { report.tests.push({ testCase: "existing-project-cross-model-readonly-review", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`existing-review: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
+  try { if (includeOptionalCase("existing-maintenance")) await runExistingMaintenanceProject(); }
+  catch (error) { report.tests.push({ testCase: "existing-project-open-maintenance", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`existing-maintenance: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
+  try { if (includeOptionalCase("native-baseline")) await runNativeBaseline(); }
+  catch (error) { report.tests.push({ testCase: "existing-project-native-baseline", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`native-baseline: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
   await finalizeObservations();
-  assert.ok(report.tests.length, "No test case selected; use codex,claude,readonly,resume,open-goal");
+  assert.ok(report.tests.length, "No test case selected; use codex,claude,readonly,resume,open-goal,existing-review,existing-maintenance,native-baseline");
   assert.equal(report.tests.filter((test) => test.status === "failed").length, 0, `Live-model tests failed; inspect ${path.join(testRoot, "report.json")}`);
 } finally {
   // Test project/results remain inspectable; copied credentials never remain
@@ -447,4 +604,5 @@ try {
   await stopBackend();
   await finalizeObservations();
   await checkRetainedSecrets();
+  await checkExistingSourcesUnchanged();
 }

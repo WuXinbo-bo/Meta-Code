@@ -14,7 +14,7 @@ import {
   workflowNodeResultReceipt
 } from "../server/plugins/orchestration/nodeResultTransactions.ts";
 import { normalizeWorkflowPlan, validateWorkflowPlan, planSystemPrompt, workflowNodeContractDigest } from "../server/plugins/orchestration/plan.ts";
-import { applyWorkflowPlanOperations, createWorkflowPlanTransaction, readWorkflowPlanTransaction, replaceWorkflowPlanDraft, submitWorkflowPlan } from "../server/plugins/orchestration/plannerTransactions.ts";
+import { applyWorkflowPlanOperations, compileWorkflowPlanDraft, createWorkflowPlanTransaction, readWorkflowPlanTransaction, replaceWorkflowPlanDraft, submitWorkflowPlan, recordWorkflowPlannerToolFailure, workflowPlannerSubmissionIssue } from "../server/plugins/orchestration/plannerTransactions.ts";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "metacode-workflow-protocol-v2-"));
 try {
@@ -84,6 +84,11 @@ try {
   assert.equal(normalizeWorkflowPlan({ ...plan, validationMode: undefined }).validationMode, "strict", "legacy plans retain strict validation");
   const plannerPath = path.join(root, "planner.json");
   createWorkflowPlanTransaction(plannerPath, { workflowId: "workflow-test", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  const initialDraft = readWorkflowPlanTransaction(plannerPath).draftPlan;
+  assert.equal(initialDraft.validationMode, "standard", "An unapproved initial draft must use standard validation guidance");
+  assert.equal(initialDraft.finalDelivery.required, false, "An unapproved draft must not imply a file-delivery contract");
+  assert.equal(initialDraft.finalDelivery.directory, ".", "An unapproved draft must not imply a deliverables directory");
+  assert.equal(initialDraft.finalDelivery.reason, "尚待规划确认用户成果");
   const smallPlan = {
     title: "Read project", finalDelivery: { required: false, directory: ".", primary: null, format: "", additional: [], producerNodeId: null, reason: "Pure review" },
     nodes: [{ id: "review", objective: "Review project", workspaceAccess: "read", acceptance: ["Give specific findings"] }]
@@ -93,8 +98,56 @@ try {
   assert.equal(candidate.draftPlan.validationMode, "standard");
   assert.equal(candidate.draftPlan.audit.checks.length, 6);
   assert.deepEqual(candidate.draftPlan.nodes[0].writeScope, []);
+  const explicitPath = path.join(root, "explicit-delivery.json");
+  createWorkflowPlanTransaction(explicitPath, { workflowId: "explicit-delivery", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  const explicitDelivery = submitWorkflowPlan(explicitPath, {
+    ...smallPlan,
+    validationMode: "strict",
+    finalDelivery: { required: true, directory: "reports", primary: "reports/final.md", format: "md", additional: [], producerNodeId: "review", reason: "User requested a report" },
+    nodes: [{ ...smallPlan.nodes[0], id: "review", workspaceAccess: "write", writeScope: ["reports"], deliverables: ["reports/final.md"] }]
+  });
+  assert.equal(explicitDelivery.draftPlan.validationMode, "strict", "Explicit validation mode is preserved");
+  assert.equal(explicitDelivery.draftPlan.finalDelivery.required, true, "Explicit delivery requirement is preserved");
+  assert.equal(explicitDelivery.draftPlan.finalDelivery.directory, "reports", "Explicit delivery directory is preserved");
+  const refinePath = path.join(root, "refine-delivery.json");
+  const refinedDraft = createWorkflowPlanTransaction(refinePath, { workflowId: "refine-delivery", mode: "refine", baseRevision: 1, basePlanVersion: 1, previousPlan: explicitDelivery.draftPlan, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } }).draftPlan;
+  assert.deepEqual(refinedDraft.finalDelivery, explicitDelivery.draftPlan.finalDelivery, "Existing delivery contracts survive refine initialization");
+  assert.equal(refinedDraft.validationMode, "strict", "Existing strict review contracts survive refine initialization");
+  const generatedPath = path.join(root, "planner-generated-id.json");
+  createWorkflowPlanTransaction(generatedPath, { workflowId: "workflow-generated-id", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  const generated = submitWorkflowPlan(generatedPath, { ...smallPlan, nodes: [{ ...smallPlan.nodes[0], id: undefined }] });
+  assert.match(generated.draftPlan.nodes[0].id, /^step-[a-f0-9]{16}$/);
+  assert.equal(submitWorkflowPlan(generatedPath, { ...smallPlan, nodes: [{ ...smallPlan.nodes[0], id: undefined }] }).digest, generated.digest, "generated IDs stay stable during repeated submission");
+  const identicalNodes = { ...smallPlan, nodes: [{ ...smallPlan.nodes[0], id: undefined }, { ...smallPlan.nodes[0], id: undefined, provider: "claude" }] };
+  const identicalCandidate = compileWorkflowPlanDraft(identicalNodes, { claudeAvailable: true, codexAvailable: true });
+  assert.equal(identicalCandidate.nodes[1].id, `${identicalCandidate.nodes[0].id}-2`, "Same-shaped independent nodes receive stable occurrence IDs");
+  assert.deepEqual(validateWorkflowPlan(identicalCandidate, new Set()), []);
+  assert.deepEqual(compileWorkflowPlanDraft(identicalNodes, { claudeAvailable: true, codexAvailable: true }).nodes.map((node) => node.id), identicalCandidate.nodes.map((node) => node.id));
+  const explicitCollision = compileWorkflowPlanDraft({ ...smallPlan, nodes: [{ ...smallPlan.nodes[0], id: undefined }, { ...smallPlan.nodes[0], id: identicalCandidate.nodes[0].id }] }, { claudeAvailable: true, codexAvailable: true });
+  assert.equal(explicitCollision.nodes[0].id, `${identicalCandidate.nodes[0].id}-2`, "Generated IDs avoid reserved explicit IDs");
+  assert.equal(explicitCollision.nodes[1].id, identicalCandidate.nodes[0].id, "Explicit IDs and references remain unchanged");
   assert.equal(submitWorkflowPlan(plannerPath, smallPlan).digest, candidate.digest);
   assert.throws(() => submitWorkflowPlan(plannerPath, { ...smallPlan, title: "Changed" }), /不能覆盖/);
+  const budgetPath = path.join(root, "planner-budget.json");
+  createWorkflowPlanTransaction(budgetPath, { workflowId: "workflow-budget", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  for (let i = 0; i < 3; i++) recordWorkflowPlannerToolFailure(budgetPath, `schema-${i}`, "input schema validation: objective is required");
+  assert.throws(() => submitWorkflowPlan(budgetPath, smallPlan), /连续无进展|超过预算/);
+  const validationBudgetPath = path.join(root, "planner-validation-budget.json");
+  createWorkflowPlanTransaction(validationBudgetPath, { workflowId: "workflow-validation-budget", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  for (let i = 0; i < 3; i++) {
+    const invalid = submitWorkflowPlan(validationBudgetPath, { ...smallPlan, title: `Renamed ${i}`, nodes: [{ ...smallPlan.nodes[0], acceptance: [] }] });
+    assert.equal(invalid.status, "editing");
+  }
+  assert.match(workflowPlannerSubmissionIssue(readWorkflowPlanTransaction(validationBudgetPath)), /无进展/, "title-only changes do not bypass repeated field errors");
+  const improvingPath = path.join(root, "planner-improving.json");
+  createWorkflowPlanTransaction(improvingPath, { workflowId: "workflow-improving", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  submitWorkflowPlan(improvingPath, { ...smallPlan, nodes: [{ ...smallPlan.nodes[0], objective: "", acceptance: [] }] });
+  submitWorkflowPlan(improvingPath, { ...smallPlan, nodes: [{ ...smallPlan.nodes[0], acceptance: [] }] });
+  assert.equal(submitWorkflowPlan(improvingPath, smallPlan).status, "committed", "actual field repairs still complete successfully");
+  const totalBudgetPath = path.join(root, "planner-total-budget.json");
+  createWorkflowPlanTransaction(totalBudgetPath, { workflowId: "workflow-total-budget", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
+  for (let i = 0; i < 12; i++) recordWorkflowPlannerToolFailure(totalBudgetPath, `schema-${i}`, `input schema invalid field ${i}`);
+  assert.match(workflowPlannerSubmissionIssue(readWorkflowPlanTransaction(totalBudgetPath)), /超过预算/, "different format errors still have a bounded total");
   const sharedPath = path.join(root, "shared.json");
   createWorkflowPlanTransaction(sharedPath, { workflowId: "workflow-shared", mode: "initial", baseRevision: 1, basePlanVersion: 0, previousPlan: null, availableSkills: [], availableMcpServers: [], providerCapabilities: { claudeAvailable: true, codexAvailable: true } });
   replaceWorkflowPlanDraft(sharedPath, { ...candidate.draftPlan, sharedContracts: [{ id: "data", version: 1, constraints: ["unit=ms"] }], nodes: [{ ...candidate.draftPlan.nodes[0], contractRefs: ["data@1"] }] });

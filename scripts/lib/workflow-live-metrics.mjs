@@ -30,7 +30,7 @@ export function measureWorkflowRun(workflow, events = []) {
       const control = /(?:^workflow_|workbench.workflow.(?:plan|result)|mcp__workbench-workflow-)/.test(`${detail.server || ""}:${name}`);
       const response = detail.result ?? detail.output;
       const rejected = control && rejectedControlReceipt(response);
-      calls.push({ phase, name, control, rejected, failed: rejected || log.phase === "failed" || detail.status === "failed" || detail.result?.is_error === true || detail.result?.isError === true,
+      calls.push({ phase, name, control, rejected, createdAt: log.createdAt, failed: rejected || log.phase === "failed" || detail.status === "failed" || detail.result?.is_error === true || detail.result?.isError === true,
         responseBytes: response === undefined ? null : Buffer.byteLength(typeof response === "string" ? response : JSON.stringify(response), "utf8") });
     }
   }
@@ -41,12 +41,28 @@ export function measureWorkflowRun(workflow, events = []) {
   const eventTime = (type, last = false) => (last ? [...events].reverse() : events).find((event) => event.type === type)?.createdAt;
   const controlCalls = calls.filter((call) => call.control);
   const observedBytes = controlCalls.filter((call) => call.responseBytes !== null);
+  const startTime = eventTime("planner.started") || workflow.createdAt;
+  const firstBusinessTime = calls.filter((call) => !call.control && !call.failed && call.createdAt)
+    .map((call) => call.createdAt).sort()[0];
+  const nodeIntervals = workflow.nodes.flatMap((node) => {
+    const start = Date.parse(node.startedAt || ""); const end = Date.parse(node.finishedAt || "");
+    return Number.isFinite(start) && Number.isFinite(end) && end > start ? [{ time: start, change: 1 }, { time: end, change: -1 }] : [];
+  }).sort((left, right) => left.time - right.time || left.change - right.change);
+  let active = 0; let peak = 0;
+  for (const interval of nodeIntervals) { active += interval.change; peak = Math.max(peak, active); }
+  const repairLogs = workflow.nodes.flatMap((node) => node.logs || []).filter((log) => log.title === "自动修复机器交接");
   return {
     requestedValidationMode: workflow.plan?.validationMode || "legacy-strict",
     integrationPolicy: events.filter((event) => event.type === "integration.policy").map((event) => event.payload || null),
     toolCalls: calls.length, controlToolCalls: controlCalls.length, businessToolCalls: calls.length - controlCalls.length,
     controlToolCallFraction: calls.length ? controlCalls.length / calls.length : null,
     toolFailures: calls.filter((call) => call.failed).length,
+    resultRepairRounds: repairLogs.length,
+    observedNodeOverlapPeak: nodeIntervals.length ? peak : null,
+    timeToFirstObservedBusinessToolMs: duration(startTime, firstBusinessTime),
+    // Host control actions include test-driver approvals; distinguish those
+    // from extra operator intervention in the enclosing test report.
+    hostControlActions: events.filter((event) => /^(?:plan\.approved|workflow\.paused|workflow\.resumed|maintenance\.requested|node\.retry_requested)$/.test(event.type)).length,
     rejectedControlReceipts: controlCalls.filter((call) => call.rejected).length,
     controlResponseBytes: observedBytes.length ? observedBytes.reduce((sum, call) => sum + call.responseBytes, 0) : null,
     controlResponsesObserved: observedBytes.length,
@@ -63,6 +79,6 @@ export function measureWorkflowRun(workflow, events = []) {
     usage: workflow.telemetry?.usage || workflow.metrics?.usage || null,
     usageObservations,
     cost: workflow.telemetry?.cost || workflow.metrics?.cost || null,
-    measurementNotes: ["Durations include provider/network time; not a direct measure of model attention.", "Tool response bytes come from stored native tool results and may reflect log truncation.", "Missing native usage is null; cumulative observations are not summed."]
+    measurementNotes: ["Durations include provider/network time; not a direct measure of model attention.", "Tool response bytes come from stored native tool results and may reflect log truncation.", "Missing native usage is null; cumulative observations are not summed.", "First business tool time is the earliest retained nonfailed business tool observation; it does not prove semantic effectiveness.", "Node overlap uses recorded start/finish intervals; retained retry intervals may be incomplete."]
   };
 }

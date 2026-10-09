@@ -43,7 +43,7 @@ export function normalizeCanonicalActivity(value: ActivityRecordInput | unknown)
     ...(typeof source.sequence === "number" && Number.isFinite(source.sequence) ? { sequence: source.sequence } : {}),
     occurredAt: validTime(source.occurredAt),
     title,
-    summary: text(source.summary, title),
+    summary: semantic === "message" && typeof source.summary === "string" ? source.summary : text(source.summary, title),
     ...(source.detail !== undefined ? { detail: compactActivityDetail(source.detail) } : {}),
     ...(Array.isArray(source.artifactRefs) ? { artifactRefs: source.artifactRefs as CanonicalActivityRecord["artifactRefs"] } : {}),
     ...(Array.isArray(source.diagnostics) ? { diagnostics: source.diagnostics as CanonicalActivityRecord["diagnostics"] } : {})

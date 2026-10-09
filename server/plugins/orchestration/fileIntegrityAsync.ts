@@ -5,7 +5,7 @@ import { Worker } from "node:worker_threads";
 import type * as Integrity from "./fileIntegrity.js";
 import type { calculateWorkflowPlanImpact } from "./stateFiles.js";
 
-type Methods = Pick<typeof Integrity, "buildWorkflowFileIntegrity" | "workflowResultFileIntegrityIssue" | "workflowCompletedFileIntegrityIssues"> & { calculateWorkflowPlanImpact: typeof calculateWorkflowPlanImpact };
+type Methods = Pick<typeof Integrity, "buildWorkflowArtifactRecords" | "buildWorkflowFileIntegrity" | "workflowResultFileIntegrityIssue" | "workflowCompletedFileIntegrityIssues"> & { calculateWorkflowPlanImpact: typeof calculateWorkflowPlanImpact };
 type Job = { method: keyof Methods; args: unknown[]; resolve: (value: any) => void; reject: (error: Error) => void };
 const queue: Job[] = [];
 let worker: Worker | null = null;
@@ -61,6 +61,7 @@ function run<K extends keyof Methods>(method: K, args: Parameters<Methods[K]>): 
 }
 
 export const buildWorkflowFileIntegrityAsync = (...args: Parameters<Methods["buildWorkflowFileIntegrity"]>) => run("buildWorkflowFileIntegrity", args);
+export const buildWorkflowArtifactRecordsAsync = (...args: Parameters<Methods["buildWorkflowArtifactRecords"]>) => run("buildWorkflowArtifactRecords", args);
 export const workflowResultFileIntegrityIssueAsync = (...args: Parameters<Methods["workflowResultFileIntegrityIssue"]>) => run("workflowResultFileIntegrityIssue", args);
 export const workflowCompletedFileIntegrityIssuesAsync = (...args: Parameters<Methods["workflowCompletedFileIntegrityIssues"]>) => run("workflowCompletedFileIntegrityIssues", args);
 export const calculateWorkflowPlanImpactAsync = (...args: Parameters<Methods["calculateWorkflowPlanImpact"]>) => run("calculateWorkflowPlanImpact", args);

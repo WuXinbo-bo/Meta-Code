@@ -6,6 +6,7 @@ import { normalizeWorkflowNodeResult } from "./execution.js";
 import { captureWorkspaceSnapshotSync, type WorkspaceSnapshot } from "./enforcement.js";
 import { workflowCompletedFileIntegrityIssues, workflowResultFileIntegrityIssue } from "./fileIntegrity.js";
 import { workflowCompletedFileIntegrityIssuesAsync, workflowResultFileIntegrityIssueAsync } from "./fileIntegrityAsync.js";
+import { upsertWorkflowLog } from "./logs.js";
 import { reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction } from "./nodeResultTransactions.js";
 import { normalizeWorkflowPlan, workflowNodeContractDigest } from "./plan.js";
 import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowExecutionTarget, type WorkflowIntegrationPhase, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowRecord, type WorkflowStatus } from "./types.js";
@@ -200,6 +201,12 @@ export class WorkflowRepository {
     return row ? this.hydrate(row, true) : null;
   }
 
+  /** Event append needs current provenance, not node/result recovery. */
+  getEventIdentity(id: string, ownerUserId: string) {
+    const row = this.db.prepare("SELECT id, work_directory, execution_root, revision FROM workflow_runs WHERE id = ? AND owner_user_id = ?").get(id, ownerUserId) as Pick<WorkflowRow, "id" | "work_directory" | "execution_root" | "revision"> | undefined;
+    return row ? { id: row.id, workDirectory: row.work_directory, executionRoot: row.execution_root, revision: row.revision } : null;
+  }
+
   listBranches(originId: string, ownerUserId: string) {
     const rows = this.db.prepare("SELECT * FROM workflow_runs WHERE origin_id = ? AND owner_user_id = ? ORDER BY branch_index, created_at").all(originId, ownerUserId) as WorkflowRow[];
     return rows.map((row) => this.hydrate(row, false));
@@ -292,13 +299,12 @@ export class WorkflowRepository {
 
   appendPlannerLog(id: string, ownerUserId: string, log: WorkflowNodeLog) {
     const row = this.require(id, ownerUserId);
-    const current = parse<WorkflowNodeLog[]>(row.planner_logs_json, []);
-    const existing = current.findIndex((item) => item.id === log.id);
-    const logs = existing >= 0
-      ? current.map((item, index) => index === existing ? log : item)
-      : [...current, log].slice(-120);
+    const logs = parse<WorkflowNodeLog[]>(row.planner_logs_json, []);
+    upsertWorkflowLog(logs, log, 120);
+    const serialized = JSON.stringify(logs);
+    if (serialized === row.planner_logs_json) return;
     this.db.prepare("UPDATE workflow_runs SET planner_logs_json = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?")
-      .run(JSON.stringify(logs), new Date().toISOString(), id, ownerUserId);
+      .run(serialized, new Date().toISOString(), id, ownerUserId);
   }
 
   setPlannerSession(id: string, ownerUserId: string, sessionId: string, engineSessionId?: string | null) {
@@ -746,13 +752,19 @@ export class WorkflowRepository {
   }
 
   appendIntegrationLog(id: string, log: WorkflowNodeLog) {
+    this.appendIntegrationLogs(id, [log]);
+  }
+
+  appendIntegrationLogs(id: string, additions: WorkflowNodeLog[]) {
+    if (!additions.length) return;
     const row = this.db.prepare("SELECT integration_logs_json FROM workflow_runs WHERE id = ?").get(id) as { integration_logs_json: string } | undefined;
     if (!row) throw new Error("工作流不存在");
     const current = parse<WorkflowNodeLog[]>(row.integration_logs_json, []);
-    const existing = current.findIndex((item) => item.id === log.id);
-    const logs = (existing >= 0 ? current.map((item, index) => index === existing ? log : item) : [...current, log]).slice(-300);
+    for (const log of additions) upsertWorkflowLog(current, log);
+    const serialized = JSON.stringify(current);
+    if (serialized === row.integration_logs_json) return;
     this.db.prepare("UPDATE workflow_runs SET integration_logs_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(logs), new Date().toISOString(), id);
+      .run(serialized, new Date().toISOString(), id);
   }
 
   finishIntegration(id: string, status: "completed" | "needs_review", finalResult: WorkflowNodeResult) {
@@ -768,6 +780,13 @@ export class WorkflowRepository {
     this.db.prepare("UPDATE workflow_nodes SET status = ?, provider = ?, attempt = ?, engine_thread_id = ?, context_recovery_count = ?, context_recovery_mode = ?, idempotency_key = ?, summary_json = ?, result_digest = ?, stale_reason = ?, logs_json = ?, error = ?, lease_expires_at = ?, next_retry_at = ?, started_at = ?, finished_at = ? WHERE id = ?")
       .run(node.status, node.provider, node.attempt, node.engineThreadId, node.contextRecoveryCount, node.contextRecoveryMode, node.idempotencyKey, node.summary ? JSON.stringify(node.summary) : null, node.resultDigest, node.staleReason, JSON.stringify(node.logs.slice(-300)), node.error, node.leaseExpiresAt, node.nextRetryAt, node.startedAt, node.finishedAt, node.recordId);
     this.db.prepare("UPDATE workflow_runs SET revision = revision + 1, updated_at = ? WHERE id = ?").run(new Date().toISOString(), node.workflowId);
+  }
+
+  /** Streaming activity cannot overwrite concurrent pause/restart controls. */
+  updateNodeActivity(node: WorkflowNodeRecord) {
+    const updated = this.db.prepare("UPDATE workflow_nodes SET engine_thread_id = ?, context_recovery_count = ?, context_recovery_mode = ?, logs_json = ? WHERE id = ?")
+      .run(node.engineThreadId, node.contextRecoveryCount, node.contextRecoveryMode, JSON.stringify(node.logs.slice(-300)), node.recordId);
+    if (updated.changes) this.db.prepare("UPDATE workflow_runs SET revision = revision + 1, updated_at = ? WHERE id = ?").run(new Date().toISOString(), node.workflowId);
   }
 
   claimNodeAttempt(nodeRecordId: string, runnerId: string, checkpointRoot: string, leaseExpiresAt: string, runtimeBinding?: RuntimeExecutionIdentity) {

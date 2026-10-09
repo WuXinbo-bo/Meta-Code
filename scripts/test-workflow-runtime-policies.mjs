@@ -100,8 +100,22 @@ try {
   assert.equal(workflowValidationPolicy(implicit, new Map()).effective, "strict", "Old plans preserve their approved review boundary");
 
   const snapshot = workflowQuestionSnapshot(fallback);
-  assert.equal(isWorkflowStatusQuestion("What remains?"), true);
-  assert.equal(isWorkflowStatusQuestion("为什么这个设计不支持多用户？"), false);
+  for (const question of [
+    "What remains?",
+    "现在做到哪一步了？请报告已完成、运行中和等待的节点。",
+    "当前进度如何？请列出已完成的节点、运行中的节点以及等待的节点。",
+    "What is the current status? Please list completed, running, and waiting nodes.",
+    "请显示失败和阻塞的任务状态。"
+  ]) assert.equal(isWorkflowStatusQuestion(question), true, `Pure status request: ${question}`);
+  for (const question of [
+    "为什么这个设计不支持多用户？",
+    "现在做到哪一步了？请分析为什么运行很慢。",
+    "请报告已完成、运行中和等待的节点，并建议如何优化。",
+    "目前状态如何？停止运行中的节点。",
+    "What remains? Change the waiting nodes to Claude.",
+    "List running nodes and explain their design tradeoffs.",
+    ""
+  ]) assert.equal(isWorkflowStatusQuestion(question), false, `Semantic or mixed request: ${question}`);
   assert.match(await runtime.answerWorkflowQuestion(snapshot, "How do the checks support the result?", "codex", new AbortController().signal), /test-backed/);
   assert.match(await runtime.answerWorkflowQuestion(snapshot, "Explain the checks", "claude", new AbortController().signal), /recorded checks/);
   assert.equal(await fs.stat(claudeOptions.cwd).catch(() => null), null, "Question runtime must be cleaned up");

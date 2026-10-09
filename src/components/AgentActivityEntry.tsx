@@ -1,8 +1,8 @@
-import { Activity, Brain, Check, ChevronRight, Copy, Eye, FileCode2, PlugZap, Search, TerminalSquare, Wrench, X } from "lucide-react";
+import { Activity, Bot, Brain, Check, ChevronRight, Copy, Eye, FileCode2, PlugZap, Search, TerminalSquare, UserRound, Workflow, Wrench, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { AssistantReply } from "./AssistantReply";
+import { AgentReplyContent, AssistantReply } from "./AssistantReply";
 import { ProviderIcon } from "../branding/ProviderIcon";
-import { activityVisualTier, type SharedAgentLog } from "./activityModel";
+import { activityMessageIdentity, activityVisualTier, type SharedAgentLog } from "./activityModel";
 
 export type { SharedAgentLog } from "./activityModel";
 export { AgentReplyContent } from "./AssistantReply";
@@ -205,7 +205,8 @@ export function AgentActivityEntry({
   useEffect(() => setOpen(expanded), [expanded]);
   const [copied, setCopied] = useState(false);
   const time = new Date(log.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const eventProvider = log.provider || log.activity?.provider || provider;
+  const identity = activityMessageIdentity(log, provider);
+  const eventProvider = identity.provider;
   const eventProviderIcon = eventProvider === provider ? providerIcon : undefined;
   const eventProviderAccent = eventProvider === provider ? providerAccent : undefined;
   const eventProviderLabel = eventProvider === provider ? providerLabel : eventProvider === "codex" ? "Codex" : eventProvider === "claude" ? "Claude" : eventProvider;
@@ -220,9 +221,15 @@ export function AgentActivityEntry({
     return <div className="agent-thinking-line settled"><Brain size={13} /><span>思考</span></div>;
   }
   if (log.kind === "message") {
+    const heading = showProvider ? <><strong>{identity.role === "system" ? "系统" : identity.role === "user" ? "你" : messageLabel || eventProviderLabel || "Agent"}</strong><time>{time}</time></> : undefined;
+    if (identity.role === "user") return <article className="message user agent-user-message" data-message-role="user">
+      <div className="avatar"><UserRound size={18} /></div>
+      <div className="message-body">{heading && <header className="assistant-reply-heading">{heading}</header>}<AgentReplyContent text={log.text} renderMessage={renderMessage} /></div>
+    </article>;
     return <AssistantReply text={log.text} renderMessage={renderMessage}
-      avatar={<ProviderIcon provider={eventProvider} icon={eventProviderIcon} accent={eventProviderAccent} size={18} />}
-      heading={showProvider ? <><strong>{messageLabel || eventProviderLabel || eventProvider}</strong><time>{time}</time></> : undefined}
+      avatar={identity.role === "system" ? <Workflow size={18} /> : eventProvider ? <ProviderIcon provider={eventProvider} icon={eventProviderIcon} accent={eventProviderAccent} size={18} /> : <Bot size={18} />}
+      heading={heading}
+      data-message-role={identity.role}
     />;
   }
   const isError = log.kind === "error";

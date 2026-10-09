@@ -74,7 +74,8 @@ const runtime = createOrchestrationRuntime({
         } else if (testCase === "no-command") {
           assert.equal(verificationEvidence, undefined);
           assert.match(prompt, /纯只读分析节点/);
-          assert.match(prompt, /无需命令执行或 systemVerification/);
+          assert.match(prompt, /无需执行测试或验证命令，也无需 systemVerification/);
+          assert.match(prompt, /Claude 只读节点使用 Read、Glob、Grep/);
           assert.doesNotMatch(prompt, /systemVerification 是真实命令/);
         } else {
           assert.match(prompt, /systemVerification/);
