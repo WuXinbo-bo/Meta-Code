@@ -76,7 +76,7 @@ import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
 import { AgentTaskTooltip } from "./components/AgentTaskTooltip";
 import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
 import { AssistantReply } from "./components/AssistantReply";
-import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
+import { agentStreamVersion, isEmptyAssistantMessage, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
 import type { CodexLinkBinding } from "./codex-link/model";
 import { RequestCoordinator } from "./requestCoordinator";
 import { WorkspaceResourceCache } from "./workspaceResourceCache";
@@ -1086,6 +1086,7 @@ function visibleConversationMessages(messages: Message[], sessionStatus?: Sessio
   const result: Message[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (isEmptyAssistantMessage(message)) continue;
     const subtype = claudeStatusSubtype(message);
     if (subtype === "thinking_tokens" || subtype === "status") continue;
     if (subtype === "api_retry") {

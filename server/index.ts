@@ -13,7 +13,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import readXlsxFile from "read-excel-file/node";
 import { deleteActivityArtifactsForSession, readActivityArtifact } from "./activity/artifacts.js";
@@ -105,7 +105,8 @@ import type { WorkflowRecord } from "./plugins/orchestration/types.js";
 import { TaskContextStore, latestTaskHandoffForRoot, renderTaskHandoff, redactTaskText, taskRootsEqual } from "./tasks/context.js";
 import { prepareWorkflowTaskContext } from "./tasks/executionContext.js";
 import { publishTaskWorkflowResult } from "./tasks/workflowResult.js";
-import { registerTaskContextRoutes, workflowHandoff } from "./tasks/routes.js";
+import { registerTaskContextRoutes, refreshWorkflowTaskHandoff } from "./tasks/routes.js";
+import { mergeTaskHistoryServers, prepareSessionTaskHistoryServers, TASK_HISTORY_SERVER_NAME } from "./tasks/sessionHistory.js";
 import { terminateServerDescendants, terminateTrackedProcessTrees } from "./processTree.js";
 import { AcpMainSessionRuntime, assertAcpConfigValue, type AcpMainSessionInput } from "./providers/acp/mainSession.js";
 import { acpMcpServers } from "./providers/acp/mcp.js";
@@ -314,6 +315,7 @@ type ActiveRun = {
   delegatedReviewTaskIds: Set<string>;
   injectedDelegatedRecoveryTaskIds: Set<string>;
   releaseSkillProjection?: () => void;
+  taskHistoryServers?: WorkbenchMcpServer[];
 };
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -1582,7 +1584,7 @@ function mcpServersForNode(workspace: Workspace, names: string[]) {
 }
 
 function codexMcpConfigForWorkspace(workspace: Workspace, selectedNames?: string[], additionalServers: WorkbenchMcpServer[] = []) {
-  return codexMcpConfig([...additionalServers, ...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace))]);
+  return codexMcpConfig(mergeTaskHistoryServers([...additionalServers, ...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace))], additionalServers));
 }
 
 const CLAUDE_WORKFLOW_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"] as const;
@@ -1595,7 +1597,7 @@ function packagedWorkflowToolArgs(compiledName: string, sourceName: string) {
     if (!fs.existsSync(compiled)) throw new Error(`桌面运行时缺少任务编排工具：${compiledName}`);
     return [compiled];
   }
-  return [path.join(ROOT, "node_modules", "tsx", "dist", "cli.mjs"), path.join(ROOT, "server", "workflows", sourceName)];
+  return ["--import", pathToFileURL(path.join(ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href, path.join(ROOT, "server", "workflows", sourceName)];
 }
 
 function workflowPlannerToolServer(transactionPath: string): WorkbenchMcpServer {
@@ -1623,8 +1625,8 @@ async function workflowPlannerMcpConfigPath(workspace: Workspace, transactionPat
   return file;
 }
 
-async function workspaceMcpConfigPath(workspace: Workspace, onlyServerId?: string) {
-  const content = JSON.stringify(mcpConfigForWorkspace(workspace, onlyServerId));
+async function workspaceMcpConfigPath(workspace: Workspace, onlyServerId?: string, additionalServers: WorkbenchMcpServer[] = []) {
+  const content = JSON.stringify(claudeMcpConfig(mergeTaskHistoryServers(mcpServersForWorkspace(workspace, onlyServerId), additionalServers)));
   const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
   const file = path.join(MCP_CONFIG_DIR, `${workspace.id}-${hash}.json`);
   if (!fs.existsSync(file)) await fsp.writeFile(file, content, { encoding: "utf8", mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
@@ -3800,7 +3802,7 @@ async function runCodexTurn(session: Session, workspace: Workspace, prompt: stri
     const capabilities = orchestrationCapabilities("codex", delegationEnabled);
     const binding = codexLinkRepository.findBySession(session.ownerUserId, session.id);
     if (binding?.accessMode === "resume") linkedRun = await codexLink.prepareLinkedRun(binding);
-    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
+    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, activeRun.taskHistoryServers || [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
     const options = mainCodexThreadOptions(session, workspace, state.settings, activeRun.skillPolicies);
     const fileBaseline = await createActivityTurnFileBaseline(workspace.root);
     const terminalState = await runCodexSessionTurn({
@@ -3921,7 +3923,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
       const runtime = await getClaudeRuntime();
       if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
       const command = resolveClaudeCommand(runtime.path);
-      const mcpConfigPath = await workspaceMcpConfigPath(workspace);
+      const mcpConfigPath = await workspaceMcpConfigPath(workspace, undefined, activeRun.taskHistoryServers);
       const delegationEnabled = isWorkbenchDelegationEnabled(session, activeRun.skillPolicies);
       const capabilities = orchestrationCapabilities("claude", delegationEnabled);
       return new ClaudeSessionHandle({
@@ -4216,7 +4218,11 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
       const context = taskContextStore.forExecution({ kind: "session", id: session.id }, session.ownerUserId);
       const storedHandoff = latestTaskHandoffForRoot(context, workspace.root);
       const sourceWorkflow = storedHandoff?.source.kind === "workflow" ? workflowRepository.get(storedHandoff.source.id, session.ownerUserId) : null;
-      const handoff = sourceWorkflow && taskRootsEqual(sourceWorkflow.executionRoot || sourceWorkflow.workDirectory, workspace.root) ? workflowHandoff(sourceWorkflow) : storedHandoff;
+      const handoff = sourceWorkflow && taskRootsEqual(sourceWorkflow.executionRoot || sourceWorkflow.workDirectory, workspace.root) ? refreshWorkflowTaskHandoff(sourceWorkflow, taskContextStore) : storedHandoff;
+      activeRun.taskHistoryServers = await prepareSessionTaskHistoryServers({ store: taskContextStore, sessionId: session.id, ownerUserId: session.ownerUserId,
+        executionRoot: workspace.root, handoff, runtimeDirectory: path.join(RUNTIME_DIR, "runtime"), command: process.execPath,
+        args: process.env.WORKBENCH_PACKAGED === "1" ? [path.join(ROOT, "dist-server", "tasks", "historyToolServer.js")]
+          : ["--import", pathToFileURL(path.join(ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href, path.join(ROOT, "server", "tasks", "historyToolServer.ts")] });
       const executionPrompt = handoff?.source.kind === "workflow" ? `${renderTaskHandoff(handoff)}\n\n用户当前要求：\n${prompt}` : prompt;
       await runSessionLoop(session, workspace, executionPrompt, activeRun);
     })

@@ -91,7 +91,10 @@ export function workflowLogFromEngineEvent(
   };
   const phase = event.type === "tool.completed" ? "完成" : "";
   const title = event.toolName ? `${event.toolName}${phase}` : labels[event.type] || event.type;
-  const rawText = event.text || title;
+  const payload = event.payload as { item?: { type?: string; text?: string } } | undefined;
+  const rawText = event.type === "assistant"
+    ? payload?.item?.type === "agent_message" && typeof payload.item.text === "string" ? payload.item.text : event.text
+    : event.text || title;
   const trimmed = rawText.trim();
   const machinePayload = event.type === "assistant" && (trimmed.startsWith("{") || trimmed.startsWith("```")) && (trimmed.includes('"outcome"') || trimmed.includes('"nodes"'));
   const result = workflowLog(kind, machinePayload ? "机器结果已接收" : title, machinePayload ? "正在解析并校验结构化结果" : rawText, `${prefix}:${event.sourceId || event.type}`, context);
@@ -100,7 +103,7 @@ export function workflowLogFromEngineEvent(
   result.phase = activity.phase;
   result.detail = compactDetail(event.detail);
   const provider = prefix.toLowerCase().includes("codex") ? "codex" : prefix.toLowerCase().includes("claude") ? "claude" : "unknown";
-  result.activity = canonicalActivityFromEngineEvent(event, {
+  result.activity = canonicalActivityFromEngineEvent(event.type === "assistant" ? { ...event, text: rawText } : event, {
     provider,
     actor: { kind: "workflow", ...(context.runId ? { id: context.runId } : {}) },
     scope: { ...(context.runId ? { workflowId: context.runId } : {}), ...(context.contextId ? { threadId: context.contextId } : {}), ...(context.attempt !== undefined ? { attempt: context.attempt } : {}) },
@@ -112,8 +115,16 @@ export function workflowLogFromEngineEvent(
 }
 
 export function upsertWorkflowLog(logs: WorkflowNodeLog[], log: WorkflowNodeLog, limit = 300) {
-  settleSupersededReasoning(logs, log.id);
   const existing = logs.findIndex((item) => item.id === log.id);
+  // Empty SDK message items are stream markers, not user-visible replies.
+  // A blank completion can still settle earlier content with the same identity.
+  if (log.kind === "message" && !log.text.trim()) {
+    if (existing < 0 || !logs[existing].text.trim()) return;
+    const previous = logs[existing];
+    log = { ...log, text: previous.text, detail: previous.detail,
+      ...(log.activity ? { activity: { ...log.activity, summary: previous.activity?.summary ?? previous.text, detail: previous.activity?.detail } } : {}) };
+  }
+  settleSupersededReasoning(logs, log.id);
   if (existing >= 0) logs[existing] = { ...log, detail: log.detail ?? logs[existing].detail };
   else logs.push(log);
   logs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));

@@ -44,6 +44,23 @@ export type WorkflowProviderCapabilitiesInput = WorkflowProviderCapabilities | {
   codexAvailable?: boolean;
 };
 
+/**
+ * Give the planner a bounded, task-shaped exploration budget. This is guidance
+ * for the model; the host still enforces read/write and protocol boundaries.
+ */
+export function workflowExplorationGuidance(taskPrompt = "") {
+  const text = taskPrompt.trim();
+  const complexitySignals = (text.match(/\n|\b(?:and|then|also|migration|refactor|research|compare|compatibility|integration)\b|同时|并且|以及|分别|迁移|重构|研究|比较|兼容|集成|多模块|多项目/gi) || []).length;
+  const longRequest = text.length >= 900;
+  if (longRequest || complexitySignals >= 4) {
+    return "复杂或不确定任务：先读取约 4 至 8 个与目标直接相关的关键文件/目录摘要，记录已知事实、缺口和风险后再写计划；不得为填预算读取无关源码。";
+  }
+  if (text.length >= 280 || complexitySignals >= 2) {
+    return "中等复杂任务：先读取约 2 至 4 个关键文件/目录摘要确认边界，再提交或分批维护计划；若关键事实已由上下文给出，可直接提交。";
+  }
+  return "简单且边界明确的任务：优先一次提交最小计划；缺少关键事实时按需读取约 1 至 2 个相关文件/目录摘要。预算是建议而非强制上限，实际不确定性较高时可提高探索级别；必要输入不足则写入 questions，不能猜测。";
+}
+
 export const DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES: WorkflowProviderCapabilities = {
   providers: {
     claude: { displayName: "Claude", available: true, workspaceRead: true, workspaceWrite: true },
@@ -341,14 +358,15 @@ export function plannerTurnPrompt(system: string, originalPrompt: string, option
   return `${system}\n\n本次任务：\n${originalPrompt}${normalized.workspaceRoot ? `\n\n待规划工作区根目录（仅允许读取）：${normalized.workspaceRoot}` : ""}${revisionInstruction ? `\n\n${revisionInstruction}` : ""}\n\n机器计划只能通过 workbench-workflow-plan 工具维护。常规计划直接 workflow_submit_plan；维护或恢复时先 workflow_read_plan。大型草稿可 workflow_replace_plan 或 workflow_apply_operations 分批修改，最后 workflow_validate_draft 和 workflow_commit_candidate。自然语言最终回复只面向用户，简述结果即可，禁止在回复中输出机器 JSON。如果用户只是问候、询问或没有提出明确计划修改，调用 workflow_no_change 后正常回复，不得重规划；reason 参数必填，例如 workflow_no_change({reason: '用户仅询问进度，保持计划不变'})。规划期间不得修改工作区业务文件、执行写入命令或启动任何子 Agent。`;
 }
 
-export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] = [], skillContext = "", maxConcurrentAgents = 5, providerCapabilitiesInput: WorkflowProviderCapabilitiesInput = DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES, executionTarget: WorkflowExecutionTarget = "isolated") {
+export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] = [], skillContext = "", maxConcurrentAgents = 5, providerCapabilitiesInput: WorkflowProviderCapabilitiesInput = DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES, executionTarget: WorkflowExecutionTarget = "isolated", taskPrompt = "") {
   const providerCapabilities = normalizeWorkflowProviderCapabilities(providerCapabilitiesInput);
   const providerStatus = Object.entries(providerCapabilities.providers).map(([id, provider]) => `${provider.displayName}（${id}）：${provider.available ? "可用" : "不可用"}${provider.workspaceWrite ? "、可写" : "、只读"}`).join("；");
   return [
     "你是只读任务规划 Agent：把用户目标转为可审批的静态 DAG。不得执行业务任务、修改文件、启动子 Agent 或假设用户已批准。目标是帮助用户完成工作，不是增加节点或维护协议。",
-    "优先理解目标、现有项目与验收。普通计划可一次 workflow_submit_plan 提交；服务器补齐空数组、默认值和客观结构检查，返回错误时只修正相关字段。大型计划在首批工具调用中写入计划级字段，然后 workflow_apply_operations 每批 2 至 4 个节点形成检查点，最后 workflow_validate_draft、workflow_commit_candidate。",
+    "优先理解目标、现有项目与验收。普通计划可一次 workflow_submit_plan 提交；服务器补齐空数组、默认值和客观结构检查，返回错误时只修正相关字段。大型计划在形成足够事实后，用 workflow_apply_operations 每批 2 至 4 个节点形成检查点，最后 workflow_validate_draft、workflow_commit_candidate。不要为了满足协议过早写草稿，也不要在事实不足时凭空编造计划。",
     "追加修改先 workflow_read_plan，沿用仍有效的节点 ID、业务合同和成果，只调整受影响部分。自然语言回复不再承载计划 JSON；工具返回 status=committed 后才说明候选已提交。无修改的维护问题用 workflow_no_change({reason})。",
-    "隔离规划工具由工作台预授权，只维护候选草稿，不修改业务文件。不要在第一次草稿写入前做长时间资料探索；除非用户明确要分析工作台自身，禁止读取工作台源码、协议实现或测试来猜字段。按需读取与当前目标相关资料。",
+    "隔离规划工具由工作台预授权，只维护候选草稿，不修改业务文件。按任务不确定性分配探索预算：先读取关键结构确认边界，再形成计划；除非用户明确要分析工作台自身，禁止读取工作台源码、协议实现或测试来猜字段。按需读取与当前目标相关资料。",
+    `探索预算：${workflowExplorationGuidance(taskPrompt)}`,
     "采用并行优先、依赖正确的 DAG。dependsOn 只表示真实输入依赖；删除传递冗余。不要按角色顺序强制串行，也不要把微小连续步骤拆成多个 Agent。无法明确验收或缺少关键前提时写入 questions，不编造。",
     `本任务最多同时运行 ${maxConcurrentAgents} 个执行 Agent；并行仅适用于收益足以覆盖启动、上下文与验收成本的独立工作。`,
     "每个节点明确 objective、acceptance、workspaceAccess；写入节点必须给出最小 writeScope。读取会被另一并行节点修改的内容也不能并行，应增加真实依赖或隔离输入。不能要求只读节点承担修复职责。",

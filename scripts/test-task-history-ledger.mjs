@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { TaskContextStore, sessionHandoff, renderTaskHandoff, readTaskHistorySnapshot, TASK_HANDOFF_MAX_CHARS } from "../server/tasks/context.ts";
+import { refreshWorkflowTaskHandoff } from "../server/tasks/routes.ts";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "metacode-task-ledger-"));
 const db = new DatabaseSync(path.join(root, "state.db"));
@@ -85,5 +86,28 @@ try {
   assert.equal(legacyHistory.entries.length, 1);
   assert.match(legacyHistory.entries[0].referenceId, /^legacy-/);
   assert.equal(legacyHistory.entries[0].text, "An old saved constraint");
-  console.log("task history ledger: exact redacted originals, bounded reference retrieval, revisions, latest request, provider/root isolation, legacy data, ring-buffer persistence and deletion passed");
+
+  const continuation = store.ensure({ kind: "session", id: "before-workflow", executionRoot: root }, "owner", "workspace", "Continuous task");
+  const priorConstraint = "Keep the existing export API synchronous and preserve zero amounts.";
+  store.handoff(continuation.id, "owner", sessionHandoff({ id: "before-workflow", revision: 2, title: "Task", messages: [message("prior-goal", "Repair CSV export"), message("prior-constraint", priorConstraint)] }, root));
+  store.link(continuation.id, { kind: "workflow", id: "after-conversation", executionRoot: root }, "owner", "workspace");
+  const workflow = { id: "after-conversation", ownerUserId: "owner", revision: 3, activePlanVersion: 1, originalPrompt: "Repair quoting", reviewNote: null, executionRoot: root, status: "running", nodes: [] };
+  let refreshed = refreshWorkflowTaskHandoff(workflow, store);
+  assert.ok(refreshed.userRequests.some((request) => request.text === priorConstraint), "Workflow continuation retains earlier conversation constraints");
+  assert.ok(refreshed.history.totalRequests >= 3);
+  workflow.revision = 4;
+  workflow.reviewNote = "Also retain the header ordering";
+  workflow.nodes = [{ id: "repair", status: "completed", summary: { humanSummary: "Quoting fixed", outputs: [{ path: "src/export.js" }], decisions: [], unresolved: [] } }];
+  refreshed = refreshWorkflowTaskHandoff(workflow, store);
+  assert.equal(refreshed.sourceRevision, 4);
+  assert.equal(refreshed.latestUserRequest.text, workflow.reviewNote);
+  assert.deepEqual(refreshed.files, ["src/export.js"]);
+  const continuationPrompt = renderTaskHandoff(refreshed);
+  assert.match(continuationPrompt, /Keep the existing export API synchronous/);
+  assert.match(continuationPrompt, /Quoting fixed/);
+  assert.match(continuationPrompt, /Also retain the header ordering/);
+  const reused = refreshWorkflowTaskHandoff(workflow, store);
+  assert.equal(reused.sourceRevision, refreshed.sourceRevision);
+  assert.deepEqual(reused.history, refreshed.history, "Repeated continuation keeps ledger provenance stable");
+  console.log("task history ledger: exact redacted originals, bounded reference retrieval, revisions, latest request, provider/root isolation, legacy data, ring-buffer persistence, workflow continuation and deletion passed");
 } finally { db.close(); await fs.rm(root, { recursive: true, force: true }); }

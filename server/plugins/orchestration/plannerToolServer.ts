@@ -94,7 +94,7 @@ const planSchema = z.object({
   nodes: z.array(nodeSchema)
 });
 const draftNodeSchema = nodeSchema.partial().extend({
-  id: z.string().min(1), objective: z.string().min(1), workspaceAccess: z.enum(["read", "write"]), acceptance: z.array(z.string().min(1)).min(1)
+  id: z.string().min(1).optional(), objective: z.string().min(1), workspaceAccess: z.enum(["read", "write"]), acceptance: z.array(z.string().min(1)).min(1)
 });
 const draftPlanSchema = planSchema.partial().extend({ title: z.string().min(1), validationMode: z.enum(["standard", "strict"]).default("standard"), finalDelivery: finalDeliverySchema, nodes: z.array(draftNodeSchema).min(1).max(40) });
 const planFieldSchema = z.object({
@@ -170,7 +170,7 @@ server.registerTool("workflow_read_plan", {
 }, async () => result(readWorkflowPlanTransaction(transactionPath)));
 
 server.registerTool("workflow_submit_plan", {
-  description: "一次提交审批候选计划。只描述目标、节点、依赖、真实写入范围、交付和验收；宿主补齐空数组、默认值和客观结构检查。成功返回 status=committed，失败返回具体错误并保留草稿；不会启动任务或修改业务文件。大型计划仍可先分批维护草稿。",
+  description: "一次提交审批候选计划。只描述目标、节点、依赖、真实写入范围、交付和验收；独立节点可省略 ID，由宿主生成稳定 ID；有 dependsOn、contractRefs 或 producerNodeId 引用时应明确节点 ID，引用不会被改写。宿主补齐默认值和客观结构检查。成功返回 status=committed，失败只返回具体错误并保留草稿；不会启动任务或修改业务文件。",
   inputSchema: { plan: draftPlanSchema },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
 }, async ({ plan }) => mutationResult(submitWorkflowPlan(transactionPath, plan)));

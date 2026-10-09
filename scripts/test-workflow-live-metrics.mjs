@@ -19,6 +19,14 @@ assert.equal(metrics.durationsMs.integration, 2000);
 assert.equal(metrics.durationsMs.total, 9000);
 assert.equal(metrics.usage, null);
 assert.equal(metrics.cost, null);
+const parallel = measureWorkflowRun({ createdAt: "2026-01-01T00:00:00Z", plannerLogs: [], nodes: [
+  { id: "a", startedAt: "2026-01-01T00:00:01Z", finishedAt: "2026-01-01T00:00:05Z", logs: [{ id: "read", kind: "tool", title: "Read完成", createdAt: "2026-01-01T00:00:02Z", detail: { output: "facts" } }] },
+  { id: "b", startedAt: "2026-01-01T00:00:02Z", finishedAt: "2026-01-01T00:00:05Z", logs: [] },
+  { id: "c", startedAt: "2026-01-01T00:00:05Z", finishedAt: "2026-01-01T00:00:06Z", logs: [{ title: "自动修复机器交接" }] }
+] });
+assert.equal(parallel.observedNodeOverlapPeak, 2, "Intervals touching at one timestamp do not overlap");
+assert.equal(parallel.timeToFirstObservedBusinessToolMs, 2000);
+assert.equal(parallel.resultRepairRounds, 1);
 assert.equal(measureWorkflowRun({ nodes: [], plannerLogs: [] }).controlResponseBytes, null);
 const rejection = measureWorkflowRun({ nodes: [], plannerLogs: [{ id: "rejected", kind: "tool", title: "mcp__workbench-workflow-result__workflow_submit_result完成", detail: { result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ ok: false, status: "editing", errors: ["missing artifact"] }) }] } } }] });
 assert.equal(rejection.toolFailures, 1, "An MCP transport success with a rejected protocol receipt is still a failed submission");

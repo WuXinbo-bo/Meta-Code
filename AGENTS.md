@@ -19,6 +19,8 @@
 - Keep secrets out of source, logs, fixtures, prompts, and task files.
 - Prefer focused modules and tests over expanding `server/index.ts` with new Provider-specific logic.
 - Run at least `npm run typecheck` and the tests relevant to the changed boundary. Run `npm run build` before release-facing commits.
+- For user-requested real Agent/workflow validation, use the currently running workbench and its visible UI/ports. Create test workspaces in the user's designated test directory, retain tasks and logs for live inspection, and do not start an isolated backend or data profile unless the user explicitly requests one. Offline automated boundary tests may continue using temporary fixtures.
+- After project adjustments and verification, reload or restart the current platform branch so the running workbench uses the updated source; check health and report where the user can inspect live tests.
 
 ## Cross-platform branch maintenance
 

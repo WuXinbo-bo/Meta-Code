@@ -22,19 +22,20 @@ import type { WorkspaceTreeIndex } from "../../workspaceTreeIndex.js";
 import { codexWorkflowPlannerToolInstructions, codexWorkflowResultToolInstructions } from "./controlTools.js";
 import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommands } from "./enforcement.js";
 import { resolveWorkflowResultPath, workflowExecutionRoot } from "./executionRoot.js";
-import { buildWorkflowFileIntegrityAsync, workflowCompletedFileIntegrityIssuesAsync, workflowResultFileIntegrityIssueAsync } from "./fileIntegrityAsync.js";
+import { buildWorkflowArtifactRecordsAsync, buildWorkflowFileIntegrityAsync, workflowCompletedFileIntegrityIssuesAsync, workflowResultFileIntegrityIssueAsync } from "./fileIntegrityAsync.js";
 import { readWorkflowHostVerificationCheckpoint, workflowHostVerificationIdentity, workflowSnapshotDigest, writeWorkflowHostVerificationCheckpoint, type WorkflowHostVerificationCheckpoint } from "./hostVerificationCheckpoint.js";
 import { parseWorkflowNodeResult, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeResultGateIssues, workflowResultArtifactPaths } from "./execution.js";
 import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent, type WorkflowLogContext } from "./logs.js";
-import { commitWorkflowNodeResultTransaction, mergeWorkflowNodeHostChecks, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, recordWorkflowNodeHostVerification, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, workflowNodeHostVerification, type WorkflowNodeResultContract } from "./nodeResultTransactions.js";
+import { commitWorkflowNodeResultTransaction, mergeWorkflowNodeHostChecks, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, recordWorkflowNodeHostVerification, recordWorkflowNodeResultToolFailure, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, workflowNodeHostVerification, workflowNodeResultSubmissionIssue, type WorkflowNodeResultContract } from "./nodeResultTransactions.js";
 import { plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./plan.js";
-import { readWorkflowPlanTransaction } from "./plannerTransactions.js";
+import { readWorkflowPlanTransaction, recordWorkflowPlannerToolFailure, workflowPlannerSubmissionIssue } from "./plannerTransactions.js";
 import { WorkflowRepository } from "./repository.js";
 import { WORKFLOW_ROLE_SKILLS } from "./roles.js";
 import { workflowQuestionPrompt, type WorkflowQuestionSnapshot } from "./questions.js";
 import { aggregateWorkflowResults, workflowValidationPolicy } from "./validationPolicy.js";
 import { workflowNodeInputs } from "./contextProjection.js";
 import { createWorkflowReadObserver } from "./readDependencies.js";
+import { workflowReadonlyNodeGuidance } from "./readonlyPrompt.js";
 import { beginWorkflowRecoveryGuard, recordWorkflowRecoveryEffect, workflowRecoveryReplayIssue } from "./recoveryGuard.js";
 import { runJournaledWriterVerification, WorkflowVerificationReplayError } from "./writerVerification.js";
 import type { WorkflowStateFiles } from "./stateFiles.js";
@@ -232,7 +233,9 @@ function syncWorkflowProtocolFiles(workflowId: string, ownerUserId: string) {
 }
 
 function appendWorkflowProtocolEvent(workflowId: string, ownerUserId: string, type: string, payload?: unknown, nodeId?: string, attempt?: number) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
+  const workflow = typeof workflowRepository.getEventIdentity === "function"
+    ? workflowRepository.getEventIdentity(workflowId, ownerUserId)
+    : workflowRepository.get(workflowId, ownerUserId);
   if (!workflow || !(workflow.executionRoot || workflow.workDirectory)) return;
   workflowStateFiles.appendEvent(workflow, { type, payload, nodeId, attempt });
 }
@@ -297,7 +300,7 @@ function validateClaudePlannerPreflight() {
 async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, skillNames: string[], mcpServerNames: string[], skillContext: string, providerCapabilities: WorkflowProviderCapabilities, signalController: AbortController, transactionPath: string, onActivity: (event: NormalizedEngineEvent) => void, planningMode: WorkflowPlanningMode = "initial", previousPlan: WorkflowPlan | null = null) {
   workspace = { ...workspace, root: workflowExecutionRoot(workflow) };
   const engine = workflow.plannerEngine;
-  const system = planSystemPrompt(skillNames, mcpServerNames, skillContext, workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, providerCapabilities, workflow.executionTarget);
+  const system = planSystemPrompt(skillNames, mcpServerNames, skillContext, workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, providerCapabilities, workflow.executionTarget, workflow.originalPrompt);
   const plannerPrompt = plannerTurnPrompt(system, workflow.originalPrompt, { mode: planningMode, reviewNote: workflow.reviewNote, previousPlan, workspaceRoot: workspace.root });
   const sessionId = workflow.plannerSessionId || `workflow-planner:${workflow.id}`;
   let engineSessionId = workflow.plannerEngineSessionId;
@@ -305,7 +308,11 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
   try {
   if (engine === "claude") {
     let output = "";
-    const plannerEvent = (event: NormalizedEngineEvent) => { if (event.type === "assistant" && event.text) output = event.text; onActivity(event); };
+    const plannerEvent = (event: NormalizedEngineEvent) => {
+      if (event.type === "assistant" && event.text) output = event.text;
+      assertWorkflowPlannerSubmissionProgress(transactionPath, event);
+      onActivity(event);
+    };
     plannerMcpConfigFile = await workflowPlannerMcpConfigPath(workspace, transactionPath);
     if (ports.readTaskHistory) {
       const config = JSON.parse(await fsp.readFile(plannerMcpConfigFile, "utf8"));
@@ -316,6 +323,8 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
       plannerMcpConfigFile = privateConfig;
     }
     const createPlannerHandle = async (resumeSessionId?: string | null) => {
+      const issue = workflowPlannerSubmissionIssue(readWorkflowPlanTransaction(transactionPath));
+      if (issue) throw new Error(issue);
       const runtime = await getClaudeRuntime();
       if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
       const command = resolveClaudeCommand(runtime.path);
@@ -400,7 +409,10 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
         if (/user cancelled MCP tool call|MCP tool call.*cancelled|MCP 工具.*取消/i.test(text)) plannerToolAuthorizationError = text;
         if (event.type === "item.completed" && event.item.type === "agent_message") output = text;
         const normalized = normalizedCodexWorkflowEvent(event, text);
-        if (normalized) onActivity(normalized);
+        if (normalized) {
+          assertWorkflowPlannerSubmissionProgress(transactionPath, normalized);
+          onActivity(normalized);
+        }
       },
       isDurableResultCommitted: () => { try { return ["committed", "no_change"].includes(readWorkflowPlanTransaction(transactionPath).status); } catch { return false; } },
     });
@@ -446,6 +458,64 @@ function normalizedCodexWorkflowEvent(event: any, text: string): NormalizedEngin
   if (item.type === "reasoning") return { type: "reasoning", sourceId: itemId, text: text || "Codex 正在分析任务", payload: event, ...metadata };
   const toolName = String(item.type || "工具");
   return { type: event.type === "item.completed" ? "tool.completed" : "tool.started", sourceId: itemId, toolName, text: text || `${toolName}${event.type === "item.completed" ? "已完成" : "正在执行"}`, payload: event, ...metadata };
+}
+
+/** Extract planner MCP validation failures without treating ordinary model text as errors. */
+function workflowPlannerToolFailure(event: NormalizedEngineEvent): { eventId: string; message: string } | null {
+  if (!["tool.completed", "error"].includes(event.type)) return null;
+  const payload = event.payload as any;
+  const item = payload?.item || payload?.result || payload;
+  const tool = String(event.toolName || item?.tool || item?.name || "");
+  const plannerTool = workflowSubmissionToolEvent(event, "plan");
+  if (!plannerTool) return null;
+  const failed = event.phase === "failed" || item?.status === "failed" || item?.is_error === true || item?.isError === true || item?.result?.isError === true;
+  if (!failed) return null;
+  const raw = [event.text, item?.error, item?.result].map((value) => typeof value === "string" ? value : JSON.stringify(value || "")).join(" ");
+  if (!/(?:validation error|invalid argument|invalid input|input schema|schema validation|参数.*(?:无效|错误)|格式.*(?:错误|无效)|字段.*(?:缺少|错误)|缺少(?:必填|字段)|must be|required field|expected)/i.test(raw)) return null;
+  const message = raw.replace(/\s+/g, " ").slice(0, 2000);
+  return { eventId: `${event.sourceId || tool}:${crypto.createHash("sha256").update(message).digest("hex").slice(0, 12)}`, message };
+}
+
+function workflowSubmissionToolEvent(event: NormalizedEngineEvent, kind: "plan" | "result") {
+  const payload = event.payload as any;
+  const item = payload?.item || payload?.result || payload;
+  const identity = `${event.toolName || ""} ${item?.server || item?.mcp_server || payload?.server || ""} ${item?.tool || ""} ${item?.name || ""}`;
+  return kind === "plan"
+    ? /workbench[-_]workflow[-_]plan|workflow_(?:read_plan|submit_plan|replace_plan|apply_operations|validate_draft|commit_candidate|no_change)\b/.test(identity)
+    : /workbench[-_]workflow[-_]result|workflow_(?:read_node_contract|read_result_draft|checkpoint_result|submit_result|report_blocked|set_result_summary|register_outputs|register_checks|set_handoff|set_outcome|self_review_result|validate_result|commit_result)\b/.test(identity);
+}
+
+function workflowSubmissionBudgetEvent(event: NormalizedEngineEvent, kind: "plan" | "result") {
+  return event.type === "turn.completed" || event.type === "error"
+    || event.type === "tool.completed" && workflowSubmissionToolEvent(event, kind);
+}
+
+function assertWorkflowPlannerSubmissionProgress(target: string, event: NormalizedEngineEvent) {
+  if (!workflowSubmissionBudgetEvent(event, "plan")) return;
+  const failure = workflowPlannerToolFailure(event);
+  const transaction = failure
+    ? recordWorkflowPlannerToolFailure(target, failure.eventId, failure.message)
+    : readWorkflowPlanTransaction(target);
+  const issue = workflowPlannerSubmissionIssue(transaction);
+  if (issue) throw new Error(issue);
+}
+
+function assertWorkflowResultSubmissionProgress(target: string, event: NormalizedEngineEvent) {
+  if (!workflowSubmissionBudgetEvent(event, "result")) return;
+  const payload = event.payload as any;
+  const item = payload?.item || payload?.result || payload;
+  const detail = event.detail as any;
+  const toolIdentity = `${event.toolName || ""} ${item?.server || ""} ${item?.tool || ""}`;
+  // Record schema errors only; rejected handler receipts already count in the
+  // atomic submission, and must not consume the budget twice.
+  const schemaFailure = /workflow[-_]result|workflow_submit_result|workflow_checkpoint_result|workflow_report_blocked/.test(toolIdentity)
+    && (event.phase === "failed" || item?.is_error || item?.isError || detail?.result?.is_error || detail?.result?.isError)
+    && /(?:input schema|schema validation|invalid argument|invalid input|invalid_type|expected|must be|required field)/i.test(event.text);
+  const transaction = schemaFailure
+    ? recordWorkflowNodeResultToolFailure(target, event.sourceId || crypto.randomUUID(), event.text)
+    : readWorkflowNodeResultTransaction(target);
+  const issue = workflowNodeResultSubmissionIssue(transaction);
+  if (issue) throw new Error(issue);
 }
 
 function markCodexTransientLogsRecovered(logs: WorkflowNodeLog[]) {
@@ -500,6 +570,8 @@ function workflowNodeTaskContract(workflow: NonNullable<ReturnType<WorkflowRepos
 
 function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord, workspace: Workspace, runtimeDirectory: string, providedContract?: Record<string, unknown>, resultProtocolVersion: 1 | 2 = 1) {
   const taskContract = providedContract || workflowNodeTaskContract(workflow, node);
+  const providerId = workflowExecutionProvider(node);
+  const shellAvailable = agentAdapterRegistry.descriptor?.(providerId)?.capabilities.tools.shell === true;
   const basePrompt = [
     "你是任务编排工作流中的独立执行 Agent。模型身份不改变执行职责，只按节点任务合同完成当前工作。",
     resultProtocolVersion === 2
@@ -514,9 +586,7 @@ function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository[
       ? "任务合同已随本轮提供，无需再次读取。完成业务目标后调用一次 workflow_submit_result 提交 outcome、humanSummary、真实 outputs 和必要语义说明；路径、测试证据、写入范围仍由系统校验。仅长任务按需 workflow_checkpoint_result 保存进度，恢复时才按需读取草稿。此控制工具不属于可选业务 MCP。不要为状态、ID、时间戳或流程维护额外工作。"
       : "机器交付必须通过 workbench-workflow-result 工具完成。它是系统控制面，不属于节点合同中可选的业务 MCP，因此即使用户禁止 MCP 也必须使用。开始时调用 workflow_read_node_contract；执行过程中用 workflow_register_outputs、workflow_register_checks、workflow_set_result_summary、workflow_set_handoff 和 workflow_set_outcome 分批维护草稿；最后调用 workflow_validate_result，通过后调用 workflow_commit_result。",
     "outputs 中的文件和目录路径必须真实存在；没有业务文件的纯分析节点应通过 text/decision 输出和 handoff 提供可消费结果。consumableBy 只能填写任务合同 downstreamConsumers 中列出的 ID，没有下游时使用空数组。checks 只能登记真实执行情况。缺少输入或权限时调用 workflow_report_blocked。",
-    node.workspaceAccess === "read" ? node.verificationCommands.length
-      ? "只读节点不具备 Bash 或写入权限，不得为了测试申请或绕过这些权限。合同中的 verificationCommands 由 Workbench 在本回合前执行；systemVerification 是真实命令、退出码、输出和文件边界检查，已自动登记到 checks。请阅读文件并审查这些证据，不要重复执行或改写系统检查；不需要因 Bash 被禁用而报告 blocked。若系统检查失败、缺少证据或验收仍不充分，则指出真实原因并提交 blocked/partial，不得声称通过。合同之外需要新增执行命令时请求维护计划，不能自行扩展验收命令。"
-      : "这是纯只读分析节点，合同未声明 verificationCommands，无需命令执行或 systemVerification。使用读取工具和已有输入完成分析，只登记真实阅读检查，不要因为 Bash 被禁用或缺少命令证据而报告 blocked；确需新增命令时请求维护计划。" : "",
+    node.workspaceAccess === "read" ? workflowReadonlyNodeGuidance(providerId, shellAvailable, Boolean(node.verificationCommands.length)) : "",
     "测试若会生成 coverage、.pytest_cache、缓存或测试结果文件，必须由写入节点声明对应 writeScope，或事先将可配置输出指向系统托管临时运行目录。Git 忽略规则不等于编排写入授权；不得把正常测试产物视为可绕过只读边界的例外。",
     `自然语言最终回复只面向用户，简短总结即可，不输出机器 JSON。只有 ${resultProtocolVersion === 2 ? "workflow_submit_result" : "workflow_commit_result"} 成功才代表候选结果已封存，正式完成仍由 Workbench 验收。`,
     resultProtocolVersion === 2
@@ -530,7 +600,7 @@ function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository[
     undefined,
     undefined,
     node.skills,
-    { engine: workflowExecutionProvider(node), workspaceRoot: workflowExecutionRoot(workflow) }
+    { engine: providerId, workspaceRoot: workflowExecutionRoot(workflow) }
   );
 }
 
@@ -539,14 +609,14 @@ function workflowResultPath(workflow: NonNullable<ReturnType<WorkflowRepository[
   return resolveWorkflowResultPath(workflow, reportedPath, mustExist);
 }
 
-function verifyWorkflowNodeResult(
+async function verifyWorkflowNodeResult(
   workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>,
   node: WorkflowNodeRecord,
   workspace: Workspace,
   result: WorkflowNodeResult,
   changedFiles: string[],
   outsideWriteScope: string[]
-): { result: WorkflowNodeResult; records: Array<{ path: string; kind: string; hash: string | null; summary: string }> } {
+): Promise<{ result: WorkflowNodeResult; records: Array<{ path: string; kind: string; hash: string | null; summary: string }> }> {
   const normalized: WorkflowNodeResult = { ...result, changedFiles: [...new Set(changedFiles)] };
   if (result.outcome !== "completed") return { result: normalized, records: [] };
 
@@ -569,11 +639,7 @@ function verifyWorkflowNodeResult(
   if (outsideWriteScope.length) issues.push(`检测到越出 writeScope 的文件修改：${outsideWriteScope.join(", ")}`);
 
   const outputs = result.outputs.map((output) => ({ ...output, path: output.path ? normalizedByPath.get(output.path) || output.path : null }));
-  const records = verified.map(({ absolute, relative }) => {
-    const stat = fs.statSync(absolute);
-    const hash = stat.isFile() && stat.size <= 25 * 1024 * 1024 ? crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex") : null;
-    return { path: relative, kind: stat.isDirectory() ? "directory" : "file", hash, summary: result.humanSummary.slice(0, 500) };
-  });
+  const records = await buildWorkflowArtifactRecordsAsync(workflowExecutionRoot(workflow), verified.map(({ relative }) => relative), result.humanSummary);
   if (!issues.length) return { result: { ...normalized, outputs }, records };
   return {
     result: {
@@ -676,13 +742,19 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   // remain immediate so reconnect/recovery never observes stale execution state.
   let nodePersistTimer: NodeJS.Timeout | null = null;
   let nodePersistPending = false;
+  let nodePersistError: unknown;
+  const saveNodeActivity = () => {
+    if (typeof workflowRepository.updateNodeActivity === "function") workflowRepository.updateNodeActivity(current);
+    else workflowRepository.updateNode(current);
+    renewLease();
+  };
   const persistNodeState = (immediate = false) => {
+    if (nodePersistError) throw nodePersistError;
     if (immediate) {
       if (nodePersistTimer) clearTimeout(nodePersistTimer);
       nodePersistTimer = null;
       nodePersistPending = false;
-      workflowRepository.updateNode(current);
-      renewLease();
+      saveNodeActivity();
       return;
     }
     if (nodePersistPending) return;
@@ -690,12 +762,14 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
     nodePersistTimer = setTimeout(() => {
       nodePersistTimer = null;
       nodePersistPending = false;
-      workflowRepository.updateNode(current);
-      renewLease();
+      try { saveNodeActivity(); }
+      catch (error) { nodePersistError = error; }
     }, 250);
   };
   const flushNodeState = () => persistNodeState(true);
+  const persistEngineActivity = (event?: NormalizedEngineEvent | null) => persistNodeState(!event || ["tool.completed", "turn.completed", "error"].includes(event.type));
 
+  try {
   const taskContract = workflowNodeTaskContract(workflow, current);
   const resultContract: WorkflowNodeResultContract = {
     schemaVersion: 1,
@@ -761,6 +835,8 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   };
 
   const repairResultTransaction = async (initialReasons: string[]) => {
+    const submissionIssue = workflowNodeResultSubmissionIssue(readWorkflowNodeResultTransaction(resultTransactionPath));
+    if (submissionIssue) throw new Error(submissionIssue);
     let reasons = initialReasons;
     const maximumRepairs = 2;
     while (attempt.resultRepairCount < maximumRepairs) {
@@ -795,7 +871,8 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
               const text = summarizeCodexEvent(event);
               const normalized = normalizedCodexWorkflowEvent(event, text);
               if (normalized) { if (normalized.type === "turn.completed") markCodexTransientLogsRecovered(current.logs); upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(normalized, `codex:${executionRunId}:repair:${repairNumber}`, { ...logContext, contextId: event.type === "thread.started" ? event.thread_id : null })); }
-              workflowRepository.updateNode(current); renewLease();
+              persistEngineActivity(normalized);
+              if (normalized) assertWorkflowResultSubmissionProgress(resultTransactionPath, normalized);
             },
             isDurableResultCommitted: () => { try { return readWorkflowNodeResultTransaction(resultTransactionPath).status === "committed"; } catch { return false; } },
           });
@@ -805,13 +882,21 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
         } else {
           const repairMcpConfig = await workflowNodeMcpConfigPath(workspace, [], [resultServer]);
           const repairTurn = await runClaudeSessionTurn({
-            createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
+            createHandle: (resumeSessionId) => {
+              const issue = workflowNodeResultSubmissionIssue(readWorkflowNodeResultTransaction(resultTransactionPath));
+              if (issue) throw new Error(issue);
+              return createWorkflowClaudeHandle({
               cwd: workflowExecutionRoot(workflow), sessionId: resumeSessionId, mcpConfigPath: repairMcpConfig, permissionMode: "plan",
               allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([resultServer])],
               disallowedTools: [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS], signal: controller.signal,
               ownerId: `${workflowId}:${nodeId}:result-repair`,
-              onEvent: (event) => { if (event.text) upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(event, `claude:${executionRunId}:repair:${repairNumber}`, logContext)); workflowRepository.updateNode(current); renewLease(); }
-            }),
+              onEvent: (event) => {
+                if (event.text) upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(event, `claude:${executionRunId}:repair:${repairNumber}`, logContext));
+                persistEngineActivity(event);
+                assertWorkflowResultSubmissionProgress(resultTransactionPath, event);
+              }
+              });
+            },
             prompt: repairPrompt, recoveryAttempts: 2, signal: controller.signal
           });
           if (repairTurn.result.failed) throw new Error(repairTurn.result.error || "Claude 未完成机器交接修复");
@@ -953,7 +1038,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
             onThreadId: (threadId) => {
               current.engineThreadId = threadId;
               attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { engineThreadId: threadId, contextRecoveryCount: current.contextRecoveryCount, contextRecoveryMode: current.contextRecoveryMode, leaseExpiresAt: leaseUntil() });
-              workflowRepository.updateNode(current); renewLease();
+              persistEngineActivity();
             },
             onEvent: (event) => {
               const text = summarizeCodexEvent(event);
@@ -967,7 +1052,8 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
               if (normalized) { if (normalized.type === "turn.completed") markCodexTransientLogsRecovered(current.logs); upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(normalized, `codex:${executionRunId}:main`, { ...logContext, contextId: current.engineThreadId })); }
               if (normalized) { recordWorkflowRecoveryEffect(recoveryGuardPath, normalized); readObserver.observe(normalized); }
               if (normalized) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.engine_event", { type: normalized.type, sourceId: normalized.sourceId, toolName: normalized.toolName, text: normalized.text }, nodeId, current.attempt);
-              workflowRepository.updateNode(current); renewLease();
+              persistEngineActivity(normalized);
+              if (normalized) assertWorkflowResultSubmissionProgress(resultTransactionPath, normalized);
             },
             isDurableResultCommitted: () => { try { return readWorkflowNodeResultTransaction(resultTransactionPath).status === "committed"; } catch { return false; } },
           });
@@ -981,7 +1067,10 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
           const resultServer = taskHistoryToolServer(workflow, workflowNodeResultToolServer(resultTransactionPath));
           const nodeMcpConfig = await workflowNodeMcpConfigPath(workspace, current.mcpServers, [resultServer]);
           const claudeTurn = await runClaudeSessionTurn({
-            createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
+            createHandle: (resumeSessionId) => {
+              const issue = workflowNodeResultSubmissionIssue(readWorkflowNodeResultTransaction(resultTransactionPath));
+              if (issue) throw new Error(issue);
+              return createWorkflowClaudeHandle({
               cwd: workflowExecutionRoot(workflow), sessionId: resumeSessionId, mcpConfigPath: nodeMcpConfig,
               permissionMode: current.workspaceAccess === "write" ? "bypassPermissions" : "plan",
               allowedTools: current.workspaceAccess === "read" ? [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([...resolvedMcpServers, resultServer])] : undefined,
@@ -993,9 +1082,11 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
                 if (event.type === "assistant") finalText = event.text;
                 if (event.text) upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(event, `claude:${executionRunId}:main`, { ...logContext, contextId: current.engineThreadId }));
                 if (event.text) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.engine_event", { type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text }, nodeId, current.attempt);
-                workflowRepository.updateNode(current); renewLease();
+                persistEngineActivity(event);
+                assertWorkflowResultSubmissionProgress(resultTransactionPath, event);
               }
-            }),
+              });
+            },
             sessionId: current.engineThreadId,
             prompt,
             recoveryAttempts: 2,
@@ -1139,7 +1230,8 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
     if (integrityIssue) throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, {
       ...resultToPersist, outcome: "blocked", unresolved: [...resultToPersist.unresolved, integrityIssue]
     }), false);
-    if (!workflowPhaseAtLeast(attempt.phase, "result_committed")) records = verifyWorkflowNodeResult(workflow, current, workspace, resultToPersist, resultToPersist.changedFiles, []).records;
+    if (!workflowPhaseAtLeast(attempt.phase, "result_committed")) records = (await verifyWorkflowNodeResult(workflow, current, workspace, resultToPersist, resultToPersist.changedFiles, [])).records;
+    assertExecutionCurrent();
   }
   else {
     let afterSnapshot = beforeSnapshot;
@@ -1167,11 +1259,13 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
     const outsideWriteScope = current.workspaceAccess === "write" ? filesOutsideWriteScope(actualChangedFiles, authorizedWriteScopes, workflowExecutionRoot(workflow), workflowExecutionRoot(workflow)) : actualChangedFiles;
     const writeManifestPath = path.join(attempt.checkpointDirectory, "write-manifest.json");
     if (!fs.existsSync(writeManifestPath)) atomicWriteWorkflowCheckpoint(writeManifestPath, JSON.stringify({ schemaVersion: 1, workflowId, nodeId, attempt: attempt.attempt, capturedAt: new Date().toISOString(), changedFiles: actualChangedFiles, concurrentWriterChanges: [...concurrentWriterChanges], outsideWriteScope }, null, 2));
-    let verified = verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
+    let verified = await verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
+    assertExecutionCurrent();
     if (verified.result.outcome === "partial" && !hasFailedHostChecks && !outsideWriteScope.length && attempt.resultRepairCount < 2 && fs.existsSync(resultTransactionPath)) {
       try {
         structured = await repairResultTransaction(verified.result.unresolved);
-        verified = verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
+        verified = await verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
+        assertExecutionCurrent();
       } catch (error) {
         current.logs.push(attemptLog("error", "终态交接修复未完成", error instanceof Error ? error.message : String(error)));
         workflowRepository.updateNode(current);
@@ -1194,6 +1288,9 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.result_committed", { outcome: persisted.outcome, resultDigest: workflowResultDigest(persisted) }, nodeId, current.attempt);
   if (persisted.outcome !== "completed") throw new WorkflowNodeOutcomeError(persisted, !preserveBusinessArtifacts);
   return persisted;
+  } finally {
+    if (nodePersistPending || nodePersistError) flushNodeState();
+  }
 }
 
 function executeWorkflowNode(...args: Parameters<WorkflowWorkerRunner>): ReturnType<WorkflowWorkerRunner> {
@@ -1377,11 +1474,39 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
   // Claim the scheduler's checked slot before runtime discovery yields.
   activeWorkflowIntegrations.set(workflowId, controller);
   let executionLease: WorkspaceExecutionLease | undefined;
+  const pendingActivity = new Map<string, { phase: "Integrator" | "Validator"; event: NormalizedEngineEvent }>();
+  const activitySignatures = new Map<string, string>();
+  let activityTimer: NodeJS.Timeout | null = null;
+  let activityError: unknown;
+  const flushIntegrationActivity = () => {
+    if (activityTimer) clearTimeout(activityTimer);
+    activityTimer = null;
+    if (activityError) throw activityError;
+    if (!pendingActivity.size) return;
+    const pending = [...pendingActivity.values()];
+    pendingActivity.clear();
+    const logs = pending.map(({ phase, event }) => {
+      const log = workflowLogFromEngineEvent(event, `${phase.toLowerCase()}:${event.sourceId || event.type}`);
+      return { ...log, title: `${phase} · ${log.title}` };
+    });
+    if (typeof workflowRepository.appendIntegrationLogs === "function") workflowRepository.appendIntegrationLogs(workflowId, logs);
+    else for (const log of logs) workflowRepository.appendIntegrationLog(workflowId, log);
+    for (const { phase, event } of pending) appendWorkflowProtocolEvent(workflowId, ownerUserId, "integration.engine_event", { phase, type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text });
+  };
   const appendEvent = (phase: "Integrator" | "Validator") => (event: NormalizedEngineEvent) => {
     if (!event.text) return;
-    const log = workflowLogFromEngineEvent(event, `${phase.toLowerCase()}:${event.sourceId || event.type}`);
-    workflowRepository.appendIntegrationLog(workflowId, { ...log, title: `${phase} · ${log.title}` });
-    appendWorkflowProtocolEvent(workflowId, ownerUserId, "integration.engine_event", { phase, type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text });
+    const key = `${phase}:${event.type}:${event.sourceId || event.type}`;
+    const signature = JSON.stringify([event.text, event.toolName, event.phase, event.detail]);
+    const stream = event.type === "assistant" || event.type === "reasoning";
+    if (stream && activitySignatures.get(key) === signature) return;
+    activitySignatures.set(key, signature);
+    pendingActivity.set(key, { phase, event });
+    if (!stream) { flushIntegrationActivity(); return; }
+    if (!activityTimer) activityTimer = setTimeout(() => {
+      activityTimer = null;
+      try { flushIntegrationActivity(); }
+      catch (error) { activityError = error; controller.abort(error); }
+    }, 250);
   };
   const runStage = async (label: string, action: () => Promise<string>) => {
     let lastError: unknown;
@@ -1393,7 +1518,7 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
         if (category !== "transient" || stageAttempt >= 3 || controller.signal.aborted) throw error;
         workflowRepository.appendIntegrationLog(workflowId, workflowLog("error", `${label} 暂时失败`, `第 ${stageAttempt}/3 次：${error instanceof Error ? error.message : String(error)}`));
         await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, 500 * (2 ** stageAttempt))));
-      }
+      } finally { flushIntegrationActivity(); }
     }
     throw lastError;
   };
@@ -1504,9 +1629,12 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
     workflowStateFiles.appendEvent(current, { type: "integration.failed", payload: { error: failed.unresolved.join("；") } });
     workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workspace.id, current.revision);
   } finally {
-    executionLease?.release();
-    if (activeWorkflowIntegrations.get(workflowId) === controller) activeWorkflowIntegrations.delete(workflowId);
-    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflowExecutionRoot(workflow)));
+    try { flushIntegrationActivity(); }
+    finally {
+      executionLease?.release();
+      if (activeWorkflowIntegrations.get(workflowId) === controller) activeWorkflowIntegrations.delete(workflowId);
+      workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflowExecutionRoot(workflow)));
+    }
   }
 }
 

@@ -52,6 +52,27 @@ assert.match(render({ status: "running", logs: bootLifecycle }), /智能体正�
 assert.match(render({ status: "completed", logs: [{ ...lifecycle, phase: "completed", title: "已完成", text: "子 Agent 已完成" }] }), /子 Agent 已完成/, "a single completed lifecycle event remains visible");
 assert.doesNotMatch(render({ status: "completed", logs: [{ ...lifecycle, phase: "completed" }] }), /没有匹配的活动/, "lifecycle-only logs are not reported as a filter miss");
 assert.match(render({ showProvider: true }), /assistant-reply-heading/);
+for (const provider of ["codex", "claude", "gemini"]) {
+  const unknownReply = render({ provider, logs: [{ ...log(1, "message", "真实 Agent 回复"), provider: "unknown" }] });
+  assert.match(unknownReply, new RegExp(`provider-brand-icon ${provider}`), `${provider}: unknown transport identity inherits the current Agent`);
+  assert.doesNotMatch(unknownReply, /provider-brand-icon unknown|>U<|>W</, "transport placeholders never become letter avatars");
+}
+const systemReply = render({ showProvider: true, logs: [{ ...log(1, "message", "结果已记录"), provider: "workbench" }] });
+assert.match(systemReply, /data-message-role="system"/);
+assert.match(systemReply, /lucide-workflow/);
+assert.match(systemReply, /<strong>系统<\/strong>/);
+assert.doesNotMatch(systemReply, /provider-brand-monogram|provider-brand-icon codex/, "system receipts are not presented as model replies");
+const genericReply = render({ provider: "agent", logs: [{ ...log(1, "message", "未知 Agent 回复"), provider: "unknown" }] });
+assert.match(genericReply, /lucide-bot/);
+assert.doesNotMatch(genericReply, /provider-brand-monogram/, "an unbound Agent uses a semantic icon");
+const explicitClaudeReply = render({ provider: "codex", logs: [{ ...log(1, "message", "Claude 参与回复"), provider: "claude" }] });
+assert.match(explicitClaudeReply, /provider-brand-icon claude/, "explicit cross-provider identity takes precedence over the parent");
+const userReply = render({ showProvider: true, logs: [{ ...log(1, "message", "用户追加要求"), role: "user", provider: "unknown" }] });
+assert.match(userReply, /class="message user agent-user-message"/);
+assert.match(userReply, /data-message-role="user"/);
+assert.match(userReply, /lucide-user-round/);
+assert.match(userReply, /<strong>你<\/strong>/);
+assert.doesNotMatch(userReply, /provider-brand-icon|lucide-workflow/, "explicit user messages keep their identity");
 assert.match(render({ logs: [], loading: true }), /正在读取活动日志/);
 assert.doesNotMatch(render({ logs: [], loading: true }), /尚无活动日志/);
 assert.match(render({ loading: true, error: "连接中断" }), /第一条回复/, "a refresh failure preserves existing transcript");

@@ -10,6 +10,7 @@ export type SharedAgentLog = {
   detail?: unknown;
   rawType?: string;
   provider?: string;
+  role?: "user" | "assistant" | "system";
   actor?: { kind: "main" | "native" | "delegated" | "workflow" | "unknown"; id?: string; parentId?: string; name?: string };
   scope?: { sessionId?: string; threadId?: string; turnId?: string; workflowId?: string; nodeId?: string; attempt?: number };
   artifactRefs?: Array<{ id: string; kind: string; mediaType?: string; size?: number; path?: string }>;
@@ -61,9 +62,32 @@ const normalized = (value: string) => value.toLocaleLowerCase().replace(/\s+/g, 
 const LOG_KINDS = new Set<SharedAgentLog["kind"]>(["status", "message", "tool", "result", "error", "reasoning"]);
 const LOG_PHASES = new Set<NonNullable<SharedAgentLog["phase"]>>(["started", "running", "completed", "failed"]);
 const ACTIVITY_CATEGORIES = new Set<ActivityCategory>(["command", "tool", "file", "read", "search", "reasoning", "mcp", "todo", "status", "result", "error", "message", "unknown"]);
+const GENERIC_AGENT_PROVIDERS = new Set(["unknown", "auto", "agent"]);
+
+/** Transport placeholders are roles, never provider brands. */
+export function activityMessageIdentity(log: SharedAgentLog, fallbackProvider: string): { role: "agent" | "system" | "user"; provider?: string } {
+  const provider = (log.provider || log.activity?.provider || "").trim();
+  if (log.role === "user" || provider.toLowerCase() === "user") return { role: "user" };
+  if (log.role === "system" || ["workbench", "system"].includes(provider.toLowerCase())) return { role: "system" };
+  const candidate = provider && !GENERIC_AGENT_PROVIDERS.has(provider.toLowerCase()) ? provider : fallbackProvider.trim();
+  return candidate && !GENERIC_AGENT_PROVIDERS.has(candidate.toLowerCase()) && !["workbench", "system", "user"].includes(candidate.toLowerCase())
+    ? { role: "agent", provider: candidate }
+    : { role: "agent" };
+}
 
 function recordOf(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** Empty reply evidence applies to main chat without rewriting stored history. */
+export function isEmptyAssistantMessage(value: unknown) {
+  const source = recordOf(value);
+  if (source.role !== "assistant") return false;
+  const activity = recordOf(source.activity);
+  const payload = recordOf(source.payload);
+  const items = [payload, recordOf(payload.item), recordOf(recordOf(source.activityDetail).item), recordOf(recordOf(activity.detail).item)];
+  if (items.some((item) => item.type === "agent_message" && typeof item.text === "string" && !item.text.trim())) return true;
+  return typeof source.text === "string" && !source.text.trim() && (typeof activity.summary !== "string" || !activity.summary.trim());
 }
 
 function planItemStatus(value: unknown, completed: unknown): AgentPlanItemStatus {
@@ -128,18 +152,23 @@ export function normalizeAgentStreamLog(value: unknown, index = 0): SharedAgentL
     ? source.title
     : kind === "message" ? "Agent 回复" : kind === "error" ? "执行失败" : "状态更新";
   const phaseValue = typeof activity.phase === "string" ? activity.phase as NonNullable<SharedAgentLog["phase"]> : typeof source.phase === "string" ? source.phase as NonNullable<SharedAgentLog["phase"]> : undefined;
+  const detail = activity.detail ?? source.detail;
+  const messageItem = recordOf(recordOf(detail).item);
+  // Historical snapshots may contain a label in place of empty SDK item text.
+  const emptyMessageItem = kind === "message" && messageItem.type === "agent_message" && typeof messageItem.text === "string" && !messageItem.text.trim();
   return {
     schemaVersion: typeof activity.schemaVersion === "number" ? activity.schemaVersion : typeof source.schemaVersion === "number" ? source.schemaVersion : undefined,
     id: typeof activity.id === "string" && activity.id ? activity.id : typeof source.id === "string" && source.id ? source.id : `legacy-agent-log-${index}`,
     createdAt: validTimestamp(activity.occurredAt ?? source.createdAt, index),
     kind,
     title,
-    text: typeof activity.summary === "string" ? activity.summary : typeof source.text === "string" ? source.text : title,
+    text: emptyMessageItem ? "" : typeof activity.summary === "string" ? activity.summary : typeof source.text === "string" ? source.text : title,
     category: typeof activity.semanticType === "string" ? activity.semanticType : typeof source.category === "string" ? source.category : undefined,
     phase: phaseValue && LOG_PHASES.has(phaseValue) ? phaseValue : undefined,
-    detail: activity.detail ?? source.detail,
+    detail,
     rawType: typeof activity.rawType === "string" ? activity.rawType : typeof source.rawType === "string" ? source.rawType : undefined,
     provider: typeof (activity.provider ?? source.provider) === "string" && String(activity.provider ?? source.provider).trim() ? String(activity.provider ?? source.provider) : undefined,
+    role: source.role === "user" || source.role === "assistant" || source.role === "system" ? source.role : undefined,
     actor: activity.actor && typeof activity.actor === "object" && !Array.isArray(activity.actor) ? activity.actor as SharedAgentLog["actor"] : source.actor && typeof source.actor === "object" && !Array.isArray(source.actor) ? source.actor as SharedAgentLog["actor"] : undefined,
     scope: activity.scope && typeof activity.scope === "object" && !Array.isArray(activity.scope) ? activity.scope as SharedAgentLog["scope"] : source.scope && typeof source.scope === "object" && !Array.isArray(source.scope) ? source.scope as SharedAgentLog["scope"] : undefined,
     artifactRefs: Array.isArray(activity.artifactRefs) ? activity.artifactRefs as SharedAgentLog["artifactRefs"] : Array.isArray(source.artifactRefs) ? source.artifactRefs as SharedAgentLog["artifactRefs"] : undefined,
@@ -159,7 +188,7 @@ function logContentVersion(value: unknown, index: number) {
   const log = normalizeAgentStreamLog(value, index);
   // Include phase and details: tool completions often keep the same id and
   // timestamp, and equal-length edits must still invalidate the view.
-  const source = JSON.stringify([log.id, log.createdAt, log.provider, log.actor, log.scope, log.kind, log.title, log.text, log.category, log.phase, log.detail, log.artifactRefs]);
+  const source = JSON.stringify([log.id, log.createdAt, log.provider, log.role, log.actor, log.scope, log.kind, log.title, log.text, log.category, log.phase, log.detail, log.artifactRefs]);
   let hash = 2166136261;
   for (let i = 0; i < source.length; i += 1) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
   const version = (hash >>> 0).toString(36);
@@ -223,6 +252,13 @@ export function normalizeActivityLogs(logs: readonly unknown[]): ActivityViewLog
     };
     const identity = JSON.stringify([log.provider || "", log.actor?.id || "", log.scope?.attempt ?? "", log.id]);
     const existing = byId.get(identity);
+    if (log.kind === "message" && !log.text.trim()) {
+      if (!existing?.text.trim()) continue;
+      log.text = existing.text;
+      log.detail = existing.detail;
+      if (log.activity) log.activity = { ...log.activity, summary: existing.text, detail: existing.activity?.detail };
+      log.fingerprint = logFingerprint(log);
+    }
     if (existing) {
       if (Date.parse(log.createdAt) < Date.parse(existing.createdAt)) continue;
       const terminal = (phase: ActivityPhase) => phase === "completed" || phase === "failed";

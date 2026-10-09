@@ -31,6 +31,15 @@ export function workflowHandoff(workflow: WorkflowRecord): TaskHandoff {
   };
 }
 
+/** Refresh business results without dropping the host's same-root user ledger. */
+export function refreshWorkflowTaskHandoff(workflow: WorkflowRecord, store: TaskContextStore): TaskHandoff {
+  const snapshot = workflowHandoff(workflow);
+  const context = store.forExecution(snapshot.source, workflow.ownerUserId);
+  if (!context) return snapshot;
+  const updated = store.handoff(context.id, workflow.ownerUserId, snapshot);
+  return latestTaskHandoffForRoot(updated, snapshot.source.executionRoot!) || snapshot;
+}
+
 export function registerTaskContextRoutes(app: Express, ports: TaskContextPorts) {
   // View switching may be retried by double clicks or reconnects. A native
   // session is created once per task/model/business root while the save awaits.
