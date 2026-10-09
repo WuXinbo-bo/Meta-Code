@@ -4,7 +4,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { AlertTriangle, Bot, Brain, Check, ChevronDown, CircleAlert, CircleCheck, CircleMinus, Clock3, Copy, ExternalLink, FileCheck2, FileJson2, FileOutput, FolderOpen, GitBranch, Layers3, LayoutGrid, ListChecks, LoaderCircle, LocateFixed, Maximize2, MessageCircle, PanelRightClose, Pause, Pencil, Play, Plus, RefreshCw, Route, Send, StopCircle, Wrench, X } from "lucide-react";
 import { AgentConversation, useAgentOutputFollow } from "../components/AgentConversation";
 import { AgentDrawer, AgentTaskDescription } from "../components/AgentDrawer";
-import { agentStreamVersion } from "../components/activityModel";
+import { agentStreamVersion, type SharedAgentLog } from "../components/activityModel";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { HelpButton } from "../help/HelpProvider";
 import { confirmAction } from "../components/ConfirmationProvider";
@@ -17,7 +17,7 @@ import { publicWorkflowActivity } from "./publicActivity";
 import { coalescedWorkflowRefresh } from "./eventRefresh";
 
 type Engine = string;
-type Log = { id: string; createdAt: string; kind: "status" | "message" | "reasoning" | "tool" | "error"; title: string; text: string; attempt?: number; runId?: string; contextId?: string | null };
+type Log = SharedAgentLog & { attempt?: number; runId?: string; contextId?: string | null };
 type Result = {
   outcome: "completed" | "partial" | "blocked" | "failed";
   humanSummary: string;
@@ -182,11 +182,11 @@ function WorkflowMaintenancePanel({ branch, workflow, providers, runtime, engine
 
 type CardProps = { id: string; title: string; provider: Engine | "auto"; status: string; attempt?: number; logs: Log[]; skills: string[]; mcpServers: string[]; result?: Result | null; offset?: Point; dragging: boolean; icon: ReactNode; subtitle?: string; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; registerRef: (id: string, element: HTMLElement | null) => void; emptyText: string; className?: string };
 const WorkflowAgentCard = memo(function WorkflowAgentCard({ id, title, provider, status, attempt, logs, skills, mcpServers, result, offset, dragging, icon, subtitle, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, registerRef, emptyText, className = "" }: CardProps) {
-  logs = publicWorkflowActivity(logs);
+  logs = useMemo(() => publicWorkflowActivity(logs), [logs]);
   return <button ref={(element) => registerRef(id, element)} style={offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined} type="button" className={`workflow-agent-card ${className} ${status} ${dragging ? "dragging" : ""}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onClick={onClick}><header><span className={`workflow-agent-icon ${provider}`}>{icon}</span><span><strong>{title}</strong><small>{subtitle || `${providerLabel(provider)} · ${statusLabel(status)}`}{attempt && attempt > 1 ? ` · 第 ${attempt} 次` : ""}</small></span>{status === "running" && <LoaderCircle className="spin" size={15} />}</header><div className="workflow-card-meta"><span title="当前任务图涉及的 Skill">Skill {skills.length}</span><span title="当前任务图涉及的 MCP">MCP {mcpServers.length}</span>{result && <span>{statusLabel(result.outcome)}</span>}</div><div className="workflow-card-logs">{logs.slice(-5).map((log) => <p key={log.id} title={log.text}><span />{log.title}</p>)}{!logs.length && <p><span />{emptyText}</p>}</div></button>;
 }, (a, b) => {
   const sameStrings = (left: string[], right: string[]) => left.length === right.length && left.every((value, index) => value === right[index]);
-  const sameLogs = a.logs.length === b.logs.length && a.logs.every((log, index) => { const other = b.logs[index]; return log.id === other?.id && log.title === other?.title && log.text === other?.text; });
+  const sameLogs = a.logs === b.logs || agentStreamVersion(a.logs) === agentStreamVersion(b.logs);
   return a.id === b.id && a.title === b.title && a.provider === b.provider && a.status === b.status && sameLogs && sameStrings(a.skills, b.skills) && sameStrings(a.mcpServers, b.mcpServers) && a.offset?.x === b.offset?.x && a.offset?.y === b.offset?.y && a.dragging === b.dragging;
 });
 type PlanCardProps = { id: string; workflow: Workflow; offset?: Point; dragging: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; registerRef: (id: string, element: HTMLElement | null) => void };

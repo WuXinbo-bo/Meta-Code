@@ -1,10 +1,10 @@
-import type { SharedAgentLog } from "../components/activityModel";
+import { normalizeActivityLogs } from "../components/activityModel";
 
 const controlServer = (value: unknown) => typeof value === "string" && /^workbench[-_]workflow[-_](plan|result)$/.test(value);
 
-/** Keep control-plane receipts in persisted diagnostics, outside the user activity feed. */
-export function publicWorkflowActivity<T extends SharedAgentLog>(logs: readonly T[]): T[] {
-  return logs.filter((log) => {
+/** Preview, counts and transcript share the same effective activity identities. */
+export function publicWorkflowActivity(logs: readonly unknown[]) {
+  return normalizeActivityLogs(logs).filter((log) => {
     if (log.kind !== "tool" && log.kind !== "error") return true;
     if (/^mcp__workbench[-_]workflow[-_](plan|result)__workflow_/.test(log.title)) return false;
     const raw = log.activity?.detail ?? log.detail;

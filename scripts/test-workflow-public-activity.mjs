@@ -16,6 +16,26 @@ const logs = [
 assert.deepEqual(publicWorkflowActivity(logs).map((log) => log.id), ["claude:business", "codex:business-mcp", "codex:reply", "codex:failure"]);
 assert.equal(logs.length, 7, "Persisted diagnostic logs must remain intact");
 
+const rawEmpty = { type: "item.completed", item: { id: "empty", type: "agent_message", text: " " } };
+const empty = workflowLogFromEngineEvent({ type: "assistant", sourceId: "empty", text: "Codex 回复", payload: rawEmpty }, "planner");
+const legacyEmpty = { ...empty, text: "Codex 回复", activity: { ...empty.activity, summary: "Codex 回复" } };
+const streaming = workflowLogFromEngineEvent({ type: "assistant", sourceId: "stream", text: "流式回复", phase: "running" }, "codex");
+const finished = { ...streaming, text: "已完成业务修改。", activity: { ...streaming.activity, summary: "已完成业务修改。", phase: "completed" } };
+const independentReply = workflowLogFromEngineEvent({ type: "assistant", sourceId: "independent-reply", text: "已完成业务修改。" }, "codex");
+const reconnect = workflowLogFromEngineEvent({ type: "status", sourceId: "reconnect", text: "Reconnecting... 1/5" }, "codex");
+const inputs = [...logs, legacyEmpty, streaming, finished, independentReply, reconnect];
+const original = JSON.stringify(inputs);
+const publicLogs = publicWorkflowActivity(inputs);
+assert.equal(publicLogs.length, 7, "card preview and drawer count exclude raw empty markers and duplicate stream identities");
+assert.ok(!publicLogs.some((log) => log.id === legacyEmpty.id));
+assert.equal(publicLogs.find((log) => log.id === streaming.id)?.text, "已完成业务修改。", "preview resolves the same final body as the drawer transcript");
+assert.equal(publicLogs.filter((log) => log.text === "已完成业务修改。").length, 3, "different genuine reply IDs remain independent");
+assert.ok(publicLogs.some((log) => log.id === reconnect.id), "reconnect is still represented in the shared count");
+assert.equal(JSON.stringify(inputs), original, "effective projection does not rewrite raw logs");
+assert.deepEqual(publicWorkflowActivity(publicLogs), publicLogs, "projecting a drawer transcript again cannot change its count");
+const preview = publicLogs.slice(-5);
+assert.ok(!preview.some((log) => log.id === legacyEmpty.id), "empty replies never consume a latest-five preview slot");
+
 let calls = 0;
 let active = 0;
 let maxActive = 0;

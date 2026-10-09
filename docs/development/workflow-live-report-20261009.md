@@ -34,6 +34,11 @@ check passed. The third workflow used standard validation: the single node was
 verified independently and its result was reused; a redundant Integrator was
 not started.
 
+The shared change was synchronized to Windows `main`; its typecheck, production
+build and 130 offline entries passed on the Mac host. Its suite omits the
+Mac-specific launcher test. The Mac checkout remains on `mac版` and the current
+workbench was restarted after validation.
+
 The screenshot-reported empty rows were traced to SDK `agent_message` events
 whose raw text was whitespace. Twelve such placeholders in the retained round
 3 snapshot are now filtered while 8 tool entries and 1 reconnect entry remain.
@@ -55,3 +60,7 @@ external side effects do not have a general exactly-once guarantee; adaptive
 provider routing, automatic decision knowledge, and repeated large-project
 A/B evaluation remain future work. The checks also do not replace native
 Windows CLI and packaged-runtime validation.
+
+Five old normal-conversation label rows lack the original SDK body evidence.
+They are retained rather than deleting potentially real text; new empty
+messages and historical entries with explicit whitespace evidence are filtered.
