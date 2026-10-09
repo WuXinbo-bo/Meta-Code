@@ -28,3 +28,10 @@ export function linkedWorkflowId(session: { id: string; taskContextId?: string |
     .filter((workflow) => rootsEqual(session.executionRoot, workflowRoot(workflow)))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0]?.id || "";
 }
+
+export function handoffWorkflowId(sourceId: string, session: { taskContextId?: string | null; executionRoot?: string }, workflows: LinkedWorkflow[]): string {
+  const linked = workflows.filter((workflow) => workflow.taskContextId && workflow.taskContextId === session.taskContextId && rootsEqual(session.executionRoot, workflowRoot(workflow)));
+  // Legacy messages have no source ID. Only infer their target when the task
+  // has a single round; opening a newer round would misrepresent its history.
+  return sourceId ? linked.find((workflow) => workflow.id === sourceId)?.id || "" : linked.length === 1 ? linked[0].id : "";
+}

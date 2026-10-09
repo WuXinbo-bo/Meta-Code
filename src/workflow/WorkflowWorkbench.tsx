@@ -10,6 +10,7 @@ import { HelpButton } from "../help/HelpProvider";
 import { confirmAction } from "../components/ConfirmationProvider";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import type { AgentProviderDescriptor } from "../agents/types";
+import { workflowConversationSource, type ConversationHandoff, type WorkflowTaskContext } from "../tasks/workflowConversationSource";
 import { ExecutionTargetSelect, WorkflowDefinitionPicker, WorkflowExtensions, type ExecutionTarget } from "./WorkflowExtensions";
 import "./WorkflowExperience.css";
 import { publicWorkflowActivity } from "./publicActivity";
@@ -39,12 +40,27 @@ type CanvasLayout = { version: 2; viewport: { x: number; y: number; zoom: number
 type PlanAudit = { status: "passed" | "revised" | "needs_input"; checks: Array<{ key: string; status: "passed" | "revised" | "warning"; note: string }>; changes: string[] };
 type ValidationMode = "standard" | "strict" | "deterministic";
 type FinalDelivery = { required: boolean; directory: string; primary: string | null; format: string; additional: string[]; producerNodeId: string | null; reason: string };
-type Workflow = { id: string; workDirectory: string; executionTarget?: ExecutionTarget; executionRoot?: string; workspaceRoot?: string; worktreeId?: string | null; pauseMode?: "checkpoint" | "immediate" | null; pendingMaintenance?: { note: string; intent: "question" | "adjust"; plannerEngine: string; requestedAt: string; resumeAfter: boolean } | null; originId: string; parentWorkflowId: string | null; branchIndex: number; branchLabel: string; title: string; originalPrompt: string; plannerEngine: Engine; maxConcurrentAgents: number | null; status: string; pausedFromStatus: string | null; pausedPlanningMode: "initial" | "refine" | "fresh" | null; pausedPlanningMaintenance: boolean; revision: number; activePlanVersion: number; reviewNote: string | null; finalResult: Result | null; plannerLogs: Log[]; plannerStartedAt: string | null; plannerFinishedAt: string | null; integrationLogs: Log[]; integrationStartedAt: string | null; integrationFinishedAt: string | null; plan: { title: string; summary: string; assumptions: string[]; questions: string[]; risks: string[]; finalDelivery: FinalDelivery; validationMode?: ValidationMode; audit: PlanAudit; nodes: PlanNode[] } | null; nodes: Node[] };
+type Workflow = { id: string; createdAt?: string; workDirectory: string; executionTarget?: ExecutionTarget; executionRoot?: string; workspaceRoot?: string; worktreeId?: string | null; pauseMode?: "checkpoint" | "immediate" | null; pendingMaintenance?: { note: string; intent: "question" | "adjust"; plannerEngine: string; requestedAt: string; resumeAfter: boolean } | null; originId: string; parentWorkflowId: string | null; branchIndex: number; branchLabel: string; title: string; originalPrompt: string; plannerEngine: Engine; maxConcurrentAgents: number | null; status: string; pausedFromStatus: string | null; pausedPlanningMode: "initial" | "refine" | "fresh" | null; pausedPlanningMaintenance: boolean; revision: number; activePlanVersion: number; reviewNote: string | null; finalResult: Result | null; plannerLogs: Log[]; plannerStartedAt: string | null; plannerFinishedAt: string | null; integrationLogs: Log[]; integrationStartedAt: string | null; integrationFinishedAt: string | null; plan: { title: string; summary: string; assumptions: string[]; questions: string[]; risks: string[]; finalDelivery: FinalDelivery; validationMode?: ValidationMode; audit: PlanAudit; nodes: PlanNode[] } | null; nodes: Node[] };
 type Runtime = { codex: { available: boolean }; claude: { available: boolean }; providers: Record<string, { available: boolean }> };
 type PlanImpact = { reused: string[]; rerun: string[]; added: string[]; removed: string[]; requiresIntegration: boolean };
 type MaintenanceBranch = { id: string; status: "idle" | "planning" | "ready" | "failed"; basePlanVersion: number; messages: Array<{ id: string; role: "user" | "assistant" | "system"; text: string; createdAt: string; planVersion?: number }>; candidatePlan: Workflow["plan"]; impact: PlanImpact | null; updatedAt: string };
 type PlannerAccepted = { accepted: true; alreadyRunning: boolean; queuedUntilCheckpoint?: boolean; queriedSnapshot?: boolean; queryAnswer?: string; workflow: Workflow };
 type ArtifactStatus = { path: string; relativePath: string | null; exists: boolean; kind: "file" | "directory" | "missing" | "invalid"; size: number | null };
+function WorkflowConversationSource({ handoff }: { handoff: ConversationHandoff }) {
+  const latest = handoff.latestUserRequest?.text.trim() || "";
+  const excerpt = (value: string, limit = 1200) => value.length > limit ? `${value.slice(0, limit)}…` : value;
+  return <details key={`${handoff.source.id}:${handoff.sourceRevision}:${handoff.createdAt}`} className="workflow-conversation-source" aria-label="对话转入编排的上下文">
+    <summary><MessageCircle size={13} /><span><strong>从对话进入编排</strong><small>{excerpt(latest || handoff.goal, 220)}</small></span><ChevronDown size={13} /></summary>
+    <dl>
+      <div><dt>初始目标</dt><dd>{excerpt(handoff.goal)}</dd></div>
+      {latest && latest !== handoff.goal && <div><dt>最近要求</dt><dd>{excerpt(latest, 1800)}</dd></div>}
+      {!!handoff.decisions?.length && <div><dt>参考决定</dt><dd>{handoff.decisions.slice(0, 3).map((value) => excerpt(value, 240)).join("；")}</dd></div>}
+      {!!handoff.files?.length && <div><dt>已有成果</dt><dd>{handoff.files.slice(0, 4).map((value) => excerpt(value, 180)).join("、")}</dd></div>}
+      {!!handoff.unresolved?.length && <div><dt>待处理</dt><dd>{handoff.unresolved.slice(0, 3).map((value) => excerpt(value, 240)).join("；")}</dd></div>}
+      {!!handoff.attachments?.length && <div><dt>附件</dt><dd>{handoff.attachments.slice(0, 4).map((attachment) => excerpt(attachment.name, 120)).join("、")}</dd></div>}
+    </dl>
+  </details>;
+}
 
 async function request<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
@@ -204,13 +220,13 @@ const WorkflowPlanCard = memo(function WorkflowPlanCard({ id, workflow, offset, 
     </footer>
   </button>;
 }, (a, b) => a.id === b.id && a.workflow === b.workflow && a.offset?.x === b.offset?.x && a.offset?.y === b.offset?.y && a.dragging === b.dragging);
-const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, executionTarget, branchCount, offset, dragging, editorMode, editorPrompt, branchNote, branchEngine, runtime, providers, busy, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, onContextMenu, onEditorModeChange, onEditorPromptChange, onBranchNoteChange, onBranchEngineChange, onCancel, onSubmit, registerRef }: { prompt: string; executionTarget?: ExecutionTarget; branchCount: number; offset?: Point; dragging: boolean; editorMode: "edit" | "branch" | null; editorPrompt: string; branchNote: string; branchEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; busy: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; onContextMenu: (event: React.MouseEvent<HTMLElement>) => void; onEditorModeChange: (mode: "edit" | "branch") => void; onEditorPromptChange: (value: string) => void; onBranchNoteChange: (value: string) => void; onBranchEngineChange: (engine: Engine) => void; onCancel: () => void; onSubmit: () => void; registerRef: (id: string, element: HTMLElement | null) => void }) {
+const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, executionTarget, conversationHandoff, branchCount, offset, dragging, editorMode, editorPrompt, branchNote, branchEngine, runtime, providers, busy, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, onContextMenu, onEditorModeChange, onEditorPromptChange, onBranchNoteChange, onBranchEngineChange, onCancel, onSubmit, registerRef }: { prompt: string; executionTarget?: ExecutionTarget; conversationHandoff: ConversationHandoff | null; branchCount: number; offset?: Point; dragging: boolean; editorMode: "edit" | "branch" | null; editorPrompt: string; branchNote: string; branchEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; busy: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; onContextMenu: (event: React.MouseEvent<HTMLElement>) => void; onEditorModeChange: (mode: "edit" | "branch") => void; onEditorPromptChange: (value: string) => void; onBranchNoteChange: (value: string) => void; onBranchEngineChange: (engine: Engine) => void; onCancel: () => void; onSubmit: () => void; registerRef: (id: string, element: HTMLElement | null) => void }) {
   const expanded = editorMode !== null;
-  const interactiveTarget = (target: EventTarget) => (target as HTMLElement).closest("button, textarea, select, input, label");
+  const interactiveTarget = (target: EventTarget) => (target as HTMLElement).closest("button, textarea, select, input, label, .workflow-conversation-source");
   return <article
     ref={(element) => registerRef("origin", element)}
     style={offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined}
-    className={`workflow-origin-card ${expanded ? "expanded" : ""} ${dragging ? "dragging" : ""}`}
+    className={`workflow-origin-card ${conversationHandoff ? "with-conversation-source" : ""} ${expanded ? "expanded" : ""} ${dragging ? "dragging" : ""}`}
     onPointerDown={(event) => { if (interactiveTarget(event.target)) { event.stopPropagation(); return; } onPointerDown(event); }}
     onPointerMove={onPointerMove}
     onPointerUp={onPointerUp}
@@ -219,7 +235,7 @@ const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, executionT
     onContextMenu={(event) => { event.preventDefault(); if (!expanded) onContextMenu(event); }}
   >
     <span className="workflow-card-kicker"><Route size={13} />初始任务 <em>{branchCount} 个方案</em>{expanded && <button type="button" title="收起编辑" onClick={onCancel}><X size={14} /></button>}</span>
-    {!expanded ? <><strong>{prompt}</strong><small>{executionTarget === "worktree" ? "方案 Worktree" : executionTarget === "isolated" ? "隔离任务" : "当前项目"}</small></> : <div className="workflow-origin-editor">
+    {!expanded ? <><strong>{prompt}</strong><small>{executionTarget === "worktree" ? "方案 Worktree" : executionTarget === "isolated" ? "隔离任务" : "当前项目"}</small>{conversationHandoff && <WorkflowConversationSource handoff={conversationHandoff} />}</> : <div className="workflow-origin-editor">
       <div className="workflow-origin-editor-tabs" role="tablist" aria-label="初始任务操作">
         <button type="button" className={editorMode === "edit" ? "active" : ""} onClick={() => onEditorModeChange("edit")}><Pencil size={13} />编辑任务</button>
         <button type="button" className={editorMode === "branch" ? "active" : ""} onClick={() => onEditorModeChange("branch")}><GitBranch size={13} />规划分支</button>
@@ -279,6 +295,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
   const [branchNote, setBranchNote] = useState("");
   const [branchEngine, setBranchEngine] = useState<Engine>(defaultPlannerEngine);
   const [maintenance, setMaintenance] = useState<MaintenanceBranch | null>(null);
+  const [conversationHandoff, setConversationHandoff] = useState<ConversationHandoff | null>(null);
   const [maintenanceInput, setMaintenanceInput] = useState("");
   const [maintenanceIntent, setMaintenanceIntent] = useState<"question" | "adjust">("question");
   const [maintenanceEngine, setMaintenanceEngine] = useState(defaultPlannerEngine);
@@ -345,6 +362,18 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     return () => { loadRequestRef.current.controller?.abort(); };
   }, [workflowId, load]);
   useEffect(() => { setValidationMode(workflow?.plan?.validationMode || "strict"); }, [workflow?.id, workflow?.activePlanVersion, workflow?.plan?.validationMode]);
+  useEffect(() => {
+    setConversationHandoff(null);
+    const expectedId = workflowId;
+    const executionRoot = workflow?.executionRoot || workflow?.workDirectory;
+    if (!expectedId || workflow?.id !== expectedId || !executionRoot || !Number.isFinite(Date.parse(workflow.createdAt || ""))) return;
+    const controller = new AbortController();
+    void request<WorkflowTaskContext>(`/api/task-contexts/lookup?workflowId=${encodeURIComponent(expectedId)}`, { signal: controller.signal }).then((context) => {
+      if (controller.signal.aborted || workflowIdRef.current !== expectedId) return;
+      setConversationHandoff(workflowConversationSource(context, workflow));
+    }).catch(() => { /* Source context is optional for historical workflows. */ });
+    return () => controller.abort();
+  }, [workflowId, workflow?.id, workflow?.createdAt, workflow?.executionRoot, workflow?.workDirectory]);
   useEffect(() => { setReviewCollapsed(false); }, [workflowId, workflow?.activePlanVersion]);
   useEffect(() => { if (workflow) setMaintenanceEngine(workflow.plannerEngine); }, [workflow?.id, workflow?.plannerEngine]);
   useEffect(() => {
@@ -613,7 +642,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     const shell = canvasRef.current;
     if (!shell) return;
     const onWheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement).closest("aside, textarea, select, input")) return;
+      if ((event.target as HTMLElement).closest("aside, textarea, select, input, .workflow-conversation-source")) return;
       event.preventDefault();
       event.stopPropagation();
       if (!event.ctrlKey) {
@@ -672,7 +701,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
       <div className="workflow-canvas-stage" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
         {!workflowId ? <button type="button" className="workflow-start-card" onClick={() => setCreateOpen(true)}><span><Plus size={24} /></span><strong>创建初始任务</strong><small>从一个完整目标开始构建任务图</small></button> : !workflow ? <div className="workflow-loading-card"><LoaderCircle className="spin" size={18} />正在加载任务</div> : <div className="workflow-graph-root" ref={graphRef}>
           <WorkflowEdgeLayer edges={renderedEdges} />
-          <WorkflowOriginCard prompt={workflow.originalPrompt} executionTarget={workflow.executionTarget} branchCount={branches.length || 1} offset={nodeOffsets.origin} dragging={draggingNodeId === "origin"} editorMode={originDialog} editorPrompt={originPrompt} branchNote={branchNote} branchEngine={branchEngine} runtime={runtime} providers={providers} busy={busy} onPointerDown={(event) => startNodeDrag("origin", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={openOrigin} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setOriginMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 160) }); }} onEditorModeChange={openOriginDialog} onEditorPromptChange={setOriginPrompt} onBranchNoteChange={setBranchNote} onBranchEngineChange={setBranchEngine} onCancel={() => setOriginDialog(null)} onSubmit={() => void (originDialog === "edit" ? saveOriginEdit() : createBranch())} registerRef={registerGraphNode} />
+          <WorkflowOriginCard prompt={workflow.originalPrompt} executionTarget={workflow.executionTarget} conversationHandoff={conversationHandoff} branchCount={branches.length || 1} offset={nodeOffsets.origin} dragging={draggingNodeId === "origin"} editorMode={originDialog} editorPrompt={originPrompt} branchNote={branchNote} branchEngine={branchEngine} runtime={runtime} providers={providers} busy={busy} onPointerDown={(event) => startNodeDrag("origin", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={openOrigin} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setOriginMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 160) }); }} onEditorModeChange={openOriginDialog} onEditorPromptChange={setOriginPrompt} onBranchNoteChange={setBranchNote} onBranchEngineChange={setBranchEngine} onCancel={() => setOriginDialog(null)} onSubmit={() => void (originDialog === "edit" ? saveOriginEdit() : createBranch())} registerRef={registerGraphNode} />
           {siblingBranches.length > 0 && <div className="workflow-branch-rail">{siblingBranches.map((branch) => <WorkflowPlanCard key={branch.id} id={`branch:${branch.id}`} workflow={branch} offset={nodeOffsets[`branch:${branch.id}`]} dragging={draggingNodeId === `branch:${branch.id}`} onPointerDown={(event) => startNodeDrag(`branch:${branch.id}`, event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => { if (suppressNodeClickRef.current === `branch:${branch.id}`) { suppressNodeClickRef.current = ""; return; } onOpenWorkflow(branch.id); }} registerRef={registerGraphNode} />)}</div>}
           <div className="workflow-planner-stack">
             <WorkflowAgentCard id="planner" title="规划 Agent" provider={workflow.plannerEngine} status={plannerStatus} logs={workflow.plannerLogs} skills={workflowSkills} mcpServers={workflowMcpServers} offset={nodeOffsets.planner} dragging={draggingNodeId === "planner"} icon={<Brain size={17} />} onPointerDown={(event) => startNodeDrag("planner", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode("planner")} registerRef={registerGraphNode} emptyText="等待开始规划" className="planner" />

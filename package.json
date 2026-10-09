@@ -162,7 +162,9 @@
     "test:task-history-ledger": "node --import tsx scripts/test-task-history-ledger.mjs",
     "test:workflow-live-metrics": "node scripts/test-workflow-live-metrics.mjs",
     "test:workflow-file-integrity-async": "node --import tsx scripts/test-workflow-file-integrity-async.mjs",
-    "test:workflow-runtime-policies": "node --import tsx scripts/test-workflow-runtime-policies.mjs"
+    "test:workflow-runtime-policies": "node --import tsx scripts/test-workflow-runtime-policies.mjs",
+    "test:workflow-handoff": "node --import tsx scripts/test-workflow-handoff.mjs",
+    "test:workflow-conversation-source": "node --import tsx scripts/test-workflow-conversation-source.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

@@ -33,6 +33,37 @@ const visibleWithin = async (selector) => {
 };
 
 try {
+  for (const width of [1440, 800, 390]) {
+    await open("handoff", width);
+    const card = page.locator(".task-handoff-card");
+    await card.waitFor();
+    assert.equal(await card.getByRole("button", { name: "展开编排交接详情" }).getAttribute("aria-expanded"), "false");
+    assert.match(await card.innerText(), /12 项回归检查通过/);
+    await screenshot(`handoff-card-${width}`);
+    await card.getByRole("button", { name: "展开编排交接详情" }).click();
+    assert.match(await card.innerText(), /src\/payments\/api.ts/);
+    assert.match(await card.innerText(), /上线前确认旧账户兼容范围/);
+    await visibleWithin(".task-handoff-card");
+    await card.getByRole("button", { name: "继续对话", exact: true }).click();
+    assert.ok(await page.getByLabel("继续任务").evaluate((element) => element === document.activeElement));
+    await page.getByRole("button", { name: "追加一轮编排", exact: true }).click();
+    await visibleWithin(".task-mode-create");
+    const hit = await page.getByRole("button", { name: "生成计划", exact: true }).evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+    });
+    assert.equal(hit, true, "The create form must not be clipped by the task/tab bar");
+    await screenshot(`handoff-${width}`);
+    await page.getByRole("button", { name: "关闭编排目标" }).click();
+    await card.getByRole("button", { name: "查看编排", exact: true }).click();
+    await page.getByLabel("对话转入编排的上下文").waitFor();
+    assert.equal(await page.getByText("Wrong root marker", { exact: true }).count(), 0, "Source cards must stay in the workflow's execution root");
+    assert.equal(await page.getByText("Later conversation marker", { exact: true }).count(), 0, "Later requests cannot rewrite the workflow's creation source");
+    await page.locator(".workflow-conversation-source summary").click();
+    assert.match(await page.locator(".workflow-conversation-source").innerText(), /docs\/research.md/);
+    assert.equal(await page.locator(".workflow-origin-card.expanded").count(), 0, "Expanding the handoff must not open the task editor");
+    await screenshot(`conversation-source-${width}`);
+  }
   for (const target of ["workspace", "isolated", "worktree"]) {
     await open("create");
     await page.getByRole("button", { name: "创建初始任务" }).click();

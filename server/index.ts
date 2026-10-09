@@ -5751,7 +5751,14 @@ registerTaskContextRoutes(app, {
       title: input.title, scopeKind: "workspace", workspaceId: workspace.id, codexThreadId: null, engine,
       engineSessionId: null, createdAt: now, updatedAt: now, usage: emptyUsage(), messages: [], pendingInputs: [], status: "idle", revision: 0 };
     taskContextStore.link(input.taskContextId, { kind: "session", id: session.id, executionRoot: input.executionRoot || workspace.root }, input.ownerUserId, workspace.id);
-    if (input.handoff) appendMessage(session, { role: "assistant", text: input.handoff, eventType: "task.context.handoff", payload: { taskContextId: input.taskContextId } });
+    if (input.handoff) appendMessage(session, { role: "assistant", text: input.handoff, eventType: "task.context.handoff", payload: {
+      taskContextId: input.taskContextId,
+      ...(input.handoffSource ? {
+        sourceKind: input.handoffSource.kind, sourceId: input.handoffSource.id, sourceRevision: input.handoffSource.sourceRevision,
+        executionRoot: input.handoffSource.executionRoot,
+        ...(input.handoffSource.kind === "workflow" ? { workflowId: input.handoffSource.id } : {})
+      } : {})
+    } });
     state.sessions.unshift(session);
     try { await saveState(); }
     catch (error) { state.sessions = state.sessions.filter((item) => item.id !== session.id); taskContextStore.unlink({ kind: "session", id: session.id }, input.ownerUserId); throw error; }

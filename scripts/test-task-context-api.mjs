@@ -132,6 +132,7 @@ try {
   assert.equal(replies[0].body.id, replies[1].body.id);
   assert.equal(captured.executionRoot, temporary);
   assert.match(captured.handoff, /User workflow goal/);
+  assert.deepEqual(captured.handoffSource, { kind: "workflow", id: "workflow", executionRoot: temporary, sourceRevision: workflows.get("workflow").revision }, "a newly created conversation retains the trusted workflow handoff provenance");
   releaseCreation = null;
   assert.equal((await request(`/api/task-contexts/${context.id}/conversation`, { workflowId: "workflow", engine: "claude" })).body.id, replies[0].body.id);
   assert.equal(creations, 1);
@@ -144,6 +145,7 @@ try {
   assert.equal(branchConversation.status, 201);
   assert.notEqual(branchConversation.body.id, replies[0].body.id);
   assert.equal(captured.executionRoot, branchRoot);
+  assert.deepEqual(captured.handoffSource, { kind: "workflow", id: "branch", executionRoot: branchRoot, sourceRevision: workflows.get("branch").revision }, "branch conversation handoffs retain their source root and workflow revision");
   assert.equal(creations, 2);
   sessions.get(branchConversation.body.id).archivedAt = new Date().toISOString();
   assert.equal((await request(`/api/task-contexts/${context.id}/conversation`, { workflowId: "branch", engine: "claude" })).status, 201);
@@ -173,6 +175,7 @@ try {
   const implicitConversation = await request(`/api/task-contexts/${context.id}/conversation`, { engine: "qwen" });
   assert.equal(implicitConversation.status, 201);
   assert.equal(captured.executionRoot, temporary, "without a workflow ID, conversation creation follows the latest active session root");
+  assert.deepEqual(captured.handoffSource, { kind: "session", id: "session", executionRoot: temporary, sourceRevision: sessions.get("session").revision }, "implicit session handoffs cannot be mislabeled as the latest workflow from another root");
   assert.match(captured.handoff, /main-only-marker/);
   assert.doesNotMatch(captured.handoff, /branch-only-marker/);
   assert.equal((await request(`/api/task-contexts/${context.id}/conversation`, { sessionId: "unlinked", engine: "qwen" })).status, 409);
