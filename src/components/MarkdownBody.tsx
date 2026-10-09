@@ -15,6 +15,8 @@ import {
 } from "../markdown/markdownPlan";
 import { planMarkdownRender } from "../markdown/markdownWorkerClient";
 import { remarkWorkbench } from "../markdown/remarkWorkbench";
+import { workspaceRelativePath } from "../markdown/localFileLinks";
+export { workspaceRelativePath } from "../markdown/localFileLinks";
 import "../design/document-preview.css";
 
 export type MarkdownBodyProps = {
@@ -108,41 +110,8 @@ function MermaidDiagram({ chart }: { chart: string }) {
 export function markdownUrlTransform(url: string) {
   if (/^\/\//.test(url)) return `https:${url}`;
   if (/^data:image\/(?:avif|gif|jpe?g|png|webp);base64,/i.test(url)) return url;
-  if (/^(?:https?:|mailto:|tel:|#|[a-zA-Z]:[\\/]|\.{0,2}[\\/])/i.test(url)) return url;
+  if (/^(?:https?:|mailto:|tel:|file:|#|[a-zA-Z]:[\\/]|\.{0,2}[\\/])/i.test(url)) return url;
   return url.includes(":") ? "" : url;
-}
-
-export function workspaceRelativePath(source: string | undefined, workspaceRoot?: string, markdownPath?: string) {
-  if (!source || !workspaceRoot || /^(?:https?:|mailto:|tel:|#|data:|\/\/)/i.test(source)) return null;
-  let cleanSource = source.split(/[?#]/, 1)[0].replace(/^file:\/{2,3}/i, "").replaceAll("\\", "/");
-  try {
-    cleanSource = decodeURIComponent(cleanSource);
-  } catch {
-    // Keep literal percent characters unchanged.
-  }
-  const normalizedRoot = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "");
-  const absolute = /^[a-zA-Z]:\//.test(cleanSource);
-  let relative = cleanSource;
-  if (absolute) {
-    const lowerSource = cleanSource.toLowerCase();
-    const lowerRoot = normalizedRoot.toLowerCase();
-    if (lowerSource !== lowerRoot && !lowerSource.startsWith(`${lowerRoot}/`)) return null;
-    relative = cleanSource.slice(normalizedRoot.length).replace(/^\//, "");
-  }
-  const baseParts = absolute || !markdownPath
-    ? []
-    : markdownPath.replaceAll("\\", "/").split("/").slice(0, -1);
-  let escapedRoot = false;
-  for (const part of relative.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (!baseParts.length) escapedRoot = true;
-      else baseParts.pop();
-    } else {
-      baseParts.push(part);
-    }
-  }
-  return escapedRoot ? null : baseParts.join("\\");
 }
 
 function resolveMarkdownAsset(source: string | undefined, markdownPath?: string, workspaceId?: string, workspaceRoot?: string) {

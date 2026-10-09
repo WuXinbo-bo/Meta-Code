@@ -69,6 +69,7 @@ import { ProductLogo } from "./branding/ProductLogo";
 import { ProviderIcon } from "./branding/ProviderIcon";
 import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
+import { TaskModeBar, CompactWorkflowProgress } from "./workflow/TaskModeBar";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
 import { AgentWorkProgress } from "./components/AgentWorkProgress";
 import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
@@ -96,6 +97,10 @@ import { TaskLaunchControls } from "./components/TaskLaunchControls";
 import { ActionMenu } from "./components/ActionMenu";
 import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./components/WorkspaceFileSearch";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
+import { fileScopeRoot } from "./files/fileScopeRoot";
+import { linkedWorkflowId } from "./tasks/linkedWorkflow";
+import { ACTIVE_SIDEBAR_TASK_STATUSES, groupSidebarTasks, sidebarTaskIsPinned, sidebarTaskIsSelected, sidebarTaskPinnedRecords, type SidebarTaskGroup } from "./tasks/sidebarTaskGroups";
+import { workspaceRelativePath } from "./markdown/localFileLinks";
 import { fileKind, isPreviewFileKind, type PreviewFile, type WorkspaceFileNode } from "./files/fileTypes";
 import {
   WorkspaceBrowserTabs,
@@ -245,6 +250,8 @@ type TaskDeletionPolicy = {
   reason: string | null;
 };
 type SessionSummary = {
+  taskContextId?: string | null;
+  executionRoot?: string;
   id: string;
   title: string;
   scopeKind: "workspace" | "standalone";
@@ -276,6 +283,10 @@ type SessionSummary = {
   deletionPolicy?: TaskDeletionPolicy;
 };
 type WorkflowSummary = {
+  taskContextId?: string | null;
+  executionTarget?: "workspace" | "isolated" | "worktree";
+  executionRoot?: string;
+  workspaceRoot?: string;
   id: string;
   title: string;
   workspaceId: string;
@@ -350,7 +361,8 @@ type Session = SessionSummary & {
 type MessageWindow = { start: number; end: number; total: number; hasMore: boolean };
 type MessagePage = { messages: Message[]; window: MessageWindow };
 type ActivityMessageGroup = { id: string; role: "activity-group"; messages: Message[] };
-type SidebarTaskItem = { kind: "chat"; task: SessionSummary } | { kind: "workflow"; task: WorkflowSummary };
+type SidebarTaskRecord = { kind: "chat"; task: SessionSummary } | { kind: "workflow"; task: WorkflowSummary };
+type SidebarTaskItem = SidebarTaskRecord & { group?: SidebarTaskGroup<SidebarTaskRecord> };
 type NoticeTone = "error" | "success" | "info" | "warning";
 type Notice = { message: string; tone: NoticeTone };
 type TreeNode = WorkspaceFileNode;
@@ -519,7 +531,7 @@ const DEFAULT_LAYOUT_WIDTHS = { sidebar: 260, inspector: 320 } as const;
 const LAYOUT_MIN_WIDTH = 260;
 const LAYOUT_MAX_WIDTH = 480;
 const SESSION_CACHE_FRESH_MS = 15_000;
-const ACTIVE_TASK_STATUSES = new Set(["running", "paused", "queued", "integrating"]);
+const ACTIVE_TASK_STATUSES = ACTIVE_SIDEBAR_TASK_STATUSES;
 type LayoutWidths = { sidebar: number; inspector: number };
 type ResizingPane = keyof LayoutWidths;
 type SidebarSection = "tasks" | "workspaces";
@@ -1313,6 +1325,9 @@ function sameSidebarTaskRow(previous: SidebarTaskRowProps, next: SidebarTaskRowP
     || left.task.status !== right.task.status
     || left.task.updatedAt !== right.task.updatedAt
     || left.task.pinned !== right.task.pinned
+    || sidebarTaskIsPinned(left) !== sidebarTaskIsPinned(right)
+    || left.group?.mixedFolders !== right.group?.mixedFolders
+    || left.group?.records.length !== right.group?.records.length
     || left.task.archivedAt !== right.task.archivedAt
     || previous.locationLabel !== next.locationLabel
     || previous.active !== next.active
@@ -1352,7 +1367,8 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
     );
   };
   return <div
-    className={`session-row ${active ? "active" : ""} ${item.task.pinned ? "pinned" : ""} ${item.task.archivedAt ? "archived" : ""}`}
+    className={`session-row ${active ? "active" : ""} ${sidebarTaskIsPinned(item) ? "pinned" : ""} ${item.task.archivedAt ? "archived" : ""}`}
+    title={item.group?.mixedFolders ? "关联记录位于不同文件夹；此处显示当前记录的位置，移动操作仅调整当前记录" : undefined}
     onMouseEnter={() => { if (item.kind === "chat") onPrefetch(item.task.id); }}
     onMouseLeave={onCancelPrefetch}
     onFocusCapture={() => { if (item.kind === "chat") onPrefetch(item.task.id); }}
@@ -1360,7 +1376,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   >
     <button className="session-select" onClick={() => onSelect(item)}>
       <ProviderIcon provider={item.kind === "workflow" ? item.task.plannerEngine : item.task.engine} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={15} />
-      <span><strong>{item.task.pinned && <Pin size={11} />}{item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
+      <span><strong>{sidebarTaskIsPinned(item) && <Pin size={11} />}{item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
     </button>
     <IconButton label="管理任务" onClick={() => onOpenContextMenu(item.task.id, 210, Math.min(window.innerHeight - 330, 130))}><MoreHorizontal size={15} /></IconButton>
   </div>;
@@ -1442,9 +1458,9 @@ const SidebarTaskList = memo(function SidebarTaskList({
   }, [archivedTasks.length, scopeKey]);
 
   const renderTask = (item: SidebarTaskItem) => <SidebarTaskRow
-    key={`${item.kind}:${item.task.id}`}
+    key={item.group?.key || `${item.kind}:${item.task.id}`}
     item={item}
-    active={item.kind === "chat" ? activeChatId === item.task.id : activeWorkflowId === item.task.id}
+    active={sidebarTaskIsSelected(item, activeChatId, activeWorkflowId)}
     delegationEnabled={delegationEnabled}
     providerControl={providerControls.find((control) => control.providerId === (item.kind === "workflow" ? item.task.plannerEngine : item.task.engine))}
     relativeTimeNow={relativeTimeNow}
@@ -1470,7 +1486,7 @@ const SidebarTaskList = memo(function SidebarTaskList({
       {pinnedTaskShortcuts.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedTaskShortcuts.length}</small></div><div className="session-group">{pinnedTaskShortcuts.map(renderTask)}</div></section>}
       {projects.length > 0 && <section className="sidebar-task-section sidebar-projects"><div className="sidebar-section-heading"><span>项目</span></div>{projects.map((project) => {
         const open = !collapsedProjectIds.has(project.id);
-        const projectTasks = visibleTaskItems.filter((item) => item.task.workspaceId === project.id && !(item.kind === "chat" && item.task.scopeKind === "standalone") && !item.task.pinned && !ACTIVE_TASK_STATUSES.has(item.task.status));
+        const projectTasks = visibleTaskItems.filter((item) => item.task.workspaceId === project.id && !(item.kind === "chat" && item.task.scopeKind === "standalone") && !sidebarTaskIsPinned(item) && !ACTIVE_TASK_STATUSES.has(item.task.status));
         const limit = projectLimits[project.id] || 12;
         const folders = project.taskFolders || [];
         const knownFolders = new Set(folders.map((folder) => folder.id));
@@ -2411,7 +2427,7 @@ export function App() {
   const navigationPending = sessionNavigation.phase === "loading";
   const navigationSummary = sessionNavigation.phase === "loading" ? sessionNavigation.summary : undefined;
   const taskFileScopeId = activeSession
-    ? activeSession.scopeKind === "standalone" ? activeSession.id : activeSession.workspaceId
+    ? activeSession.id
     : activeWorkspaceId;
   const [workspaceArchiveOpen, setWorkspaceArchiveOpen] = useState(false);
   const [sidebarSection, setSidebarSection] = useState<SidebarSection>("tasks");
@@ -2426,6 +2442,7 @@ export function App() {
   const [view, setView] = useState<"chat" | "agents" | "mcp" | "settings" | "git">("chat");
   const [activeWorkflowId, setActiveWorkflowId] = useState("");
   const [workflowDraftOpen, setWorkflowDraftOpen] = useState(false);
+  const [taskWorkflowLink, setTaskWorkflowLink] = useState<{ sessionId: string; workflowId: string } | null>(null);
   const activeTaskKindRef = useRef<typeof activeTaskKind>(null);
   const taskSelectionGenerationRef = useRef(0);
   // A newly-created task must win over restored tabs and background refreshes
@@ -2510,7 +2527,9 @@ export function App() {
     }
   }, [data]);
   const activeScopeBrowserResource = workspaceBrowser.tabs.find((tab) => tab.id === workspaceBrowser.activeTabId)?.resource;
-  const activeFileScopeId = workspaceBrowserScopeId(activeScopeBrowserResource, taskFileScopeId);
+  const activeFileScopeId = activeScopeBrowserResource?.kind === "workflow" ? activeScopeBrowserResource.workflowId
+    : activeScopeBrowserResource?.kind === "conversation" ? activeScopeBrowserResource.conversationId
+    : workspaceBrowserScopeId(activeScopeBrowserResource, activeTaskKind === "workflow" && activeWorkflowId ? activeWorkflowId : taskFileScopeId);
   const directoryPanelVisible = inspectorOpen && view === "chat" && activeScopeBrowserResource?.kind !== "tool";
   const settlePendingSessionTab = useCallback(() => {
     const pending = sessionNavigationRef.current;
@@ -3432,8 +3451,13 @@ export function App() {
   }, [prompt]);
 
   const workspace = data?.workspaces.find((item) => item.id === activeWorkspaceId);
-  const fileScopeWorkspace = data?.workspaces.find((item) => item.id === activeFileScopeId);
+  const fileScopeWorkflow = data?.workflows.find((item) => item.id === activeFileScopeId);
+  const fileScopeSession = data?.sessions.find((item) => item.id === activeFileScopeId);
+  const fileScopeWorkspace = data?.workspaces.find((item) => item.id === activeFileScopeId || item.id === fileScopeWorkflow?.workspaceId || item.id === fileScopeSession?.workspaceId);
   const fileScopeStandalone = !fileScopeWorkspace && data?.sessions.some((item) => item.scopeKind === "standalone" && item.id === activeFileScopeId);
+  const activeFileScopeRoot = activeSession?.id === activeFileScopeId && activeSession.executionRoot
+    ? activeSession.executionRoot
+    : fileScopeRoot(activeFileScopeId, data);
   const manualSkillCandidates = useMemo(
     () => (data?.skills || []).filter((skill) => !skill.builtIn && (skillPolicies[skill.name] || "off") !== "off"),
     [data?.skills, skillPolicies]
@@ -3494,7 +3518,8 @@ export function App() {
     const knownSessionIds = new Set(data.sessions.map((item) => item.id));
     const validScopeIds = new Set([
       ...data.workspaces.map((item) => item.id),
-      ...data.sessions.filter((item) => item.scopeKind === "standalone").map((item) => item.id)
+      ...data.sessions.map((item) => item.id),
+      ...data.workflows.map((item) => item.id)
     ]);
     const next = reconcileWorkspaceBrowserTabs(workspaceBrowser, {
       maxTabs: pagePreferencesRef.current.maxTabs,
@@ -3540,10 +3565,10 @@ export function App() {
   useEffect(() => {
     if (sidebarWorkspaceFilter && data && !data.workspaces.some((item) => item.id === sidebarWorkspaceFilter && !item.archivedAt)) setSidebarWorkspaceFilter("");
   }, [data?.workspaces, sidebarWorkspaceFilter]);
-  const taskItems = useMemo<SidebarTaskItem[]>(() => [
-    ...sessions.map((task) => ({ kind: "chat" as const, task })),
-    ...workflows.map((task) => ({ kind: "workflow" as const, task }))
-  ].sort((a, b) => Number(Boolean(b.task.pinned)) - Number(Boolean(a.task.pinned)) || Date.parse(b.task.updatedAt) - Date.parse(a.task.updatedAt)), [sessions, workflows]);
+  const taskItems = useMemo<SidebarTaskItem[]>(() => {
+    const items: SidebarTaskRecord[] = [...sessions.map((task) => ({ kind: "chat" as const, task })), ...workflows.map((task) => ({ kind: "workflow" as const, task }))];
+    return groupSidebarTasks(items);
+  }, [sessions, workflows]);
   const normalizedSidebarQuery = useMemo(() => sidebarQuery.trim().toLocaleLowerCase(), [sidebarQuery]);
   const deferredSidebarQuery = useDeferredValue(normalizedSidebarQuery);
   const { visibleTaskItems, activeTaskShortcuts, pinnedTaskShortcuts, recentUnfiledTasks, folderTaskItems } = useMemo(() => {
@@ -3556,11 +3581,12 @@ export function App() {
 
     for (const item of taskItems) {
       const isActive = ACTIVE_TASK_STATUSES.has(item.task.status);
-      if (!deferredSidebarQuery || `${item.task.title} ${workspaceNames[item.task.workspaceId] || "临时对话"}`.toLocaleLowerCase().includes(deferredSidebarQuery)) visible.push(item);
+      const records = item.group?.records || [item];
+      if (!deferredSidebarQuery || records.some((record) => `${record.task.title} ${workspaceNames[record.task.workspaceId] || "临时对话"}`.toLocaleLowerCase().includes(deferredSidebarQuery))) visible.push(item);
       if (isActive) active.push(item);
-      else if (item.task.pinned) pinned.push(item);
-      if (!item.task.pinned && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
-      if (item.task.folderId && !isActive && !item.task.pinned) byFolder.get(item.task.folderId)?.push(item);
+      else if (sidebarTaskIsPinned(item)) pinned.push(item);
+      if (!sidebarTaskIsPinned(item) && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
+      if (item.task.folderId && !isActive && !sidebarTaskIsPinned(item)) byFolder.get(item.task.folderId)?.push(item);
     }
 
     return {
@@ -4107,31 +4133,50 @@ export function App() {
     setView("chat");
   };
 
-  const createWorkflow = async (plannerEngine: EngineName, workflowPrompt: string, maxConcurrentAgents: number | null) => {
+  const createWorkflow = async (plannerEngine: EngineName, workflowPrompt: string, maxConcurrentAgents: number | null, options: { executionTarget?: "workspace" | "isolated" | "worktree"; hostSessionId?: string; taskContextId?: string } = {}) => {
     if (!activeWorkspaceId || !workflowPrompt.trim()) throw new Error("请输入完整任务");
-    const created = await api<WorkflowSummary>("/api/workflows", { method: "POST", body: JSON.stringify({ workspaceId: activeWorkspaceId, prompt: workflowPrompt.trim(), plannerEngine, maxConcurrentAgents }) });
-    activateTaskKind("workflow");
-    setActiveSession(null);
-    setActiveWorkflowId(created.id);
-    setWorkflowDraftOpen(false);
-    rememberWorkflow(activeWorkspaceId, created.id);
-    setDialog(null);
-    setView("chat");
-    dispatchWorkspaceBrowser({
-      type: "open",
-      input: {
-        resource: { kind: "workflow", workflowId: created.id, workspaceId: activeWorkspaceId },
-        title: created.title || "工作流",
-        detail: data?.workspaces.find((item) => item.id === activeWorkspaceId)?.name || "工作区",
-        mode: "regular"
-      }
-    });
+    const workspaceId = activeWorkspaceId;
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    const created = await api<WorkflowSummary>("/api/workflows", { method: "POST", body: JSON.stringify({ workspaceId, prompt: workflowPrompt.trim(), plannerEngine, maxConcurrentAgents, ...options }) });
+    setData((current) => current ? { ...current, workflows: [...current.workflows.filter((workflow) => workflow.id !== created.id), created] } : current);
+    if (!options.hostSessionId && selectionGeneration === taskSelectionGenerationRef.current) {
+      activateTaskKind("workflow");
+      setActiveSession(null);
+      setActiveWorkflowId(created.id);
+      setWorkflowDraftOpen(false);
+      rememberWorkflow(workspaceId, created.id);
+      setDialog(null);
+      setView("chat");
+      dispatchWorkspaceBrowser({
+        type: "open",
+        input: {
+          resource: { kind: "workflow", workflowId: created.id, workspaceId },
+          title: created.title || "工作流",
+          detail: data?.workspaces.find((item) => item.id === workspaceId)?.name || "工作区",
+          mode: "regular"
+        }
+      });
+    }
     await refresh();
     setNotice("任务已创建，规划 Agent 正在分析", "success");
     void api(`/api/workflows/${encodeURIComponent(created.id)}/plan`, { method: "POST" })
       .then(() => refresh())
       .catch((error) => { setNotice(error instanceof Error ? error.message : String(error), "error"); void refresh(); });
     return created;
+  };
+
+  const continueTaskConversation = async (id: string) => {
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    await refreshNavigation(true);
+    if (selectionGeneration === taskSelectionGenerationRef.current) await selectSession(id);
+  };
+  const startTaskOrchestration = async (taskContextId: string, goal: string) => {
+    if (!activeSession || activeSession.scopeKind === "standalone") throw new Error("请先为任务指定项目工作区");
+    if (!goal.trim()) return;
+    const sessionId = activeSession.id;
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    const created = await createWorkflow(activeSession.engine, goal, null, { hostSessionId: sessionId, taskContextId });
+    if (selectionGeneration === taskSelectionGenerationRef.current) setTaskWorkflowLink({ sessionId, workflowId: created.id });
   };
 
   const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone", targetWorkspaceId: string) => {
@@ -4246,10 +4291,12 @@ export function App() {
     const key = deletionTaskKey("session", id);
     if (deletingTaskIds.has(key)) return;
     const policy = deletionPolicyFor("session", target || activeSession || ({ id, status: "idle" } as SessionSummary));
-    const subject = target?.scopeKind === "standalone" ? "临时任务" : "任务";
+    const subject = `对话记录「${target?.title || activeSession?.title || "未命名对话"}」`;
+    const hasLinkedRecords = target?.taskContextId && (data?.sessions.some((session) => session.id !== id && session.taskContextId === target.taskContextId) || data?.workflows.some((workflow) => workflow.taskContextId === target.taskContextId));
+    const preservation = `工作区文件不会被删除。${hasLinkedRecords ? "同一任务中的其他对话和编排记录会保留。" : ""}`;
     const message = policy.requiresTermination
-      ? `${policy.reason || "任务仍在运行或暂停中"}。继续后会先停止主任务和子 Agent，再将${subject}移入回收站。工作区文件不会被删除。`
-      : `将这个${subject}移入回收站？工作区文件不会被删除。`;
+      ? `${policy.reason || "任务仍在运行或暂停中"}。继续后会先停止此对话和子 Agent，再将${subject}移入回收站。${preservation}`
+      : `将${subject}移入回收站？${preservation}`;
     if (!await confirmAction(message, {
       title: policy.requiresTermination ? "停止并删除任务" : "删除任务",
       confirmLabel: policy.requiresTermination ? "停止并删除" : "移入回收站",
@@ -4259,6 +4306,7 @@ export function App() {
     try {
       await api(`/api/sessions/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
       if (pendingCreatedSessionRef.current?.sessionId === id) pendingCreatedSessionRef.current = null;
+      setTaskWorkflowLink((current) => current?.sessionId === id ? null : current);
       setData((current) => current ? { ...current, sessions: current.sessions.filter((session) => session.id !== id) } : current);
       forgetSession(id);
       const tabId = workspaceBrowserResourceKey({
@@ -4299,9 +4347,12 @@ export function App() {
     const key = deletionTaskKey("workflow", id);
     if (deletingTaskIds.has(key)) return;
     const policy = deletionPolicyFor("workflow", target || ({ id, status: "draft" } as WorkflowSummary));
+    const subject = `编排记录「${target?.title || "未命名编排"}」`;
+    const hasLinkedRecords = target?.taskContextId && (data?.sessions.some((session) => session.taskContextId === target.taskContextId) || data?.workflows.some((workflow) => workflow.id !== id && workflow.taskContextId === target.taskContextId));
+    const preservation = `成果和已有文件不会被删除。${hasLinkedRecords ? "同一任务中的其他对话和编排记录会保留。" : ""}`;
     const message = policy.requiresTermination
-      ? `${policy.reason || "任务编排仍在执行或暂停中"}。继续后会取消未完成节点，等待全部 Agent 退出，再删除任务记录。成果目录和已有文件不会被删除。`
-      : "删除这个编排任务记录？成果目录和已有文件不会被删除。";
+      ? `${policy.reason || "任务编排仍在执行或暂停中"}。继续后会取消此编排未完成的节点，等待其 Agent 退出，再删除${subject}。${preservation}`
+      : `删除${subject}？${preservation}`;
     if (!await confirmAction(message, {
       title: policy.requiresTermination ? "取消并删除编排任务" : "删除编排任务",
       confirmLabel: policy.requiresTermination ? "取消并删除" : "确认删除",
@@ -4310,6 +4361,7 @@ export function App() {
     setDeletingTaskIds((current) => new Set(current).add(key));
     try {
       await api(`/api/workflows/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
+      setTaskWorkflowLink((current) => current?.workflowId === id ? null : current);
       setData((current) => current ? { ...current, workflows: current.workflows.filter((workflow) => workflow.id !== id) } : current);
       const tabId = workspaceBrowserResourceKey({ kind: "workflow", workflowId: id, ...(target?.workspaceId ? { workspaceId: target.workspaceId } : {}) });
       const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
@@ -4671,7 +4723,7 @@ export function App() {
     previewRequestTabIdRef.current = tabId;
     dispatchWorkspaceBrowser({ type: "update-presentation", tabId, patch: { status: "loading" } });
     const url = `/api/workspaces/${encodeURIComponent(resource.workspaceId)}/file?path=${encodeURIComponent(resource.path)}`;
-    let workspaceRoot = data?.workspaces.find((item) => item.id === resource.workspaceId)?.root || "";
+    let workspaceRoot = fileScopeRoot(resource.workspaceId, data);
     try {
       let file: PreviewFile;
       if (kind === "pdf" || kind === "image") {
@@ -4741,7 +4793,10 @@ export function App() {
   };
 
   const openFilePreviewPath = async (relativePath: string) => {
-    const normalized = relativePath.replaceAll("/", "\\");
+    const absolute = /^(?:file:|[a-zA-Z]:[\\/]|[\\/])/i.test(relativePath);
+    const previewPath = absolute ? workspaceRelativePath(relativePath, activeFileScopeRoot) : relativePath;
+    if (!previewPath) throw new Error("文件链接不属于当前任务的执行目录");
+    const normalized = previewPath.replaceAll("/", "\\");
     const name = normalized.split("\\").filter(Boolean).at(-1) || normalized;
     await openFilePreview({ name, path: normalized, type: "file" });
   };
@@ -4826,7 +4881,8 @@ export function App() {
         ? data.workflows.some((item) => item.id === resource.workflowId)
         : resource.kind === "file"
           ? data.workspaces.some((item) => item.id === resource.workspaceId)
-            || data.sessions.some((item) => item.scopeKind === "standalone" && item.id === resource.workspaceId)
+            || data.sessions.some((item) => item.id === resource.workspaceId)
+            || data.workflows.some((item) => item.id === resource.workspaceId)
           : true;
     if (!available) return;
     workspaceBrowserHydratedRef.current = true;
@@ -5251,22 +5307,29 @@ export function App() {
         if (!task) return null;
         const isWorkflow = Boolean(workflow);
         const isStandaloneTask = Boolean(session?.scopeKind === "standalone");
-        const cannotArchive = session ? session.status === "running" || session.status === "paused" : ["queued", "running", "integrating"].includes(workflow!.status);
+        const cannotArchive = session ? session.status === "running" || session.status === "paused" : ["planning", "queued", "running", "integrating"].includes(workflow!.status);
         const deletionKind = isWorkflow ? "workflow" : "session";
         const deletionPolicy = deletionPolicyFor(deletionKind, task);
         const deletionBusy = deletingTaskIds.has(deletionTaskKey(deletionKind, task.id));
+        const recordLabel = isWorkflow ? "编排记录" : "对话记录";
+        const groupedTask = taskItems.find((item) => item.group?.records.some((record) => record.task.id === task.id));
+        const currentRecord: SidebarTaskRecord = workflow ? { kind: "workflow", task: workflow } : { kind: "chat", task: session! };
+        const pinnedRecords = task.archivedAt ? [] : sidebarTaskPinnedRecords<SidebarTaskRecord>(groupedTask || currentRecord);
+        const pinnedRecordLabel = (record: SidebarTaskRecord) => `${record.kind === "workflow" ? "编排" : "对话"}：${record.task.title}`;
+        const unpinRecord = (record: SidebarTaskRecord) => record.kind === "workflow" ? updateWorkflowMetadata(record.task.id, { pinned: false }) : updateSessionMetadata(record.task.id, { pinned: false });
         const updateMetadata = (body: { title?: string; pinned?: boolean; archived?: boolean; folderId?: string | null }) => isWorkflow ? updateWorkflowMetadata(task.id, body) : updateSessionMetadata(task.id, body);
         return <><button type="button" className="session-context-dismiss" aria-label="关闭任务菜单" onClick={() => setSessionContextMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}>
-          {!task.archivedAt && <button type="button" onClick={() => void updateMetadata({ pinned: !task.pinned })}><Pin size={14} />{task.pinned ? "取消置顶" : "置顶任务"}</button>}
-          <button type="button" onClick={() => { const title = window.prompt("修改任务名称", task.title)?.trim(); if (title && title !== task.title) void updateMetadata({ title }); }}><Pencil size={14} />重命名</button>
-          <button type="button" onClick={() => isWorkflow ? void openWorkflowFolder(task.id) : void openSessionFolder(task.id, "workspace")}><FolderOpen size={14} />{isWorkflow || isStandaloneTask ? "打开任务文件夹" : "打开工作区"}</button>
-          {!isStandaloneTask && <details><summary><Folder size={14} />移动到文件夹<ChevronRight size={13} /></summary><div className="session-folder-submenu">
+          <div className="session-context-record"><span>{recordLabel}</span><strong title={task.title}>{task.title}</strong>{(groupedTask?.group?.records.length || 0) > 1 && <small>归档和删除仅针对此记录</small>}</div>
+          {!task.archivedAt && (pinnedRecords.length > 1 ? <details><summary><Pin size={14} />取消置顶<ChevronRight size={13} /></summary><div className="session-folder-submenu session-pin-submenu">{pinnedRecords.map((record) => <button type="button" key={`${record.kind}:${record.task.id}`} title={pinnedRecordLabel(record)} onClick={() => void unpinRecord(record)}>{pinnedRecordLabel(record)}</button>)}</div></details> : pinnedRecords.length === 1 ? <button type="button" title={`取消置顶 ${pinnedRecordLabel(pinnedRecords[0])}`} onClick={() => void unpinRecord(pinnedRecords[0])}><Pin size={14} /><span className="session-context-target">取消置顶 · {pinnedRecordLabel(pinnedRecords[0])}</span></button> : <button type="button" onClick={() => void updateMetadata({ pinned: true })}><Pin size={14} />置顶此{recordLabel}</button>)}
+          <button type="button" onClick={() => { const title = window.prompt(`修改${recordLabel}名称`, task.title)?.trim(); if (title && title !== task.title) void updateMetadata({ title }); }}><Pencil size={14} />重命名此记录</button>
+          <button type="button" onClick={() => isWorkflow ? void openWorkflowFolder(task.id) : void openSessionFolder(task.id, "workspace")}><FolderOpen size={14} />{isStandaloneTask ? "打开任务文件夹" : "打开工作目录"}</button>
+          {!isStandaloneTask && <details><summary title={groupedTask?.group?.mixedFolders ? "关联记录位于不同文件夹；只移动当前记录" : undefined}><Folder size={14} />移动此记录<ChevronRight size={13} /></summary><div className="session-folder-submenu">
             {taskFolders.map((folder) => <button type="button" key={folder.id} onClick={() => void updateMetadata({ folderId: folder.id })}>{folder.name}</button>)}
             {task.folderId && <button type="button" onClick={() => void updateMetadata({ folderId: null })}>移出文件夹</button>}
             {!taskFolders.length && <span className="session-folder-empty">暂无文件夹</span>}
           </div></details>}
-          <button type="button" disabled={cannotArchive} title={cannotArchive ? "执行中的任务不能归档" : ""} onClick={() => void updateMetadata({ archived: !task.archivedAt })}>{task.archivedAt ? <ArchiveRestore size={14} /> : <Archive size={14} />}{task.archivedAt ? "恢复任务" : "归档任务"}</button>
-          <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || ""} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除" : "停止并删除" : "删除任务"}</button>
+          <button type="button" disabled={!task.archivedAt && cannotArchive} title={!task.archivedAt && cannotArchive ? "执行中的记录不能归档" : ""} onClick={() => void updateMetadata({ archived: !task.archivedAt })}>{task.archivedAt ? <ArchiveRestore size={14} /> : <Archive size={14} />}{task.archivedAt ? "恢复此记录" : "归档此记录"}</button>
+          <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || `删除${recordLabel}：${task.title}`} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除此记录" : "停止并删除此记录" : "删除此记录"}</button>
         </div></>;
       })()}
       {!navigationPending && sessionAreaMenu && sidebarWorkspaceFilter && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
@@ -5283,6 +5346,7 @@ export function App() {
           </div>
           </div>
           <div className="topbar-pages">
+          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && <TaskModeBar sessionId={displayedSession?.id} workflowId={displayedWorkflowId || undefined} engine={displayedSession?.engine || data.workflows.find((item) => item.id === displayedWorkflowId)?.plannerEngine || fallbackEngine} defaultGoal={displayedSession ? [...displayedSession.messages].reverse().find((message) => message.role === "user")?.text || displayedSession.title : ""} enabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)} onConversation={(id) => void continueTaskConversation(id).catch((error) => setNotice(error.message))} onWorkflow={selectWorkflow} onCreateWorkflow={startTaskOrchestration} onError={setNotice} />}
         {workspaceBrowserVisible && <WorkspaceBrowserTabs
           tabs={workspaceBrowser.tabs}
           conversationProviders={browserConversationProviders}
@@ -5367,8 +5431,9 @@ export function App() {
           </section>
         )}
 
-          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeWorkspaceId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
+          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench key={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || `draft:${activeWorkspaceId}`} workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
+            {displayedSession && (() => { const summary = data.sessions.find((session) => session.id === displayedSession.id); const linkedId = linkedWorkflowId({ ...displayedSession, taskContextId: displayedSession.taskContextId || summary?.taskContextId, executionRoot: displayedSession.executionRoot || summary?.executionRoot }, data.workflows, taskWorkflowLink); return linkedId ? <CompactWorkflowProgress workflowId={linkedId} onOpen={() => selectWorkflow(linkedId)} /> : null; })()}
             <SubagentActivityRail key={activeSession?.id || "draft"} messages={activeMessages} providerControls={data.providerControls} onOpenAgent={setAgentDrawerMessageId} />
             <div
               className="messages"
@@ -5467,7 +5532,7 @@ export function App() {
                           if (target?.closest("button, a, input, textarea, summary")) return;
                           setTouchActionMessageId((current) => current === message.id ? "" : message.id);
                         }}
-                        renderMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
+                        renderMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
                         actions={<AssistantMessageActions text={message.text} branching={branching} onBranch={() => void branchFromAssistantMessage(message.id)} onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)} />}
                       ><AttachmentList attachments={message.attachments} onOpen={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} /></AssistantReply>;
                       const editing = message.role === "user" && editingMessageId === message.id;
@@ -5686,7 +5751,7 @@ export function App() {
                 sessionId={activeSession.id}
                 sessionRunning={running}
                 workspaceId={activeFileScopeId}
-                workspaceRoot={workspace?.root || ""}
+                workspaceRoot={activeFileScopeRoot}
                 providerControls={data.providerControls}
                 onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))}
                 onClose={() => setAgentDrawerMessageId("")}
