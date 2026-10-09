@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { measureWorkflowRun } from "./lib/workflow-live-metrics.mjs";
+import { invoiceExportReadme, brokenInvoiceExportSource, invoiceExportOracle } from "./lib/workflow-open-goal-fixture.mjs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -55,8 +58,12 @@ let output = "";
 child.stdout.on("data", (chunk) => { output = `${output}${redactTaskText(String(chunk))}`.slice(-50_000); });
 child.stderr.on("data", (chunk) => { output = `${output}${redactTaskText(String(chunk))}`.slice(-50_000); });
 const deadlineMs = Number(process.env.METACODE_NATIVE_TEST_TIMEOUT_MS || 30 * 60_000);
-const report = { schemaVersion: 1, liveModels: true, startedAt: new Date().toISOString(), runtimes: Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, { version: runtime.version, source: runtime.source }])), models: { codex: testSettings.model, claude: testSettings.claude.model }, tests: [] };
+const report = { schemaVersion: 2, liveModels: true, startedAt: new Date().toISOString(), runtimes: Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, { version: runtime.version, source: runtime.source }])), models: { codex: testSettings.model, claude: testSettings.claude.model }, tests: [] };
 let baseUrl;
+const selectedCases = new Set((process.env.METACODE_NATIVE_TEST_CASES || "").split(",").map((value) => value.trim()).filter(Boolean));
+const includeCase = (name) => !selectedCases.size || selectedCases.has(name);
+const observedWorkflows = new Map();
+const apiObservations = { requestCount: 0, responseBytes: 0, elapsedMs: 0, routes: {} };
 const until = async (condition, timeout, label) => {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -68,12 +75,21 @@ const until = async (condition, timeout, label) => {
   throw new Error(`Timed out: ${label}`);
 };
 const request = async (route, body, method = "POST") => {
+  const started = performance.now();
   const response = await fetch(`${baseUrl}${route}`, { method, headers: { "Content-Type": "application/json", "X-MetaCode-Api-Token": apiToken }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const value = await response.json();
+  const raw = await response.text();
+  const elapsedMs = performance.now() - started;
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const routeKey = `${method} ${route.replace(/workflow_[^/?]+/g, ":workflowId").replace(/context-[^/?]+/g, ":taskContextId")}`;
+  const previous = apiObservations.routes[routeKey] || { count: 0, responseBytes: 0, elapsedMs: 0 };
+  apiObservations.requestCount += 1; apiObservations.responseBytes += bytes; apiObservations.elapsedMs += elapsedMs;
+  apiObservations.routes[routeKey] = { count: previous.count + 1, responseBytes: previous.responseBytes + bytes, elapsedMs: previous.elapsedMs + elapsedMs };
+  const value = JSON.parse(raw);
+  if (value?.id && Array.isArray(value.nodes) && Array.isArray(value.plannerLogs)) observedWorkflows.set(value.id, value);
   assert.ok(response.ok, `${method} ${route}: ${redactTaskText(JSON.stringify(value))}`);
   return value;
 };
-const summarize = (workflow) => ({ id: workflow.id, status: workflow.status, revision: workflow.revision, executionTarget: workflow.executionTarget, executionRoot: workflow.executionRoot, plannerTools: workflow.plannerLogs.filter((log) => log.kind === "tool").length, nodes: workflow.nodes.map((node) => ({ id: node.id, provider: node.provider, status: node.status, attempt: node.attempt, error: redactTaskText(node.error || ""), outcome: node.summary?.outcome, tools: node.logs.filter((log) => log.kind === "tool").length })), finalOutcome: workflow.finalResult?.outcome });
+const summarize = (workflow) => ({ id: workflow.id, status: workflow.status, revision: workflow.revision, executionTarget: workflow.executionTarget, executionRoot: workflow.executionRoot, plannerTools: workflow.plannerLogs.filter((log) => log.kind === "tool").length, nodes: workflow.nodes.map((node) => ({ id: node.id, provider: node.provider, status: node.status, attempt: node.attempt, error: redactTaskText(node.error || ""), outcome: node.summary?.outcome, tools: node.logs.filter((log) => log.kind === "tool").length })), finalOutcome: workflow.finalResult?.outcome, metrics: measureWorkflowRun(workflow) });
 const toolShapes = (workflow) => [...new Map([...workflow.plannerLogs, ...workflow.nodes.flatMap((node) => node.logs)].filter((log) => log.kind === "tool").map((log) => {
   const shape = { title: log.title, detailKeys: log.detail ? Object.keys(log.detail).sort() : [], server: log.detail?.server, tool: log.detail?.tool };
   return [JSON.stringify(shape), shape];
@@ -174,8 +190,15 @@ async function runProject(plannerEngine) {
       ? "只回答：当前已完成什么、还剩什么？这是只读问题，不得修改或重新提交任务图，不得更改业务文件，请使用 workflow_no_change 结束。"
       : "保留 implement 的全部合同字段和已经验证的成果，绝不重跑或修改 implement。只修改 verify 的 objective，在原来的只读测试核查之后，额外读取 test/math.test.mjs 中已有的零值边界测试，核查 sum(0, 5)===5 与 sum(0, 0)===0，并运行原合同已批准的 node --test；不改变 verify 的其他字段，不新增命令、节点或产物，不写任何业务文件，仍然 finalDelivery.required=false。请提交新的候选计划等待我审批。"
   });
-  assert.equal(maintenance.queuedUntilCheckpoint, true, "A running task amendment must wait for a safe checkpoint");
-  assert.equal(maintenance.workflow.pauseMode, "checkpoint");
+  if (question) {
+    assert.equal(maintenance.queriedSnapshot, true, "A progress question must use a snapshot without pausing execution");
+    assert.ok(maintenance.queryAnswer);
+    assert.equal(maintenance.workflow.activePlanVersion, originalPlanVersion);
+    assert.notEqual(maintenance.workflow.pauseMode, "checkpoint", "Read-only progress questions must not interrupt scheduling");
+  } else {
+    assert.equal(maintenance.queuedUntilCheckpoint, true, "A running task amendment must wait for a safe checkpoint");
+    assert.equal(maintenance.workflow.pauseMode, "checkpoint");
+  }
   if (!question) {
     workflow = await until(async () => {
       const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
@@ -207,7 +230,7 @@ async function runProject(plannerEngine) {
   }, deadlineMs, `${plannerEngine} final integration`);
   if (question) {
     assert.equal(workflow.activePlanVersion, originalPlanVersion, "A question must retain the approved graph version");
-    assert.ok(workflow.plannerLogs.some((log) => log.kind === "message" && log.title === "计划未修改"), "The real planner must answer without replacing the graph");
+    assert.ok(workflow.plannerLogs.some((log) => log.kind === "message" && log.title === "任务问答"), "The host must answer from the task snapshot without replacing the graph");
     assert.ok(!workflow.plannerLogs.some((log) => log.kind === "error" && log.title === "规划维护失败"));
   }
   assert.ok(workflow.nodes.every((node) => node.status === "completed" && node.summary?.outcome === "completed"));
@@ -232,7 +255,7 @@ async function runProject(plannerEngine) {
   assert.equal(continued.taskContextId, context.id);
   assert.equal(continued.executionRoot, await fs.realpath(root));
   assert.deepEqual(await projectEntries(root), originalEntries);
-  const result = { plannerEngine, worker, reviewer, projectRoot: root, ...summarize(workflow), toolShapes: toolShapes(workflow), initialPlannerToolRejections, contextId: context.id, hostConversationId: hostConversation.id, conversationId: conversation.id, checkpoint: question ? "question-without-graph-change" : "adjustment-with-implementation-reuse", readOnlyReviewerHostVerification: true, nativeConversationContinuation: true, noExtraProjectDirectory: true, completedAt: new Date().toISOString() };
+  const result = { plannerEngine, worker, reviewer, projectRoot: root, ...summarize(workflow), toolShapes: toolShapes(workflow), initialPlannerToolRejections, contextId: context.id, hostConversationId: hostConversation.id, conversationId: conversation.id, checkpoint: question ? "snapshot-question-without-scheduling-pause" : "adjustment-with-implementation-reuse", readOnlyReviewerHostVerification: true, nativeConversationContinuation: true, noExtraProjectDirectory: true, completedAt: new Date().toISOString() };
   report.tests.push(result);
   await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log(`${plannerEngine}: real planning, reciprocal native workers, final integration and conversation handoff passed`);
@@ -271,9 +294,19 @@ async function runPureReadOnlyProject() {
   assert.ok(node.summary.humanSummary);
   assert.ok(!node.logs.some((log) => ["开始只读系统验收", "开始系统验收"].includes(log.title)), "A pure reading task must not manufacture verification commands");
   assert.ok(!node.logs.some((log) => log.kind === "tool" && /^(?:Bash|command_execution)/.test(log.title)), "A pure reading task must not execute shell commands");
+  const snapshotAnswer = await request(`/api/workflows/${workflow.id}/plan`, {
+    source: "maintenance", mode: "refine", intent: "question", plannerEngine: "claude",
+    note: "根据已保存成果解释这段实现为什么满足相加目标，并说明现有证据未覆盖的边界。只分析快照，不读取任何文件或执行工具。"
+  });
+  assert.equal(snapshotAnswer.queriedSnapshot, true);
+  assert.ok(snapshotAnswer.queryAnswer?.trim(), "The actual restricted Claude CLI must answer a semantic question");
+  assert.equal(snapshotAnswer.workflow.activePlanVersion, workflow.activePlanVersion);
+  assert.equal(snapshotAnswer.workflow.status, "completed");
+  assert.equal(snapshotAnswer.workflow.pendingMaintenance, null);
+  workflow = snapshotAnswer.workflow;
   assert.deepEqual(await projectEntries(root), originalEntries);
   for (const [entry, bytes] of originalBytes) assert.deepEqual(await fs.readFile(path.join(root, entry)), bytes);
-  report.tests.push({ testCase: "claude-pure-readonly-no-commands", plannerEngine: "claude", worker: "claude", projectRoot: root, ...summarize(workflow), toolShapes: toolShapes(workflow), pureReadOnlyNoCommands: true, nonCommandChecksUseNullFields: node.summary.checks.every((check) => check.command === null && check.exitCode === null), noExtraProjectDirectory: true, projectBytesUnchanged: true, completedAt: new Date().toISOString() });
+  report.tests.push({ testCase: "claude-pure-readonly-no-commands", plannerEngine: "claude", worker: "claude", projectRoot: root, ...summarize(workflow), toolShapes: toolShapes(workflow), pureReadOnlyNoCommands: true, restrictedClaudeSnapshotQuestion: true, nonCommandChecksUseNullFields: node.summary.checks.every((check) => check.command === null && check.exitCode === null), noExtraProjectDirectory: true, projectBytesUnchanged: true, completedAt: new Date().toISOString() });
   await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log("claude: pure read-only planning/execution without commands passed");
 }
@@ -338,25 +371,80 @@ async function runPausedExternalChangeProject() {
   await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log("claude: native checkpoint plus external-edit resume gate passed (expected needs_review)");
 }
+async function runOpenGoalProject() {
+  const root = path.join(testRoot, "open-goal-invoice-export");
+  await fs.mkdir(root);
+  await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ name: "invoice-export-fixture", private: true, type: "module" }));
+  await fs.writeFile(path.join(root, "README.md"), invoiceExportReadme);
+  await fs.writeFile(path.join(root, "export.js"), brokenInvoiceExportSource);
+  const initialEntries = await projectEntries(root);
+  const workspace = await request("/api/workspaces", { root });
+  let workflow = await request("/api/workflows", { workspaceId: workspace.id, plannerEngine: "codex", prompt: "这个现有的小项目导出的 CSV 在客户姓名含逗号、双引号或换行时会错列，而且金额为 0 会丢失。请定位原因并修复，保持同步的公开 API 和输入数据不变，补充适当测试并验证。直接改现有项目，不额外创建任务目录，也不安装依赖。按标准验收，不跳过必要检查。" });
+  await request(`/api/workflows/${workflow.id}/plan`, { mode: "initial" });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Open goal planning failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "awaiting_approval" ? current : null;
+  }, deadlineMs, "Open user goal planning");
+  assert.ok(workflow.plan.nodes.length > 0, "Planner must derive an executable plan from a normal user request");
+  const originalPlan = structuredClone(workflow.plan);
+  await request(`/api/workflows/${workflow.id}/approve`, { revision: workflow.revision });
+  workflow = await until(async () => {
+    const current = await request(`/api/workflows/${workflow.id}`, undefined, "GET");
+    if (["failed", "needs_review", "canceled"].includes(current.status)) throw new Error(`Open goal execution failed: ${redactTaskText(JSON.stringify(summarize(current)))}`);
+    return current.status === "completed" ? current : null;
+  }, deadlineMs, "Open user goal execution");
+  // Independent outcome oracle lives outside the business root and is never
+  // supplied to planning/worker models. Assertions do not trust their reports.
+  const oracle = path.join(testRoot, "verify-open-goal.mjs");
+  await fs.writeFile(oracle, invoiceExportOracle);
+  const oracleResult = await promisify(execFile)(process.execPath, [oracle, path.join(root, "export.js")], { cwd: testRoot, timeout: 30_000, encoding: "utf8" });
+  assert.match(oracleResult.stdout, /Independent CSV behavior checks passed/);
+  const entries = await projectEntries(root);
+  assert.ok(!entries.some((entry) => /(?:^|\/)(?:\.metacode|nodes|artifacts|deliverables|workflow-[^/]*)(?:\/|$)/.test(entry)), "Open goal must not create orchestration protocol/task directories");
+  report.tests.push({ testCase: "open-user-goal-invoice-csv", plannerEngine: "codex", projectRoot: root, ...summarize(workflow), goalStyle: "normal-user-request", hiddenBehaviorOraclePassed: true, noPrescribedNodeIdsProvidersOrScopes: true, derivedNodeCount: originalPlan.nodes.length, derivedProviders: originalPlan.nodes.map((node) => node.provider), initialEntries, finalEntries: entries, noExtraProjectDirectory: true, completedAt: new Date().toISOString() });
+  await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  console.log("codex: open user goal independently verified CSV behavior passed");
+}
+
+async function finalizeObservations() {
+  report.apiObservations = apiObservations;
+  report.observedWorkflows = [];
+  for (const [id, workflow] of observedWorkflows) {
+    const eventPath = path.join(dataRoot, "runtime", "plugins", "orchestration", "runs", id, "events.jsonl");
+    const events = (await fs.readFile(eventPath, "utf8").catch(() => "")).split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const metrics = measureWorkflowRun(workflow, events);
+    const test = report.tests.find((item) => item.id === id);
+    if (test) test.metrics = metrics;
+    report.observedWorkflows.push({ id, status: workflow.status, metrics });
+  }
+  report.completedAt = new Date().toISOString();
+  await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+}
+
 try {
   const address = await until(() => output.match(/http:\/\/127\.0\.0\.1:(\d+)/)?.[1], 30_000, "test backend startup");
   baseUrl = `http://127.0.0.1:${address}`;
   await request("/api/bootstrap", undefined, "GET");
   console.log(`Real native test artifacts: ${testRoot}`);
   for (const engine of ["codex", "claude"]) {
+    if (!includeCase(engine)) continue;
     try { await runProject(engine); }
     catch (error) { report.tests.push({ plannerEngine: engine, status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`${engine}: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
   }
-  try { await runPureReadOnlyProject(); }
+  try { if (includeCase("readonly")) await runPureReadOnlyProject(); }
   catch (error) { report.tests.push({ testCase: "claude-pure-readonly-no-commands", plannerEngine: "claude", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`claude-pure-readonly: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
-  try { await runPausedExternalChangeProject(); }
+  try { if (includeCase("resume")) await runPausedExternalChangeProject(); }
   catch (error) { report.tests.push({ testCase: "native-paused-external-output-change", plannerEngine: "claude", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`native-paused-external-change: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
-  report.completedAt = new Date().toISOString();
-  await fs.writeFile(path.join(testRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  try { if (includeCase("open-goal")) await runOpenGoalProject(); }
+  catch (error) { report.tests.push({ testCase: "open-user-goal-invoice-csv", plannerEngine: "codex", status: "failed", error: redactTaskText(error instanceof Error ? error.message : String(error)), failedAt: new Date().toISOString() }); console.error(`open-user-goal: ${redactTaskText(error instanceof Error ? error.message : String(error))}`); }
+  await finalizeObservations();
+  assert.ok(report.tests.length, "No test case selected; use codex,claude,readonly,resume,open-goal");
   assert.equal(report.tests.filter((test) => test.status === "failed").length, 0, `Live-model tests failed; inspect ${path.join(testRoot, "report.json")}`);
 } finally {
   // Test project/results remain inspectable; copied credentials never remain
   // in the retained artifact directory after the test process finishes.
   await stopBackend();
+  await finalizeObservations();
   await checkRetainedSecrets();
 }

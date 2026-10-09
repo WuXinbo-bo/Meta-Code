@@ -95,6 +95,7 @@ import { createOrchestrationServices } from "./plugins/orchestration.js";
 import { registerOrchestrationRoutes } from "./plugins/orchestration/controller.js";
 import { orchestrationLifecycle } from "./plugins/orchestration/lifecycle.js";
 import { createOrchestrationRuntime, type WorkflowPlannerRunner, type WorkflowWorkerRunner } from "./plugins/orchestration/runtime.js";
+import { snapshotQuestionCodexConfig } from "./plugins/orchestration/snapshotQuestionConfig.js";
 import { createOrchestrationScheduler } from "./plugins/orchestration/scheduler.js";
 import { WorkflowTargetService } from "./plugins/orchestration/targets.js";
 import { WorkflowDefinitionStore } from "./plugins/orchestration/definitions.js";
@@ -1690,7 +1691,7 @@ function sessionById(id: string, ownerUserId?: string) {
 
 async function createWorkflowClaudeHandle(options: {
   cwd: string; sessionId?: string | null; mcpConfigPath?: string; permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
-  allowedTools?: string[]; disallowedTools?: string[]; additionalDirectories?: string[]; includeSystemStatus?: boolean;
+  snapshotOnly?: boolean; tools?: string[]; allowedTools?: string[]; disallowedTools?: string[]; additionalDirectories?: string[]; includeSystemStatus?: boolean;
   signal: AbortSignal; ownerId: string; onEvent: (event: NormalizedEngineEvent) => Promise<void> | void;
 }) {
   const runtime = await getClaudeRuntime();
@@ -1699,7 +1700,7 @@ async function createWorkflowClaudeHandle(options: {
   return new ClaudeSessionHandle({
     executable: command.executable, executableArgs: command.args, cwd: options.cwd, sessionId: options.sessionId,
     model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
-    configDir: CLAUDE_HOME, mcpConfigPath: options.mcpConfigPath, permissionMode: options.permissionMode, allowedTools: options.allowedTools,
+    configDir: CLAUDE_HOME, mcpConfigPath: options.mcpConfigPath, permissionMode: options.permissionMode, snapshotOnly: options.snapshotOnly, tools: options.tools, allowedTools: options.allowedTools,
     disallowedTools: options.disallowedTools, additionalDirectories: options.additionalDirectories, includeSystemStatus: options.includeSystemStatus,
     disallowNativeAgents: true, signal: options.signal, ownerId: options.ownerId, onEvent: options.onEvent
   });
@@ -1896,7 +1897,7 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   return env;
 }
 
-function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string) {
+function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string, snapshotOnly = false) {
   const customProviderConfig = settings.baseUrl
     ? {
         model_provider: "modelx",
@@ -1916,14 +1917,15 @@ function buildCodex(settings: Settings, parentSession?: Session, disableNativeAg
       }
     : undefined;
 
-  const workspaceMcp = workspace ? codexMcpConfigForWorkspace(workspace, selectedMcpNames, additionalMcpServers) : codexMcpConfig(additionalMcpServers);
+  const workspaceMcp = snapshotOnly ? { config: {}, env: {}, skipped: [] } : workspace ? codexMcpConfigForWorkspace(workspace, selectedMcpNames, additionalMcpServers) : codexMcpConfig(additionalMcpServers);
   if (workspaceMcp.skipped.length) {
     console.warn(`Codex skipped unsupported SSE MCP servers for workspace ${workspace?.id}: ${workspaceMcp.skipped.join(", ")}`);
   }
   const codexConfig: CodexConfigObject = {
     ...(customProviderConfig || {}),
     ...(disableNativeAgents ? { features: { multi_agent: false } } : {}),
-    ...workspaceMcp.config
+    ...workspaceMcp.config,
+    ...(snapshotOnly ? snapshotQuestionCodexConfig : {})
   };
   return new Codex({
     ...(codexRuntimeDetection.peek()?.available ? { codexPathOverride: codexRuntimeDetection.peek()!.path } : {}),
@@ -5323,6 +5325,10 @@ const orchestrationRuntime = createOrchestrationRuntime({
   workflowStateFiles,
   eventHub,
   onWorkflowCompleted: publishWorkflowResult,
+  readTaskHistory: (workflow) => {
+    const context = taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId);
+    return context ? taskContextStore.exportHistorySnapshot(context.id, workflow.ownerUserId, workflow.executionRoot || workflow.workDirectory) : null;
+  },
   managedSkillManager,
   skillFileIndex,
   autoSkillCandidateBlock,
@@ -5335,6 +5341,15 @@ const orchestrationRuntime = createOrchestrationRuntime({
   assertCodexWorkflowControlPlane,
   threadOptions,
   buildCodex,
+  buildSnapshotQuestionCodex: (cwd) => {
+    const isolatedHome = path.join(cwd, "codex-profile");
+    fs.mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
+    if (!state.settings.apiKey && fs.existsSync(path.join(CODEX_HOME, "auth.json"))) {
+      fs.copyFileSync(path.join(CODEX_HOME, "auth.json"), path.join(isolatedHome, "auth.json"));
+      fs.chmodSync(path.join(isolatedHome, "auth.json"), 0o600);
+    }
+    return buildCodex(state.settings, undefined, true, undefined, [], [], isolatedHome, true);
+  },
   promptWithAgents,
   workspaceAgentConfig,
   runtimeDirectory: pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory,
@@ -5615,6 +5630,7 @@ app.post("/api/app-update/remind", auth.requireRoles("owner", "admin"), async (r
 
 // The host links tasks while the plugin retains its independent state machine.
 registerOrchestrationRoutes(app, {
+  answerWorkflowQuestion: orchestrationRuntime.answerWorkflowQuestion,
   acquireRequest: () => pluginHost.acquire(ORCHESTRATION_PLUGIN_ID),
   workspaceTreeIndex,
   workflowRepository,

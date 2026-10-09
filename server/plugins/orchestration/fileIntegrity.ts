@@ -3,15 +3,19 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { captureWorkspaceSnapshotSync, workflowFileScopeMatcher, type WorkspaceSnapshot } from "./enforcement.js";
 import { resolveWorkflowResultPath, workflowExecutionRoot } from "./executionRoot.js";
+import type { WorkflowReadEvidence } from "./readDependencies.js";
 import type { WorkflowFileIntegrity, WorkflowNodeRecord, WorkflowNodeResult, WorkflowRecord } from "./types.js";
 
-function relevantInputs(snapshot: WorkspaceSnapshot, integrity: Pick<WorkflowFileIntegrity, "excludedInputPaths" | "includedInputPaths" | "executionRoot" | "outputPaths">) {
+function relevantInputs(snapshot: WorkspaceSnapshot, integrity: Pick<WorkflowFileIntegrity, "excludedInputPaths" | "includedInputPaths" | "executionRoot" | "outputPaths" | "inputMode" | "readPaths">) {
   const included = new Set(integrity.includedInputPaths);
   const directories = integrity.includedInputPaths.filter((file) => file.startsWith("directory:")).map((file) => file.slice("directory:".length));
   const excluded = workflowFileScopeMatcher(integrity.excludedInputPaths, integrity.executionRoot);
   const outputs = workflowFileScopeMatcher(integrity.outputPaths, integrity.executionRoot);
-  return new Map([...snapshot].filter(([file]) => !outputs(file) && (!excluded(file)
-    || included.has(file) || directories.some((directory) => file.startsWith(`${directory}/`)))));
+  const observedInputs = integrity.inputMode === "observed" ? integrity.readPaths || [] : null;
+  const readMatches = (file: string) => !observedInputs || observedInputs.some((read) => read.startsWith("directory:")
+    ? read === "directory:." || file === read.slice(10) || file.startsWith(`${read.slice(10)}/`) : read === file);
+  return new Map([...snapshot].filter(([file]) => !outputs(file) && readMatches(file) && (!excluded(file)
+    || included.has(file) || directories.some((directory) => directory === "." || file.startsWith(`${directory}/`)))));
 }
 
 function outputSignatures(workflow: WorkflowRecord, outputPaths: string[], snapshot: WorkspaceSnapshot) {
@@ -48,7 +52,7 @@ function outputSignatures(workflow: WorkflowRecord, outputPaths: string[], snaps
   return signatures;
 }
 
-export function buildWorkflowFileIntegrity(workflow: WorkflowRecord, node: WorkflowNodeRecord, result: WorkflowNodeResult, before: WorkspaceSnapshot, after: WorkspaceSnapshot, checkpointDirectory: string): WorkflowFileIntegrity {
+export function buildWorkflowFileIntegrity(workflow: WorkflowRecord, node: WorkflowNodeRecord, result: WorkflowNodeResult, before: WorkspaceSnapshot, after: WorkspaceSnapshot, checkpointDirectory: string, readEvidence?: WorkflowReadEvidence): WorkflowFileIntegrity {
   const executionRoot = workflowExecutionRoot(workflow);
   const outputPaths = [...new Set([...result.outputs.flatMap((output) => output.path ? [output.path] : []), ...result.changedFiles])]
     .flatMap((file) => { try { return [resolveWorkflowResultPath(workflow, file, false).relative]; } catch { return []; } });
@@ -69,11 +73,17 @@ export function buildWorkflowFileIntegrity(workflow: WorkflowRecord, node: Workf
       return [fs.existsSync(resolved.absolute) && fs.statSync(resolved.absolute).isDirectory() ? `directory:${resolved.relative}` : resolved.relative];
     } catch { return []; }
   });
-  const includedInputPaths = [...new Set([...priorInputFiles, ...explicitInputs])];
+  // Only host-observed read-only runs can narrow dependency invalidation. Unknown
+  // tools, resumed contexts, commands and all current native adapters fall back.
+  const queriesContainSymlinks = readEvidence?.paths.some((read) => read.startsWith("directory:") && [...before].some(([file, signature]) => signature.startsWith("symlink:") && (read === "directory:." || file.startsWith(`${read.slice(10)}/`))));
+  const observed = Boolean(!queriesContainSymlinks && readEvidence?.source === "host-native-tool-events" && readEvidence.schemaVersion === 1 && readEvidence.complete && readEvidence.capabilityId && !readEvidence.fallbackReasons.length && node.workspaceAccess === "read" && !node.verificationCommands.length && !node.skills.length && !node.mcpServers.length);
+  if (queriesContainSymlinks && readEvidence) readEvidence = { ...readEvidence, complete: false, fallbackReasons: [...new Set([...readEvidence.fallbackReasons, "directory-query-may-follow-symbolic-links"])] };
+  const readPaths = observed ? [...new Set([...readEvidence!.paths, ...explicitInputs])] : undefined;
+  const includedInputPaths = [...new Set([...(observed ? readPaths! : priorInputFiles), ...explicitInputs])];
   // Files assigned to other approved producers may legitimately change later.
   // Explicit upstream inputs remain checked even inside those write scopes.
   const excludedInputPaths = workflow.nodes.filter((item) => item.workspaceAccess === "write").flatMap((item) => item.writeScope);
-  const integrity: WorkflowFileIntegrity = { schemaVersion: 1, verifiedAt: new Date().toISOString(), executionRoot, inputSnapshotPath: path.join(checkpointDirectory, "input-snapshot.json"), excludedInputPaths, includedInputPaths, outputPaths, outputSignatures: outputSignatures(workflow, outputPaths, after) };
+  const integrity: WorkflowFileIntegrity = { schemaVersion: 1, inputMode: observed ? "observed" : "conservative", ...(readPaths ? { readPaths } : {}), ...(readEvidence ? { readEvidence } : {}), verifiedAt: new Date().toISOString(), executionRoot, inputSnapshotPath: path.join(checkpointDirectory, "input-snapshot.json"), excludedInputPaths, includedInputPaths, outputPaths, outputSignatures: outputSignatures(workflow, outputPaths, after) };
   fs.writeFileSync(integrity.inputSnapshotPath, JSON.stringify([...relevantInputs(before, integrity)]), { encoding: "utf8", mode: 0o600 });
   return integrity;
 }
@@ -83,6 +93,7 @@ export function workflowResultFileIntegrityIssue(workflow: WorkflowRecord, resul
   const integrity = result.fileIntegrity;
   if (!integrity) return workflow.executionTarget === "workspace" || workflow.executionTarget === "worktree" ? "历史结果缺少业务文件版本记录，需要重新执行" : null;
   try {
+    if (integrity.inputMode === "observed" && (!integrity.readEvidence?.complete || integrity.readEvidence.source !== "host-native-tool-events" || !integrity.readEvidence.capabilityId || integrity.readEvidence.fallbackReasons.length || !Array.isArray(integrity.readPaths))) return "节点读取依赖证据不完整，需要重新执行";
     const root = workflowExecutionRoot(workflow);
     if (path.resolve(integrity.executionRoot) !== root) return "业务执行目录已变化";
     const snapshot = currentSnapshot || captureWorkspaceSnapshotSync(root);

@@ -1,5 +1,5 @@
-.task-mode-bar { position: relative; display: flex; align-items: center; flex: 0 0 auto; gap: 3px; border-right: 1px solid var(--mc-line); padding-right: 8px; }
-.task-mode-bar button, .task-mode-bar select { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 29px; border: 0; background: transparent; color: var(--mc-text-secondary); font: inherit; font-size: 12px; border-radius: 5px; padding: 0 7px; white-space: nowrap; }
+.task-mode-bar { position: relative; z-index: 2; display: flex; align-items: center; flex: 1 1 auto; width: 100%; min-width: 0; max-width: 228px; gap: 3px; overflow: visible; border-right: 1px solid var(--mc-line); padding: 0 8px 0 2px; box-sizing: border-box; }
+.task-mode-bar button, .task-mode-bar select { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 5px; min-width: 0; height: 29px; border: 0; background: transparent; color: var(--mc-text-secondary); font: inherit; font-size: 12px; border-radius: 6px; padding: 0 7px; white-space: nowrap; }
 .task-mode-bar button.active { color: var(--mc-text); background: var(--mc-hover); }
 .task-mode-bar button:disabled { opacity: .45; }
 .task-mode-bar .task-mode-new { width: 27px; padding: 0; }
@@ -10,14 +10,53 @@
 .task-workflow-progress small { font-size: 11px; color: var(--mc-text-secondary); margin-top: 3px; }
 @media (max-width: 600px) { .task-mode-bar { gap: 0; padding-right: 3px; } .task-mode-bar button { padding: 0 5px; } }
 
-.topbar-pages:has(.task-mode-bar) { display: flex; align-items: center; gap: 8px; }
-.topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs { min-width: 0; flex: 1; }
+.topbar-pages:has(.task-mode-bar) { display: grid; grid-template-columns: minmax(164px, 228px) minmax(0, 1fr); min-width: 0; align-items: center; gap: 8px; overflow: hidden; }
+.topbar-pages:has(.task-mode-bar) > .task-mode-bar { width: 100%; }
+.topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs { min-width: 0; width: 100%; flex: 1 1 0; overflow: hidden; }
+.topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs .workspace-browser-tabs__track { min-width: 0; overflow-x: auto; }
 .task-mode-create { position: absolute; top: 36px; left: 0; z-index: 70; width: min(400px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--mc-line); border-radius: 10px; background: var(--mc-overlay); color: var(--mc-text); box-shadow: var(--mc-shadow-menu); }
 .task-mode-create header, .task-mode-create footer { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .task-mode-create strong { font-size: 12px; }
 .task-mode-create textarea { width: 100%; margin: 9px 0; padding: 8px; border: 1px solid var(--mc-line); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); font: inherit; font-size: 12px; resize: vertical; }
 .task-mode-create small { max-width: 240px; color: var(--mc-text-tertiary); font-size: 11px; }
 .task-workflow-card { flex: 0 0 auto; width: min(100% - 32px, 700px); margin: 10px auto 0; }
+.task-transition-card,
+.task-handoff-card { overflow: hidden; border: 1px solid var(--mc-line); border-radius: 10px; background: color-mix(in srgb, var(--mc-surface) 94%, var(--mc-brand) 6%); box-shadow: 0 3px 12px rgb(23 24 23 / 5%); }
+.task-transition-header,
+.task-handoff-card > header { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 8px 12px 0; }
+.task-transition-kicker { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--mc-text-secondary); font-size: 11px; }
+.task-transition-kicker svg { flex: 0 0 auto; color: var(--mc-brand); }
+.task-transition-kicker span { color: var(--mc-text); font-weight: 600; }
+.task-transition-kicker em { overflow: hidden; color: var(--mc-text-tertiary); font-size: 11px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.task-transition-collapse { display: grid; flex: 0 0 24px; width: 24px; height: 24px; margin-left: auto; place-items: center; border: 0; border-radius: 5px; color: var(--mc-text-tertiary); background: transparent; cursor: pointer; }
+.task-transition-collapse:hover { color: var(--mc-text); background: var(--mc-hover); }
+.task-transition-card:not(.is-collapsed) .task-transition-collapse svg,
+.task-handoff-card:not(.is-collapsed) .task-transition-collapse svg { transform: rotate(180deg); }
+.task-transition-summary,
+.task-handoff-summary { display: grid; gap: 3px; padding: 8px 12px 7px; }
+.task-transition-summary strong,
+.task-handoff-summary strong { overflow: hidden; color: var(--mc-text); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.task-transition-summary span,
+.task-handoff-summary span { color: var(--mc-text-secondary); font-size: 11px; line-height: 1.45; }
+.task-transition-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 7px; }
+.task-transition-meta span { padding: 3px 6px; border-radius: 5px; color: var(--mc-text-tertiary); background: var(--mc-surface-subtle); font-size: 11px; }
+.task-transition-meta strong { margin-right: 3px; color: var(--mc-text-secondary); font-variant-numeric: tabular-nums; font-weight: 600; }
+.task-transition-unresolved { margin: 0 12px 7px; padding: 5px 7px; border-left: 2px solid var(--mc-warning); color: var(--mc-text-secondary); background: color-mix(in srgb, var(--mc-warning) 7%, transparent); font-size: 11px; line-height: 1.45; }
+.task-transition-unresolved span { margin-right: 5px; color: var(--mc-text-tertiary); }
+.task-transition-card .task-workflow-progress { width: calc(100% - 24px); margin: 0 12px; padding: 8px 10px; border-radius: 7px; background: var(--mc-surface); }
+.task-transition-card .task-workflow-actions,
+.task-handoff-card > footer { flex-wrap: wrap; padding: 7px 12px 10px; border-top: 1px solid color-mix(in srgb, var(--mc-line) 70%, transparent); }
+.task-transition-card.is-collapsed .task-transition-header { padding-bottom: 8px; }
+.task-handoff-card { width: min(100% - 32px, 700px); margin: 10px auto; }
+.task-handoff-details { padding: 0 12px 8px; }
+.task-handoff-details dl { display: grid; gap: 5px; margin: 0 0 8px; }
+.task-handoff-details dl > div { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 7px; font-size: 11px; line-height: 1.45; }
+.task-handoff-details dt { color: var(--mc-text-tertiary); }
+.task-handoff-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--mc-text-secondary); }
+.task-handoff-details pre { max-height: 180px; margin: 0; padding: 7px; overflow: auto; border-radius: 6px; color: var(--mc-text-tertiary); background: var(--mc-surface-subtle); font: inherit; font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
+.task-handoff-card > footer { display: flex; gap: 5px; }
+.task-handoff-card > footer button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 4px 6px; border-radius: 5px; color: var(--mc-text-secondary); background: transparent; font-size: 11px; }
+.task-handoff-card > footer button:hover { color: var(--mc-text); background: var(--mc-hover); }
 .task-workflow-actions { display: flex; gap: 5px; align-items: center; padding-top: 5px; }
 .task-workflow-actions button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 4px 6px; border-radius: 5px; color: var(--mc-text-secondary); background: transparent; font-size: 11px; }
 .task-workflow-actions button.active, .task-workflow-actions button:hover { background: var(--mc-hover); color: var(--mc-text); }
@@ -28,4 +67,9 @@
 .task-workflow-input button:disabled { opacity: .4; }
 .task-workflow-feedback, .task-workflow-answer { margin: 6px 0; color: var(--mc-text-secondary); font-size: 11px; line-height: 1.5; }
 .task-workflow-answer p { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
-@media (max-width: 760px) { .topbar-pages:has(.task-mode-bar) { gap: 3px; max-width: 50%; } .topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs { display: none; } .task-mode-create { left: auto; right: 0; } }
+@media (max-width: 760px) {
+  .topbar-pages:has(.task-mode-bar) { display: flex; flex: 0 1 auto; width: auto; max-width: min(52vw, 204px); gap: 3px; }
+  .topbar-pages:has(.task-mode-bar) > .task-mode-bar { max-width: 100%; border-right: 0; padding-right: 2px; }
+  .topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs { display: none; }
+  .task-mode-create { left: auto; right: 0; }
+}

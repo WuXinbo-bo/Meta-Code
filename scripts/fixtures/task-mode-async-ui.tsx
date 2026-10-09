@@ -29,7 +29,10 @@ window.fetch = async (input, options = {}) => {
     const id = source.split("-").at(-1) || "a";
     return response({ id: `context-${id}`, title: `Task ${id.toUpperCase()}`, executions: [{ kind: "session", id: `session-${id}` }, { kind: "workflow", id: `async-${id}` }] });
   }
-  if (path.endsWith("/maintenance")) return response({ messages: [] });
+  if (path.endsWith("/maintenance")) {
+    if (mode === "compact-answer") return new Promise<Response>((resolve) => pending.set(path, (value, status) => resolve(response(value, status))));
+    return response({ messages: [] });
+  }
   if (path.startsWith("/api/workflows/")) return response(workflow(path.split("-").at(-1) || "a"));
   return response({ error: "Unknown test request" }, 404);
 };
@@ -48,7 +51,7 @@ function Fixture() {
   return <main style={{ width: "min(640px, calc(100% - 32px))", margin: "24px auto" }}>
     <div style={{ display: "flex", gap: 8, marginBottom: 20 }}><button onClick={() => setTask("a")}>Select A</button><button onClick={() => setTask("b")}>Select B</button><button onClick={() => setEngine((value) => value === "codex" ? "claude" : "codex")}>Change model</button><button onClick={() => setVisible(false)}>Hide panel</button></div>
     <output aria-label="Selected task">{task}</output>
-    {visible && (mode === "definition" ? <WorkflowDefinitionPicker workspaceId={`workspace-${task}`} target="workspace" onCreated={(id) => { conversations.push(id); setTask(id.split("-").at(-1) || "a"); }} onNotice={setNotice} /> : mode === "compact" ? <CompactWorkflowProgress workflowId={`async-${task}`} onOpen={() => setNotice(`Opened ${task}`)} /> : <TaskModeBar sessionId={mode === "create" ? `session-${task}` : undefined} workflowId={mode === "bar" ? `async-${task}` : undefined} engine={engine} enabled defaultGoal={`Goal ${task}`} onConversation={(id) => { conversations.push(id); setTask(id.split("-").at(-1) || "a"); }} onWorkflow={(id) => setTask(id.split("-").at(-1) || "a")} onCreateWorkflow={async (taskContextId, goal) => {
+    {visible && (mode === "definition" ? <WorkflowDefinitionPicker workspaceId={`workspace-${task}`} target="workspace" onCreated={(id) => { conversations.push(id); setTask(id.split("-").at(-1) || "a"); }} onNotice={setNotice} /> : mode.startsWith("compact") ? <CompactWorkflowProgress workflowId={`async-${task}`} onOpen={() => setNotice(`Opened ${task}`)} /> : <TaskModeBar sessionId={mode === "create" ? `session-${task}` : undefined} workflowId={mode === "bar" ? `async-${task}` : undefined} engine={engine} enabled defaultGoal={`Goal ${task}`} onConversation={(id) => { conversations.push(id); setTask(id.split("-").at(-1) || "a"); }} onWorkflow={(id) => setTask(id.split("-").at(-1) || "a")} onCreateWorkflow={async (taskContextId, goal) => {
       const result = await fetch(`/api/task-contexts/${taskContextId}/create`, { method: "POST", body: JSON.stringify({ goal }) });
       if (!result.ok) throw new Error((await result.json()).error);
     }} onError={(message) => { errors.push(message); setNotice(message); }} />)}

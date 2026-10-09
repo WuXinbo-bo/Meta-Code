@@ -19,6 +19,10 @@ type Options = {
   disallowNativeAgents?: boolean;
   disallowedTools?: string[];
   allowedTools?: string[];
+  /** Explicit [] removes all built-in tools; allowedTools is only a permission list. */
+  tools?: string[];
+  /** Safe, tool-free snapshot answer: disable hooks, project settings and skills. */
+  snapshotOnly?: boolean;
   additionalDirectories?: string[];
   includeSystemStatus?: boolean;
   permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
@@ -57,7 +61,7 @@ export const CLAUDE_NATIVE_AGENT_TOOLS = ["Task", "Agent", "Workflow"] as const;
 export const CLAUDE_MAIN_DISALLOWED_TOOLS = CLAUDE_NATIVE_AGENT_TOOLS;
 export const CLAUDE_PLANNER_DISALLOWED_TOOLS = [...CLAUDE_NATIVE_AGENT_TOOLS, "Write", "Edit", "NotebookEdit", "Bash"] as const;
 
-export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "disallowNativeAgents" | "disallowedTools" | "allowedTools" | "additionalDirectories">, sessionId: string) {
+export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "disallowNativeAgents" | "disallowedTools" | "allowedTools" | "additionalDirectories" | "tools" | "snapshotOnly">, sessionId: string) {
   const args = [
     ...(options.executableArgs || []),
     "-p",
@@ -76,6 +80,8 @@ export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" |
   if (disallowedTools.length) args.push("--disallowedTools", ...disallowedTools);
   const allowedTools = [...new Set(options.allowedTools || [])];
   if (allowedTools.length) args.push("--allowedTools", ...allowedTools);
+  if (options.tools !== undefined) args.push("--tools", options.tools.join(","));
+  if (options.snapshotOnly) args.push("--safe-mode", "--disable-slash-commands", "--setting-sources", "", "--strict-mcp-config");
   for (const directory of [...new Set(options.additionalDirectories || [])]) args.push("--add-dir", directory);
   if (options.model) args.push("--model", options.model);
   if (options.effort) args.push("--effort", options.effort);

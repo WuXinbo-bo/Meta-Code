@@ -8,7 +8,7 @@ const browser = await chromium.launch({ headless: true, executablePath: process.
 const page = await browser.newPage({ viewport: { width: 1024, height: 768 }, reducedMotion: "reduce" });
 const pageErrors = [];
 page.on("pageerror", (error) => pageErrors.push(error.message));
-const open = async (mode) => page.goto(`${baseUrl}/scripts/fixtures/task-mode-async-ui.html?mode=${mode}`, { waitUntil: "networkidle" });
+const open = async (mode) => page.goto(`${baseUrl}/scripts/fixtures/task-mode-async-ui.html?mode=${mode}`, { waitUntil: mode === "compact-answer" ? "domcontentloaded" : "networkidle" });
 const waitRequest = async (path) => page.waitForFunction((path) => window.__taskAsync.calls.some((call) => call.path === path && call.body), path);
 const resolve = async (path, body, status = 200) => page.evaluate(({ path, body, status }) => window.__taskAsync.resolve(path, body, status), { path, body, status });
 const selected = () => page.getByLabel("Selected task").textContent();
@@ -41,6 +41,25 @@ try {
     assert.equal(await page.locator(".task-workflow-feedback").count(), 0, "An old success or failure must not create feedback in the new task");
     assert.ok(await page.getByRole("button", { name: "发送编排请求" }).isEnabled());
   }
+
+  await open("compact-answer");
+  await page.waitForFunction(() => window.__taskAsync.calls.some((call) => call.path === "/api/workflows/async-a/maintenance"));
+  await page.getByRole("button", { name: "询问编排" }).click();
+  await page.getByLabel("编排问题").fill("What has completed?");
+  await page.getByRole("button", { name: "发送编排请求" }).click();
+  await waitRequest("/api/workflows/async-a/plan");
+  const queryAnswer = "Latest snapshot: the CSV fix has completed and tests are running.";
+  const freshWorkflow = await page.evaluate(() => window.__taskAsync.workflow("a"));
+  await resolve("/api/workflows/async-a/plan", {
+    workflow: { ...freshWorkflow, revision: 2, plannerLogs: [{ title: "任务问答", text: queryAnswer, createdAt: "2026-10-09T01:00:02.000Z" }] },
+    queriedSnapshot: true, queryAnswer
+  });
+  await page.getByText("最近回复", { exact: true }).click();
+  await page.getByText(queryAnswer, { exact: true }).waitFor();
+  await resolve("/api/workflows/async-a/maintenance", { messages: [{ role: "assistant", text: "Obsolete reply: no work has started.", createdAt: "2026-10-09T01:00:01.000Z" }] });
+  await page.waitForTimeout(80);
+  assert.equal(await page.locator(".task-workflow-answer p").textContent(), queryAnswer, "An older in-flight maintenance poll must not replace the latest snapshot answer in the same task");
+  assert.equal(await page.getByText("Obsolete reply: no work has started.", { exact: true }).count(), 0);
 
   await open("create");
   await page.getByRole("button", { name: "追加一轮编排" }).click();
@@ -84,5 +103,5 @@ try {
     }
   }
   assert.deepEqual(pageErrors, []);
-  console.log("task mode UI: late conversation/maintenance/creation/definition responses, drafts, busy ownership, workspace and unmount navigation boundaries passed");
+  console.log("task mode UI: late conversation/maintenance/creation/definition responses, latest snapshot answer ownership, drafts, busy ownership, workspace and unmount navigation boundaries passed");
 } finally { await browser.close(); }

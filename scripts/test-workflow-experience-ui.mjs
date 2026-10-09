@@ -51,14 +51,16 @@ try {
   assert.equal(await page.getByRole("button", { name: "询问", exact: true }).evaluate((element) => getComputedStyle(element).flexDirection), "row", "Maintenance mode buttons must retain inline icon and text");
   await page.getByPlaceholder("询问任务进度、结果或下一步").fill("目前哪些结果可继续复用？");
   await page.getByTitle("发送问题", { exact: true }).click();
-  await page.getByRole("status").filter({ hasText: "等待当前节点完成" }).waitFor();
+  await page.getByRole("status").filter({ hasText: "已回复，任务继续运行" }).waitFor();
   const question = await call("/api/workflows/visual-running/plan");
   assert.equal(question.body.intent, "question");
   assert.equal(question.body.source, "maintenance");
   assert.equal(question.body.plannerEngine, "codex");
-  await page.locator(".workflow-checkpoint-feedback").filter({ hasText: "等待运行节点完成后回答问题" }).waitFor();
-  assert.ok(await page.getByTitle("发送问题", { exact: true }).isDisabled(), "Checkpoint requests must prevent duplicate submissions");
-  await screenshot("running-question-checkpoint");
+  assert.equal(await page.locator(".workflow-checkpoint-feedback").count(), 0, "Questions must not enqueue a scheduling checkpoint");
+  const afterQuestion = await page.evaluate(() => ({ status: window.__workflowVisual.workflow.status, pending: window.__workflowVisual.workflow.pendingMaintenance, pause: window.__workflowVisual.workflow.pauseMode, version: window.__workflowVisual.workflow.activePlanVersion }));
+  assert.deepEqual(afterQuestion, { status: "running", pending: null, pause: null, version: 1 });
+  await page.getByLabel("最近编排回复").filter({ hasText: "不会暂停节点" }).waitFor();
+  await screenshot("running-snapshot-question");
 
   await open("running");
   await page.getByRole("button", { name: "调整", exact: true }).click();
@@ -70,16 +72,44 @@ try {
   assert.equal(adjustment.body.intent, "adjust");
   assert.equal(adjustment.body.plannerEngine, "claude");
   await screenshot("running-adjust-checkpoint");
+  const pendingBeforeQuestion = await page.evaluate(() => JSON.stringify(window.__workflowVisual.workflow.pendingMaintenance));
+  await page.getByRole("button", { name: "询问", exact: true }).click();
+  await page.getByPlaceholder("询问任务进度、结果或下一步").fill("等待调整期间现在做完哪些了？");
+  assert.ok(await page.getByTitle("发送问题", { exact: true }).isEnabled(), "Pending adjustment must not disable snapshot questions");
+  await page.getByTitle("发送问题", { exact: true }).click();
+  await page.getByRole("status").filter({ hasText: "已回复，任务继续运行" }).waitFor();
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__workflowVisual.workflow.pendingMaintenance)), pendingBeforeQuestion, "Questions cannot overwrite pending adjustments");
+  assert.equal((await call("/api/workflows/visual-running/plan")).body.intent, "question");
+  await screenshot("question-during-pending-adjustment");
 
   await open("candidate");
   await page.locator(".workflow-impact-summary").waitFor();
   await page.locator(".workflow-impact-summary summary").click();
   assert.match(await page.locator(".workflow-impact-summary").innerText(), /项目结构研究/);
   assert.match(await page.locator(".workflow-review-write-range").innerText(), /src\/payments/);
+  assert.equal(await page.getByLabel("验收方式", { exact: true }).inputValue(), "standard");
   await screenshot("candidate-impact");
+  await page.getByLabel("验收方式", { exact: true }).selectOption("strict");
   await page.getByRole("button", { name: "批准执行", exact: true }).click();
   await page.getByRole("status").filter({ hasText: "计划已批准" }).waitFor();
   assert.equal((await call("/api/workflows/visual-candidate/approve")).body.revision, 8);
+  assert.equal((await call("/api/workflows/visual-candidate/approve")).body.validationMode, "strict");
+  assert.equal(await page.evaluate(() => window.__workflowVisual.workflow.plan.validationMode), "strict");
+  for (const mode of ["standard", "deterministic"]) {
+    await open("candidate");
+    await page.getByLabel("验收方式", { exact: true }).selectOption(mode);
+    if (mode === "deterministic") await page.getByText("仅当全部标准都有真实命令证据且没有待判断语义时使用机器验收；其余情况自动保留模型审查。", { exact: true }).waitFor();
+    await screenshot(`candidate-validation-${mode}`);
+    await page.getByRole("button", { name: "批准执行", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "计划已批准" }).waitFor();
+    assert.equal((await call("/api/workflows/visual-candidate/approve")).body.validationMode, mode);
+    assert.equal(await page.evaluate(() => window.__workflowVisual.workflow.plan.validationMode), mode);
+    await page.getByRole("button", { name: "对话", exact: true }).click();
+    await page.locator(".task-workflow-progress").waitFor();
+    await page.getByRole("button", { name: "编排", exact: true }).click();
+    await page.locator(".workflow-workbench").waitFor();
+    assert.equal(await page.evaluate(() => window.__workflowVisual.workflow.plan.validationMode), mode, "Changing task views must not reset the approved validation strategy");
+  }
 
   await open("running");
   await page.getByTitle("保存工作流程", { exact: true }).click();
@@ -153,7 +183,7 @@ try {
   await page.getByRole("button", { name: "询问编排", exact: true }).click();
   await page.getByLabel("编排问题", { exact: true }).fill("哪些研究结果可以继续复用？");
   await page.getByRole("button", { name: "发送编排请求", exact: true }).click();
-  await page.getByRole("status").filter({ hasText: "已收到" }).waitFor();
+  await page.getByRole("status").filter({ hasText: "已根据当前快照回复" }).waitFor();
   const compactQuestion = await call("/api/workflows/visual-conversation/plan");
   assert.equal(compactQuestion.body.intent, "question");
   assert.equal(compactQuestion.body.source, "maintenance");
@@ -165,6 +195,16 @@ try {
   const compactAdjustment = await call("/api/workflows/visual-conversation/plan");
   assert.equal(compactAdjustment.body.intent, "adjust");
   assert.equal(compactAdjustment.body.mode, "refine");
+  const compactPending = await page.evaluate(() => JSON.stringify(window.__workflowVisual.workflow.pendingMaintenance));
+  await page.getByRole("button", { name: "询问编排", exact: true }).click();
+  await page.getByLabel("编排问题", { exact: true }).fill("调整排队时告诉我已有结果");
+  assert.ok(await page.getByRole("button", { name: "发送编排请求", exact: true }).isEnabled());
+  await page.getByRole("button", { name: "发送编排请求", exact: true }).click();
+  await page.getByRole("status").filter({ hasText: "已根据当前快照回复" }).waitFor();
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__workflowVisual.workflow.pendingMaintenance)), compactPending);
+  await page.getByText("最近回复", { exact: true }).click();
+  await page.getByText(/截至快照版本.*问题不会暂停节点/).waitFor();
+  await screenshot("conversation-question-during-adjustment");
   await page.getByRole("button", { name: "追加一轮编排", exact: true }).click();
   await page.getByLabel("编排目标", { exact: true }).fill("继续补充支付接口的回归场景");
   await screenshot("conversation-append-form");
@@ -200,7 +240,7 @@ try {
   await page.getByText("方案可整合", { exact: true }).waitFor();
   await screenshot("dark-worktree");
   assert.deepEqual(errors, [], "Visual scenarios must not throw client exceptions");
-  const report = { screenshots, assertions: "execution targets, checkpoint request intent, revisioned approval, parameterized workflow save/instantiate, worktree integration confirmation, unified task handoff, desktop and narrow layout", clientErrors: errors };
+  const report = { screenshots, assertions: "execution targets, non-blocking snapshot questions including queued adjustments, revisioned validation strategy approval, parameterized workflow save/instantiate, worktree integration confirmation, unified task handoff, desktop and narrow layout", clientErrors: errors };
   await fs.writeFile(path.join(output, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
 } finally { await browser.close(); }

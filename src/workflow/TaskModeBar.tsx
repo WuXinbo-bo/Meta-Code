@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileCheck2, LoaderCircle, MessageSquare, Plus, Route, Send, X } from "lucide-react";
+import { ChevronDown, FileCheck2, LoaderCircle, MessageSquare, Plus, Route, Send, X } from "lucide-react";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import { coalescedWorkflowRefresh } from "./eventRefresh";
 import "./TaskModeBar.css";
@@ -77,13 +77,20 @@ export function TaskModeBar({ sessionId, workflowId, engine, enabled, defaultGoa
   </nav>;
 }
 
-export function CompactWorkflowProgress({ workflowId, onOpen }: { workflowId: string; onOpen: () => void }) {
-  const [workflow, setWorkflow] = useState<{ id: string; revision?: number; title: string; status: string; plan?: unknown; plannerEngine: string; nodes: Array<{ status: string }>; pendingMaintenance?: unknown; finalResult?: { humanSummary: string } | null } | null>(null);
+export function CompactWorkflowProgress({ workflowId, onOpen, onContinueConversation }: { workflowId: string; onOpen: () => void; onContinueConversation?: () => void }) {
+  const [workflow, setWorkflow] = useState<{ id: string; revision?: number; activePlanVersion?: number; title: string; status: string; plan?: unknown; plannerEngine: string; nodes: Array<{ status: string }>; pendingMaintenance?: unknown; finalResult?: { humanSummary: string; unresolved?: string[]; outputs?: Array<{ path?: string | null }> } | null; plannerLogs?: Array<{ title: string; text: string; createdAt: string }> } | null>(null);
   const [intent, setIntent] = useState<"question" | "adjust" | null>(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [answer, setAnswer] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
+  const answerUpdatedAt = useRef("");
+  const acceptAnswer = (text: string, createdAt = "") => {
+    if (createdAt < answerUpdatedAt.current) return;
+    answerUpdatedAt.current = createdAt;
+    setAnswer(text);
+  };
   const generation = useRef(0);
   const currentWorkflowId = useRef(workflowId);
   currentWorkflowId.current = workflowId;
@@ -95,13 +102,20 @@ export function CompactWorkflowProgress({ workflowId, onOpen }: { workflowId: st
     let disposed = false;
     const current = ++generation.current;
     const controller = new AbortController();
-    setWorkflow(null); setFeedback(""); setAnswer(""); setIntent(null); setNote(""); setBusy(false);
+    answerUpdatedAt.current = "";
+    setWorkflow(null); setFeedback(""); setAnswer(""); setIntent(null); setNote(""); setBusy(false); setCollapsed(false);
     const load = async () => {
       try {
         const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`, { signal: controller.signal });
-        if (response.ok) { const value = await response.json(); if (!disposed && generation.current === current) acceptWorkflow(value); }
+        let latestQuery: { text: string; createdAt: string } | undefined;
+        if (response.ok) { const value = await response.json(); latestQuery = value.plannerLogs?.filter((log: { title: string }) => log.title === "任务问答").at(-1); if (!disposed && generation.current === current) { acceptWorkflow(value); if (latestQuery) acceptAnswer(latestQuery.text, latestQuery.createdAt); } }
         const maintenance = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/maintenance`, { signal: controller.signal });
-        if (maintenance.ok) { const value: unknown = await maintenance.json(); const messages = value && typeof value === "object" && Array.isArray((value as { messages?: unknown }).messages) ? (value as { messages: Array<{ role?: string; text?: unknown }> }).messages : []; const latest = messages.filter((message) => message.role === "assistant").at(-1); if (!disposed && generation.current === current && currentWorkflowId.current === workflowId) setAnswer(typeof latest?.text === "string" ? latest.text : ""); }
+        if (maintenance.ok) {
+          const value: unknown = await maintenance.json();
+          const messages = value && typeof value === "object" && Array.isArray((value as { messages?: unknown }).messages) ? (value as { messages: Array<{ role?: string; text?: unknown; createdAt?: string }> }).messages : [];
+          const latest = messages.filter((message) => message.role === "assistant").at(-1);
+          if (!disposed && generation.current === current && currentWorkflowId.current === workflowId && typeof latest?.text === "string") acceptAnswer(latest.text, latest.createdAt);
+        }
       } catch { /* Reconcile after reconnect. */ }
     };
     void load();
@@ -126,19 +140,58 @@ export function CompactWorkflowProgress({ workflowId, onOpen }: { workflowId: st
       if (!isCurrent()) return;
       if (!response.ok) throw new Error(value.error || "请求未完成");
       if (value.workflow) acceptWorkflow(value.workflow);
-      setFeedback(value.queuedUntilCheckpoint ? "已收到，等待当前节点完成后处理" : "正在处理；调整计划仍需批准后执行");
+      if (value.queriedSnapshot && typeof value.queryAnswer === "string") {
+        const queryLog = value.workflow?.plannerLogs?.filter((log: { title: string }) => log.title === "任务问答").at(-1);
+        acceptAnswer(value.queryAnswer, queryLog?.createdAt || value.capturedAt || new Date().toISOString());
+      }
+      setFeedback(value.queriedSnapshot ? "已根据当前快照回复，执行继续进行" : value.queuedUntilCheckpoint ? "已收到，等待当前节点完成后处理" : "正在处理；调整计划仍需批准后执行");
       setNote("");
     } catch (error) { if (isCurrent()) setFeedback(error instanceof Error ? error.message : String(error)); }
     finally { if (isCurrent()) setBusy(false); }
   };
-  return <section className="task-workflow-card" aria-label="当前任务编排">
-    <button type="button" className="task-workflow-progress" onClick={onOpen} title="查看编排详情">
-    {active ? <LoaderCircle size={15} className="spin" /> : <FileCheck2 size={15} />}
-    <span><strong>{workflow.title}</strong><small>{workflow.finalResult?.humanSummary || `${workflow.nodes.filter((node) => node.status === "completed").length} / ${workflow.nodes.length} 项已完成`}</small></span><Route size={14} />
-    </button>
-    {workflow.plan !== undefined && workflow.plan !== null && <div className="task-workflow-actions"><button type="button" className={intent === "question" ? "active" : ""} onClick={() => setIntent((current) => current === "question" ? null : "question")}><MessageSquare size={12} />询问编排</button><button type="button" className={intent === "adjust" ? "active" : ""} onClick={() => setIntent((current) => current === "adjust" ? null : "adjust")}><Route size={12} />调整计划</button>{workflow.pendingMaintenance ? <small><LoaderCircle size={12} className="spin" />等待检查点</small> : workflow.status === "awaiting_approval" ? <button type="button" onClick={onOpen}>查看并批准计划</button> : null}</div>}
-    {intent && <form className="task-workflow-input" onSubmit={(event) => { event.preventDefault(); void requestMaintenance(); }}><input aria-label={intent === "question" ? "编排问题" : "计划调整要求"} placeholder={intent === "question" ? "询问进度、结果或下一步" : "保留哪些成果，调整哪些任务…"} value={note} onChange={(event) => setNote(event.target.value)} disabled={busy || Boolean(workflow.pendingMaintenance)} /><button type="submit" aria-label="发送编排请求" disabled={busy || Boolean(workflow.pendingMaintenance) || !note.trim()}>{busy ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />}</button></form>}
-    {feedback && <p className="task-workflow-feedback" role="status">{feedback}</p>}
-    {answer && intent && <details className="task-workflow-answer"><summary>最近回复</summary><p>{answer}</p></details>}
+  const completed = workflow.nodes.filter((node) => node.status === "completed").length;
+  const remaining = Math.max(0, workflow.nodes.length - completed);
+  const outputCount = workflow.finalResult?.outputs?.filter((output) => output.path).length || 0;
+  const unresolved = workflow.finalResult?.unresolved || [];
+  const continueConversation = onContinueConversation || (() => { document.querySelector<HTMLTextAreaElement>(".composer textarea, textarea[aria-label*='任务']")?.focus(); });
+  return <section className={`task-workflow-card task-transition-card ${collapsed ? "is-collapsed" : ""}`} aria-label="编排进度交接">
+    <header className="task-transition-header">
+      <div className="task-transition-kicker"><Route size={13} /><span>任务模式交接</span><em>对话与编排共享同一上下文</em></div>
+      <button type="button" className="task-transition-collapse" aria-label={collapsed ? "展开编排进度交接" : "收起编排进度交接"} aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}><ChevronDown size={14} /></button>
+    </header>
+    {!collapsed && <>
+      <div className="task-transition-summary"><strong>{workflow.status === "completed" ? "编排已完成，可继续对话" : "已切换到任务编排"}</strong><span>执行进度会持续回到当前对话中，成果和未决事项保持可追溯。</span></div>
+      <button type="button" className="task-workflow-progress" onClick={onOpen} title="查看编排详情">
+        {active ? <LoaderCircle size={15} className="spin" /> : <FileCheck2 size={15} />}
+        <span><strong>{workflow.title}</strong><small>{workflow.finalResult?.humanSummary || `${completed} / ${workflow.nodes.length} 项已完成`}</small></span><Route size={14} />
+      </button>
+      <div className="task-transition-meta" aria-label="编排交接摘要"><span><strong>{completed}</strong>已完成</span><span><strong>{remaining}</strong>待处理</span><span><strong>v{workflow.activePlanVersion || 1}</strong>计划</span>{outputCount > 0 && <span><strong>{outputCount}</strong>项成果</span>}</div>
+      {unresolved.length > 0 && <p className="task-transition-unresolved"><span>待处理</span>{unresolved.slice(0, 2).join("；")}{unresolved.length > 2 ? ` 等 ${unresolved.length} 项` : ""}</p>}
+      <div className="task-workflow-actions"><button type="button" onClick={onOpen}><Route size={12} />查看编排</button><button type="button" className="task-transition-continue" onClick={continueConversation}><MessageSquare size={12} />继续对话</button>{workflow.plan !== undefined && workflow.plan !== null && <><button type="button" className={intent === "question" ? "active" : ""} onClick={() => setIntent((current) => current === "question" ? null : "question")}><MessageSquare size={12} />询问编排</button><button type="button" className={intent === "adjust" ? "active" : ""} onClick={() => setIntent((current) => current === "adjust" ? null : "adjust")}><Route size={12} />调整计划</button>{workflow.pendingMaintenance ? <small><LoaderCircle size={12} className="spin" />等待检查点</small> : workflow.status === "awaiting_approval" ? <button type="button" onClick={onOpen}>查看并批准计划</button> : null}</>}</div>
+      {intent && <form className="task-workflow-input" onSubmit={(event) => { event.preventDefault(); void requestMaintenance(); }}><input aria-label={intent === "question" ? "编排问题" : "计划调整要求"} placeholder={intent === "question" ? "询问进度、结果或下一步" : "保留哪些成果，调整哪些任务…"} value={note} onChange={(event) => setNote(event.target.value)} disabled={busy || intent === "adjust" && Boolean(workflow.pendingMaintenance)} /><button type="submit" aria-label="发送编排请求" disabled={busy || intent === "adjust" && Boolean(workflow.pendingMaintenance) || !note.trim()}>{busy ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />}</button></form>}
+      {feedback && <p className="task-workflow-feedback" role="status">{feedback}</p>}
+      {answer && intent && <details className="task-workflow-answer"><summary>最近回复</summary><p>{answer}</p></details>}
+    </>}
   </section>;
+}
+
+/**
+ * Renders the durable handoff written when an orchestration is opened as a
+ * conversation. Keeping this at the message boundary prevents the verbose
+ * handoff prompt from looking like a second assistant answer while retaining
+ * the original text for inspection.
+ */
+export function HandoffCard({ text, workflowId, onOpenWorkflow, dataMessageId }: { text: string; workflowId?: string; onOpenWorkflow?: () => void; dataMessageId?: string }) {
+  const [collapsed, setCollapsed] = useState(true);
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const pick = (label: string) => lines.find((line) => line.startsWith(`${label}：`) || line.startsWith(`${label}:`))?.replace(new RegExp(`^${label}[：:]\\s*`), "") || "";
+  const summary = pick("初始目标") || pick("任务目标") || lines[0]?.replace(/^编排进度交接[：:]\s*/u, "").replace(/^同一任务的上下文交接[：:]\s*/u, "") || "编排已将任务上下文交接给当前对话。";
+  const result = pick("成果") || pick("最终成果");
+  const unresolved = pick("待解决") || pick("未决事项");
+  return <article className={`task-handoff-card ${collapsed ? "is-collapsed" : ""}`} data-message-id={dataMessageId} aria-label="编排进度交接">
+    <header><div className="task-transition-kicker"><Route size={13} /><span>编排进度交接</span><em>已回到同一任务对话</em></div><button type="button" className="task-transition-collapse" aria-label={collapsed ? "展开编排交接详情" : "收起编排交接详情"} aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}><ChevronDown size={14} /></button></header>
+    <div className="task-handoff-summary"><strong>{summary}</strong><span>编排上下文、成果和待处理事项已保留，可继续追问或追加任务。</span></div>
+    {!collapsed && <div className="task-handoff-details"><dl><div><dt>来源</dt><dd>任务编排</dd></div>{result && <div><dt>成果</dt><dd>{result}</dd></div>}{unresolved && <div><dt>未决</dt><dd>{unresolved}</dd></div>}</dl><pre>{text}</pre></div>}
+    <footer>{workflowId && onOpenWorkflow && <button type="button" onClick={onOpenWorkflow}><Route size={12} />查看编排</button>}<button type="button" className="task-transition-continue" onClick={() => document.querySelector<HTMLTextAreaElement>(".composer textarea, textarea[aria-label*='任务']")?.focus()}><MessageSquare size={12} />继续对话</button></footer>
+  </article>;
 }

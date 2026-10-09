@@ -3,6 +3,7 @@ import path from "node:path";
 import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowExecutionTarget, type WorkflowPlan, type WorkflowPlanNode, type WorkflowPlanningMode } from "./types.js";
 import { validateVerificationCommand } from "./enforcement.js";
 import { compileWorkflowSharedContracts, workflowSharedContractIssues } from "./sharedContracts.js";
+import { parseWorkflowArtifactDeclaration, workflowRequiredArtifactMatches } from "./artifactDeclarations.js";
 
 const NODE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const AUDIT_KEY_ALIASES: Record<string, string> = {
@@ -125,11 +126,6 @@ const normalizedRelativePath = (value: unknown) => {
   return normalized.replace(/\/+$/, "") || normalized;
 };
 const pathInsideDirectory = (file: string, directory: string) => isWorkflowRelativePath(file) && (directory === "." || file.startsWith(`${directory}/`));
-const artifactPathMatches = (required: string, available: string) => {
-  const target = normalizedRelativePath(required).toLowerCase();
-  const candidate = normalizedRelativePath(available).toLowerCase();
-  return candidate === target || candidate.endsWith(`/${target}`) || target.endsWith(`/${candidate}`);
-};
 const scopeCoversPath = (scope: string, file: string) => {
   const normalized = normalizedRelativePath(scope).replace(/\/\*\*$/, "").replace(/\/\*$/, "");
   return normalized === "." || file === normalized || file.startsWith(`${normalized}/`);
@@ -215,6 +211,15 @@ export function validateWorkflowPlan(plan: WorkflowPlan, availableSkills: Set<st
       catch (error) { errors.push(`节点「${node.id}」验收命令无效：${error instanceof Error ? error.message : String(error)}`); }
     }
     if (node.workspaceAccess === "write" && !node.writeScope.length) errors.push(`写入节点「${node.id}」必须声明 writeScope`);
+    for (const field of ["deliverables", "requiredArtifacts"] as const) for (const value of node[field]) {
+      const declaration = parseWorkflowArtifactDeclaration(value);
+      if (declaration.kind === "described" || declaration.kind === "ambiguous") {
+        const suggestion = declaration.kind === "described" ? `，例如 ${JSON.stringify(declaration.path)}` : "";
+        errors.push(`节点「${node.id}」的 ${field} 不得把路径和描述混写：${value}；文件请只填精确相对路径${suggestion}，描述移到 objective 或 acceptance；纯文本成果可以只填写不含路径的摘要名称`);
+      } else if ((field === "requiredArtifacts" || declaration.kind === "path") && !isWorkflowRelativePath(value)) {
+        errors.push(`节点「${node.id}」的 ${field} 必须使用业务执行目录内的相对路径：${value}`);
+      }
+    }
     for (const skill of node.skills) if (!availableSkills.has(skill)) errors.push(`节点「${node.id}」引用了不可用 Skill「${skill}」`);
     for (const server of node.mcpServers) if (!availableMcpServers.has(server)) errors.push(`节点「${node.id}」引用了不可用 MCP「${server}」`);
     if (node.mcpRequired && !node.mcpServers.length) errors.push(`节点「${node.id}」要求 MCP，但没有指定 MCP 服务`);
@@ -286,7 +291,9 @@ export function validateWorkflowPlan(plan: WorkflowPlan, availableSkills: Set<st
     }
   }
   for (const node of plan.nodes) for (const required of node.requiredArtifacts) {
-    const producers = plan.nodes.filter((candidate) => candidate.id !== node.id && candidate.deliverables.some((deliverable) => artifactPathMatches(required, deliverable)));
+    const possible = plan.nodes.filter((candidate) => candidate.id !== node.id);
+    const unambiguous = workflowRequiredArtifactMatches(required, possible.flatMap((candidate) => candidate.deliverables));
+    const producers = unambiguous ? possible.filter((candidate) => workflowRequiredArtifactMatches(required, candidate.deliverables)) : [];
     if (!producers.length) errors.push(`节点「${node.id}」的必需产物没有计划内生产节点：${required}`);
     else if (!producers.some((producer) => reaches(node.id, producer.id))) errors.push(`节点「${node.id}」的必需产物生产节点不在其依赖链上：${required}`);
   }
@@ -298,7 +305,7 @@ export function validateWorkflowPlan(plan: WorkflowPlan, availableSkills: Set<st
       if (node.workspaceAccess === "write" && node.writeScope.some((scope) => scopeCoversPath(scope, artifact))) continue;
       const producers = plan.nodes.filter((candidate) => candidate.id !== node.id
         && reaches(node.id, candidate.id)
-        && candidate.deliverables.some((deliverable) => artifactPathMatches(artifact, deliverable)));
+        && workflowRequiredArtifactMatches(artifact, candidate.deliverables));
       const declared = producers.some((producer) => [...producer.constraints, ...producer.acceptance, ...producer.verificationCommands]
         .some((contract) => contract.replaceAll("\\", "/").includes(normalizedCommand)));
       if (!declared && producers.length) errors.push(`节点「${node.id}」的验收命令「${command}」调用上游产物 ${artifact}，但生产节点未声明该精确命令能力，且当前节点无权修复该产物`);
@@ -348,6 +355,7 @@ export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] 
     "共享合同必须逐字可比：所有相关生产、消费和 QA 节点使用相同字段、枚举大小写、单位、版本与 join key。不得让多个并行节点各自发明兼容口径。终端 QA/修复节点必须有修复范围，且不得破坏已批准祖先合同；无法同时满足则请求调整。",
     "共享语义在 sharedContracts=[{id,version,constraints}] 中定义一次，相关节点用 contractRefs=[\"id@version\"] 引用，宿主展开固定约束并检测缺失引用；不要在多个节点手抄同一份 schema。业务目标或共享版本变化必须重新提交审批。",
     "requiredArtifacts 只填写依赖链祖先明确承诺的文件或目录路径；普通事实、决定和说明用结构化 handoff。验证命令必须具有能力闭环：下游调用上游脚本时，上游须承诺支持精确命令，或下游拥有该脚本的修复权限。",
+    "deliverables 中的文件只能填写精确相对路径，例如 src/math.js，不能写 src/math.js with corrected addition operator；功能描述放 objective 或 acceptance。允许带空格和中文的完整路径。纯文本成果可写‘研究摘要’，不要求额外创建文件。每个 requiredArtifacts 也只能填写一个路径，不混入描述或多个文件。",
     "verificationCommands 只放用户可审批的直接 node/npm/pnpm/yarn/bun/python/pytest/cargo/go/dotnet 命令；禁止 shell 拼接、重定向、安装、内联脚本。只读节点的已批准 verificationCommands 由工作台在 Agent 回合开始前执行，Agent 审查这些证据，不重复执行。测试缓存也需授权写入范围或系统临时目录。",
     `当前引擎：${providerStatus}。不得选择不可用引擎，不得因为自己的模型身份而默认选择相同 provider。`,
     "按节点核心难点选择 Provider，并给出简洁 providerReason；需要业务语义、写作或综合判断时考虑 Claude，需要精确代码、测试和结构化实现时考虑 Codex。无需为了混用而混用；auto 不是运行时动态能力比较，它使用宿主公布的读写默认引擎。",
