@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ConfirmationProvider } from "/src/components/ConfirmationProvider";
 import { HelpProvider } from "/src/help/HelpProvider";
 import { WorkflowWorkbench } from "/src/workflow/WorkflowWorkbench";
-import { CompactWorkflowProgress, TaskModeBar } from "/src/workflow/TaskModeBar";
+import { CompactWorkflowProgress, HandoffCard, TaskModeBar } from "/src/workflow/TaskModeBar";
 import type { AgentProviderDescriptor } from "/src/agents/types";
 import "/src/styles.css";
 import "/src/design/tokens.css";
@@ -11,10 +11,13 @@ import "/src/design/shell.css";
 import "/src/design/conversation.css";
 import "/src/design/features.css";
 import "/src/design/workflow.css";
+import "/src/design/task-navigation.css";
+import "/src/workspace-browser/WorkspaceBrowserTabs.css";
 
 const scenario = new URLSearchParams(location.search).get("scenario") || "running";
 const isWorktree = scenario.startsWith("worktree");
 const now = "2026-10-09T12:00:00.000Z";
+const handoffText = "编排已完成：支付接口维护\n\n接口兼容性和 12 项回归检查通过。\n\n关键决定：\n保留现有调用合同\n\n成果：\nsrc/payments/api.ts\ntests/payments/api.test.ts\n\n待处理：\n上线前确认旧账户兼容范围";
 const workspaceId = "visual-workspace";
 const providers = ["codex", "claude"].map((id, index) => ({
   id, adapterId: id, runtimeId: id, displayName: id === "codex" ? "Codex" : "Claude", shortName: id === "codex" ? "Codex" : "Claude",
@@ -45,6 +48,7 @@ const plan = {
 };
 const workflow: any = {
   id: `visual-${scenario}`, workDirectory: "/project", executionRoot: "/project", workspaceRoot: "/project", executionTarget: isWorktree ? "worktree" : "workspace",
+  createdAt: now,
   worktreeId: isWorktree ? "visual-worktree" : null, originId: "visual-origin", parentWorkflowId: null, branchIndex: 0, branchLabel: "方案 A",
   title: "支付接口维护", originalPrompt: "维护 payments 接口，保留现有合同并补充回归测试。", plannerEngine: "codex", maxConcurrentAgents: 3,
   status: scenario === "candidate" ? "awaiting_approval" : isWorktree ? "completed" : "running",
@@ -84,7 +88,14 @@ window.fetch = async (input, options = {}) => {
   const path = url.pathname;
   calls.push({ path, method, body });
   const response = (data: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } }));
-  if (path === "/api/task-contexts/lookup") return response({ id: "visual-task", title: workflow.title, executions: [{ kind: "session", id: "visual-session" }, { kind: "workflow", id: workflow.id }] });
+  if (path === "/api/task-contexts/lookup") return response({ id: "visual-task", title: workflow.title,
+    executions: [{ kind: "session", id: "visual-session", executionRoot: "/project" }, { kind: "workflow", id: workflow.id, executionRoot: "/project" }, { kind: "session", id: "other-root", executionRoot: "/other" }],
+    handoffs: [
+      { source: { kind: "session", id: "visual-session", executionRoot: "/project" }, sourceRevision: 3, goal: "维护支付接口并保留兼容性", latestUserRequest: { text: "保留研究结果，补充旧账户支付回归场景" }, decisions: ["沿用现有 API 合同"], files: ["docs/research.md"], unresolved: ["旧账户边界"], attachments: [], createdAt: now },
+      { source: { kind: "session", id: "visual-session", executionRoot: "/project" }, sourceRevision: 5, goal: "Later conversation marker", latestUserRequest: { text: "Post-creation request must not be claimed as the source" }, decisions: [], files: [], unresolved: [], attachments: [], createdAt: "2026-10-09T14:00:00.000Z" },
+      { source: { kind: "session", id: "other-root", executionRoot: "/other" }, sourceRevision: 4, goal: "Wrong root marker", decisions: [], files: [], unresolved: [], attachments: [], createdAt: "2026-10-09T13:00:00.000Z" }
+    ]
+  });
   if (path === "/api/task-contexts/visual-task/conversation") return response({ id: "visual-session" });
   if (path === "/api/workflow-definitions" && method === "GET") return response({ items: definitions });
   if (path === "/api/workflow-definitions" && method === "POST") { const saved = { id: "visual-saved", revision: 1, ...body }; definitions = [...definitions, saved]; return response(saved); }
@@ -123,14 +134,18 @@ window.fetch = async (input, options = {}) => {
 
 function Fixture() {
   const [workflowId, setWorkflowId] = useState(scenario === "create" ? undefined : workflow.id);
-  const [conversation, setConversation] = useState(scenario === "conversation");
+  const [conversation, setConversation] = useState(scenario === "conversation" || scenario === "handoff");
   const [notice, setNotice] = useState("");
   const showNotice = (message: string) => { noticeMessages.push(message); setNotice(message); };
   return <ConfirmationProvider><HelpProvider><div className="workflow-visual-shell" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
-    <header style={{ height: 44, display: "flex", alignItems: "center", padding: "0 14px", flexShrink: 0, borderBottom: "1px solid var(--mc-line)" }}>
+    <header className="topbar topbar-browser-layout" style={{ height: 44, flexShrink: 0 }}>
+      <div className="topbar-title"><div className="title-block"><strong>支付接口维护</strong></div></div>
+      <div className="topbar-pages">
       <TaskModeBar sessionId={conversation ? "visual-session" : undefined} workflowId={!conversation ? workflowId : undefined} engine="codex" enabled onConversation={() => setConversation(true)} onWorkflow={(id) => { setWorkflowId(id); setConversation(false); }} onCreateWorkflow={async (taskContextId, goal) => { calls.push({ path: "/fixture/create", method: "POST", body: { taskContextId, goal, executionTarget: "workspace" } }); }} onError={showNotice} />
+      <div className="workspace-browser-tabs is-inline"><div className="workspace-browser-tabs__track"><span className="workspace-browser-tab"><span className="workspace-browser-tab__main"><span className="workspace-browser-tab__labels"><span className="workspace-browser-tab__title">支付接口维护 · 对话</span></span></span></span></div><button type="button" className="workspace-browser-tabs__all" aria-label="全部页面">⋮</button></div>
+      </div><div className="topbar-actions" />
     </header>
-    {conversation ? <main style={{ width: "min(640px, calc(100% - 32px))", margin: "32px auto" }}><CompactWorkflowProgress workflowId={workflow.id} onOpen={() => setConversation(false)} /></main> : <div style={{ display: "flex", flex: 1, minHeight: 0 }}><WorkflowWorkbench workflowId={workflowId} workspaceId={workspaceId} defaultPlannerEngine="codex" runtime={runtime} providers={providers} onCreate={async (engine, prompt, maxConcurrentAgents, options) => { calls.push({ path: "/fixture/create", method: "POST", body: { engine, prompt, maxConcurrentAgents, ...options } }); return { id: workflow.id }; }} onOpenWorkflow={setWorkflowId} onChanged={async () => {}} onNotice={showNotice} /></div>}
+    {conversation ? <main style={{ width: "min(640px, calc(100% - 32px))", margin: "32px auto" }}>{scenario === "handoff" ? <HandoffCard text={handoffText} workflowId={workflow.id} onOpenWorkflow={() => setConversation(false)} /> : <CompactWorkflowProgress workflowId={workflow.id} onOpen={() => setConversation(false)} />}<div className="composer"><textarea aria-label="继续任务" /></div></main> : <div style={{ display: "flex", flex: 1, minHeight: 0 }}><WorkflowWorkbench workflowId={workflowId} workspaceId={workspaceId} defaultPlannerEngine="codex" runtime={runtime} providers={providers} onCreate={async (engine, prompt, maxConcurrentAgents, options) => { calls.push({ path: "/fixture/create", method: "POST", body: { engine, prompt, maxConcurrentAgents, ...options } }); return { id: workflow.id }; }} onOpenWorkflow={setWorkflowId} onChanged={async () => {}} onNotice={showNotice} /></div>}
     {notice && <output role="status" style={{ position: "fixed", top: 8, right: 14, maxWidth: "calc(100% - 30px)", padding: "8px 12px", border: "1px solid var(--mc-line)", borderRadius: 6, fontSize: 12, color: "var(--mc-text)", background: "var(--mc-surface)", zIndex: 30 }}>{notice}</output>}
   </div></HelpProvider></ConfirmationProvider>;
 }

@@ -10,7 +10,7 @@ type TaskContextPorts = {
   sessionById: (id: string, ownerUserId: string) => Session | undefined;
   workflowById: (id: string, ownerUserId: string) => WorkflowRecord | null;
   executionRootForSession: (session: Session) => string | undefined;
-  createConversation: (input: { ownerUserId: string; workspaceId: string; title: string; engine: string; taskContextId: string; executionRoot?: string; handoff: string }) => Promise<Session>;
+  createConversation: (input: { ownerUserId: string; workspaceId: string; title: string; engine: string; taskContextId: string; executionRoot?: string; handoff: string; handoffSource?: TaskHandoff["source"] & { sourceRevision: number } }) => Promise<Session>;
   publishWorkflowResult: (workflow: WorkflowRecord) => void;
 };
 
@@ -110,7 +110,7 @@ export function registerTaskContextRoutes(app: Express, ports: TaskContextPorts)
       const existing = findExisting();
       if (existing?.session) return res.json(existing.session);
       const latest = latestTaskHandoffForRoot(ports.store.get(context.id, ownerUserId), executionRoot);
-      const creation = ports.createConversation({ ownerUserId, workspaceId: context.workspaceId, title: context.title, engine, taskContextId: context.id, executionRoot, handoff: latest ? renderTaskHandoff(latest) : "" });
+      const creation = ports.createConversation({ ownerUserId, workspaceId: context.workspaceId, title: context.title, engine, taskContextId: context.id, executionRoot, handoff: latest ? renderTaskHandoff(latest) : "", handoffSource: latest ? { ...latest.source, sourceRevision: latest.sourceRevision } : undefined });
       conversationCreations.set(creationKey, creation);
       try { res.status(201).json(await creation); }
       finally { if (conversationCreations.get(creationKey) === creation) conversationCreations.delete(creationKey); }

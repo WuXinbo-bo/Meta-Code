@@ -12,6 +12,21 @@
 .workflow-checkpoint-feedback { display: flex; align-items: center; gap: 6px; padding: 6px 8px; color: var(--mc-text-secondary); font-size: 11px; }
 .workflow-maintenance-history { max-height: 170px; overflow: auto; }
 .workflow-maintenance-history p { overflow-wrap: anywhere; }
+.workflow-origin-card.with-conversation-source:not(.expanded) > strong { flex: 1 1 auto; min-height: 0; max-height: 122px; }
+.workflow-origin-card.with-conversation-source:not(.expanded) > small { flex: 0 0 auto; margin-top: 0; }
+.workflow-conversation-source { flex: 0 0 auto; min-width: 0; max-height: 148px; overflow: auto; border-top: 1px solid var(--mc-line); cursor: default; user-select: text; }
+.workflow-conversation-source > summary { display: flex; align-items: flex-start; gap: 6px; padding: 8px 0 1px; color: var(--mc-text-secondary); list-style: none; cursor: pointer; }
+.workflow-conversation-source > summary::-webkit-details-marker { display: none; }
+.workflow-conversation-source > summary > svg { flex: 0 0 auto; margin-top: 2px; color: var(--mc-text-tertiary); }
+.workflow-conversation-source > summary > svg:last-child { margin-left: auto; }
+.workflow-conversation-source[open] > summary > svg:last-child { transform: rotate(180deg); }
+.workflow-conversation-source > summary > span { display: grid; min-width: 0; gap: 3px; }
+.workflow-conversation-source > summary strong { color: var(--mc-text-secondary); font-size: 11px; font-weight: 600; }
+.workflow-conversation-source > summary small { display: -webkit-box; overflow: hidden; color: var(--mc-text-tertiary); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.workflow-conversation-source > dl { display: grid; gap: 7px; margin: 9px 0 2px; font-size: 11px; line-height: 1.5; }
+.workflow-conversation-source > dl > div { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 7px; }
+.workflow-conversation-source dt { color: var(--mc-text-tertiary); }
+.workflow-conversation-source dd { min-width: 0; margin: 0; color: var(--mc-text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
 .workflow-review-write-range { display: flex; align-items: center; gap: 6px; margin: 8px 0; color: var(--mc-text-secondary); font-size: 11px; flex-wrap: wrap; }
 .workflow-review-write-range code { flex-basis: 100%; padding-left: 20px; overflow-wrap: anywhere; color: var(--mc-text-tertiary); font-size: 11px; }
 .workflow-impact-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 9px; border: 1px solid var(--mc-line); border-radius: 10px; background: var(--mc-surface-subtle); font-size: 11px; }

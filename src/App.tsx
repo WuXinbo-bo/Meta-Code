@@ -98,7 +98,8 @@ import { ActionMenu } from "./components/ActionMenu";
 import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./components/WorkspaceFileSearch";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
 import { fileScopeRoot } from "./files/fileScopeRoot";
-import { linkedWorkflowId } from "./tasks/linkedWorkflow";
+import { handoffWorkflowId, linkedWorkflowId } from "./tasks/linkedWorkflow";
+import { isWorkflowHandoffMessage, workflowHandoffKey, workflowHandoffSourceId, workflowHandoffSourceKind } from "./tasks/workflowHandoff";
 import { ACTIVE_SIDEBAR_TASK_STATUSES, groupSidebarTasks, sidebarTaskIsPinned, sidebarTaskIsSelected, sidebarTaskPinnedRecords, type SidebarTaskGroup } from "./tasks/sidebarTaskGroups";
 import { workspaceRelativePath } from "./markdown/localFileLinks";
 import { fileKind, isPreviewFileKind, type PreviewFile, type WorkspaceFileNode } from "./files/fileTypes";
@@ -1108,16 +1109,6 @@ function visibleConversationMessages(messages: Message[], sessionStatus?: Sessio
   }
   if (pendingReasoning >= 0 && sessionStatus !== "running") visible[pendingReasoning] = completedReasoningMessage(visible[pendingReasoning]);
   return visible;
-}
-
-function isWorkflowHandoffMessage(message: Pick<Message, "eventType" | "text">) {
-  const text = message.text.trim();
-  // Older task-context handoffs were persisted as ordinary assistant messages
-  // without eventType. Recognize their durable prefix so history upgrades to
-  // the same compact card and duplicate copies can be collapsed on read.
-  return message.eventType === "task.context.handoff"
-    || /^编排进度交接[：:]/u.test(text)
-    || /^同一任务的上下文交接[：:]/u.test(text);
 }
 
 function sessionSummariesSnapshot(sessions: SessionSummary[]) {
@@ -5106,7 +5097,7 @@ export function App() {
     const seenHandoffs = new Set<string>();
     const deduped = [...visibleMessages].reverse().filter((message) => {
       if (!isWorkflowHandoffMessage(message)) return true;
-      const key = `task.context.handoff:${message.text.trim()}`;
+      const key = workflowHandoffKey(message);
       if (seenHandoffs.has(key)) return false;
       seenHandoffs.add(key);
       return true;
@@ -5551,12 +5542,21 @@ export function App() {
                         onAnswerQuestion={answerClaudeQuestion}
                       />
                     ) : (() => {
-                      if (isWorkflowHandoffMessage(message)) return <HandoffCard
-                        text={message.text}
-                        dataMessageId={message.id}
-                        workflowId={activeConversationWorkflowId || undefined}
-                        onOpenWorkflow={activeConversationWorkflowId ? () => selectWorkflow(activeConversationWorkflowId) : undefined}
-                      />;
+                      if (isWorkflowHandoffMessage(message)) {
+                        const sourceKind = workflowHandoffSourceKind(message);
+                        const sourceWorkflowId = sourceKind === "session" ? "" : handoffWorkflowId(workflowHandoffSourceId(message), {
+                          taskContextId: activeSession?.taskContextId || data.sessions.find((session) => session.id === activeSession?.id)?.taskContextId,
+                          executionRoot: activeSession?.executionRoot || data.sessions.find((session) => session.id === activeSession?.id)?.executionRoot
+                        }, data.workflows);
+                        return <HandoffCard
+                          key={message.id}
+                          text={message.text}
+                          sourceKind={sourceKind}
+                          dataMessageId={message.id}
+                          workflowId={sourceWorkflowId || undefined}
+                          onOpenWorkflow={sourceWorkflowId ? () => selectWorkflow(sourceWorkflowId) : undefined}
+                        />;
+                      }
                       if (message.role === "assistant") return <AssistantReply
                         text={message.text}
                         avatar={<Bot size={17} />}
