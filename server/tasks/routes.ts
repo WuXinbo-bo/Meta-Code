@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import type { Session } from "../workbench/types.js";
 import type { WorkflowRecord } from "../plugins/orchestration/types.js";
 import { normalizeProviderId } from "../agents/types.js";
-import { latestTaskHandoffForRoot, redactTaskText, renderTaskHandoff, sessionHandoff, taskRootKey, taskRootsEqual, TaskContextStore, type TaskHandoff } from "./context.js";
+import { latestTaskHandoffForRoot, readTaskHistorySnapshot, redactTaskText, renderTaskHandoff, sessionHandoff, taskRootKey, taskRootsEqual, TaskContextStore, type TaskHandoff } from "./context.js";
 
 type TaskContextPorts = {
   store: TaskContextStore;
@@ -20,6 +20,10 @@ export function workflowHandoff(workflow: WorkflowRecord): TaskHandoff {
   return {
     source: { kind: "workflow", id: workflow.id, executionRoot: workflow.executionRoot || workflow.workDirectory }, sourceRevision: workflow.revision,
     goal: redactTaskText(workflow.originalPrompt).slice(0, 4000),
+    userRequests: [
+      { messageId: `${workflow.id}:goal`, text: redactTaskText(workflow.originalPrompt) },
+      ...(workflow.reviewNote?.trim() ? [{ messageId: `${workflow.id}:review:${workflow.activePlanVersion}`, text: redactTaskText(workflow.reviewNote) }] : [])
+    ],
     messages: [{ id: workflow.id, role: "assistant", text: redactTaskText(results.map((result) => result!.humanSummary).join("\n")).slice(0, 12_000) }],
     attachments: [], decisions: results.flatMap((result) => result!.decisions.map((decision) => redactTaskText(`${decision.key}: ${decision.value}`))).slice(-30),
     files: [...new Set(results.flatMap((result) => result!.outputs.flatMap((output) => output.path ? [output.path] : [])))].slice(0, 100),
@@ -47,6 +51,27 @@ export function registerTaskContextRoutes(app: Express, ports: TaskContextPorts)
     if (!context) return res.status(404).json({ error: "任务上下文不存在" });
     res.json(context);
   });
+  app.get("/api/task-contexts/:id/history", (req, res) => {
+    try {
+      const ownerUserId = req.authUser!.id;
+      const context = ports.store.get(req.params.id, ownerUserId);
+      if (!context) return res.status(404).json({ error: "任务上下文不存在" });
+      if (Boolean(req.query.sessionId) === Boolean(req.query.workflowId)) return res.status(400).json({ error: "请指定一个历史来源以确定执行目录" });
+      const kind = req.query.sessionId ? "session" : "workflow";
+      const sourceId = String(req.query.sessionId || req.query.workflowId);
+      const source = context.executions.find((execution) => execution.kind === kind && execution.id === sourceId);
+      if (!source?.executionRoot) return res.status(404).json({ error: "历史来源不存在或执行目录未绑定" });
+      const snapshot = ports.store.exportHistorySnapshot(context.id, ownerUserId, source.executionRoot);
+      res.json(readTaskHistorySnapshot(snapshot, {
+        referenceId: typeof req.query.referenceId === "string" ? req.query.referenceId : undefined,
+        query: typeof req.query.query === "string" ? req.query.query : undefined,
+        offset: req.query.offset === undefined ? undefined : Number(req.query.offset),
+        limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
+        textOffset: req.query.textOffset === undefined ? undefined : Number(req.query.textOffset),
+        maxChars: req.query.maxChars === undefined ? undefined : Number(req.query.maxChars)
+      }));
+    } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
   app.post("/api/task-contexts/:id/conversation", async (req, res) => {
     try {
       const ownerUserId = req.authUser!.id;
@@ -68,7 +93,10 @@ export function registerTaskContextRoutes(app: Express, ports: TaskContextPorts)
       const executionRoot = source?.executionRoot || source?.workDirectory || (preferredSession ? ports.executionRootForSession(preferredSession) : undefined);
       if (!executionRoot) throw new Error("当前任务没有可用的执行目录，请从对话或编排进入");
       if (!(await fs.stat(executionRoot)).isDirectory()) throw new Error("当前任务的执行目录不可用");
-      if (preferredSession) ports.store.link(context.id, { kind: "session", id: preferredSession.id, executionRoot }, ownerUserId, context.workspaceId);
+      if (preferredSession) {
+        ports.store.link(context.id, { kind: "session", id: preferredSession.id, executionRoot }, ownerUserId, context.workspaceId);
+        ports.store.handoff(context.id, ownerUserId, sessionHandoff(preferredSession, executionRoot));
+      }
       const findExisting = () => [...(ports.store.get(context.id, ownerUserId)?.executions || [])].reverse().filter((execution) => execution.kind === "session")
         .map((execution) => ({ execution, session: ports.sessionById(execution.id, ownerUserId) }))
         .find(({ session }) => session?.engine === engine && session.workspaceId === context.workspaceId && !session.archivedAt && taskRootsEqual(ports.executionRootForSession(session), executionRoot));
@@ -81,7 +109,7 @@ export function registerTaskContextRoutes(app: Express, ports: TaskContextPorts)
       if (pending) return res.json(await pending);
       const existing = findExisting();
       if (existing?.session) return res.json(existing.session);
-      const latest = source ? workflowHandoff(source) : latestTaskHandoffForRoot(ports.store.get(context.id, ownerUserId), executionRoot);
+      const latest = latestTaskHandoffForRoot(ports.store.get(context.id, ownerUserId), executionRoot);
       const creation = ports.createConversation({ ownerUserId, workspaceId: context.workspaceId, title: context.title, engine, taskContextId: context.id, executionRoot, handoff: latest ? renderTaskHandoff(latest) : "" });
       conversationCreations.set(creationKey, creation);
       try { res.status(201).json(await creation); }

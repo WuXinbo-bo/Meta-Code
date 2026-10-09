@@ -11,6 +11,8 @@ export type WorkflowNodePhase = "claimed" | "result_draft_started" | "agent_runn
 export type WorkflowAttemptStatus = "running" | "interrupted" | "failed" | "completed" | "abandoned";
 export type WorkflowIntegrationPhase = "started" | "integrator_completed" | "validator_completed" | "result_committed" | "completed";
 export type WorkflowPlanningMode = "initial" | "refine" | "fresh";
+/** Older plans retain strict review until the user approves a new strategy. */
+export type WorkflowValidationMode = "standard" | "strict" | "deterministic";
 export const CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION = 3;
 
 export type WorkflowPlanAudit = {
@@ -25,6 +27,8 @@ export type WorkflowPlanNode = {
   objective: string;
   nonGoals: string[];
   constraints: string[];
+  /** References to immutable plan-level shared contracts, in id@version form. */
+  contractRefs?: string[];
   dependsOn: string[];
   provider: WorkflowEngine | "auto";
   providerReason: string;
@@ -59,9 +63,13 @@ export type WorkflowPlan = {
   questions: string[];
   risks: string[];
   finalDelivery: WorkflowFinalDelivery;
+  validationMode: WorkflowValidationMode;
+  sharedContracts?: WorkflowSharedContract[];
   audit: WorkflowPlanAudit;
   nodes: WorkflowPlanNode[];
 };
+
+export type WorkflowSharedContract = { id: string; version: number; constraints: string[] };
 
 export type WorkflowNodeOutcome = "completed" | "partial" | "blocked" | "failed";
 
@@ -98,6 +106,9 @@ export type WorkflowNodeResult = {
 
 export type WorkflowFileIntegrity = {
   schemaVersion: 1;
+  inputMode?: "conservative" | "observed";
+  readPaths?: string[];
+  readEvidence?: import("./readDependencies.js").WorkflowReadEvidence;
   verifiedAt?: string;
   executionRoot: string;
   inputSnapshotPath: string;

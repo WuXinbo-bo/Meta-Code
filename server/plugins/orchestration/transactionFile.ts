@@ -36,30 +36,60 @@ export function writeJsonAtomically(target: string, value: unknown) {
 export function withTransactionFileLock<T>(target: string, operation: () => T): T {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const lockPath = `${target}.lock`;
-  const deadline = Date.now() + 15_000;
-  let descriptor: number | null = null;
-  while (descriptor === null) {
-    try {
-      descriptor = fs.openSync(lockPath, "wx");
-      fs.writeFileSync(descriptor, `${process.pid}\n${new Date().toISOString()}\n`, "utf8");
-    } catch (error) {
-      if (descriptor !== null) {
-        try { fs.closeSync(descriptor); } catch { /* Preserve the original lock error. */ }
-        descriptor = null;
-        try { fs.rmSync(lockPath, { force: true }); } catch { /* A later retry can reclaim it. */ }
-      }
-      if (!retryableCodes.has(errorCode(error))) throw error;
-      try {
-        if (Date.now() - fs.statSync(lockPath).mtimeMs > 10_000) fs.rmSync(lockPath, { force: true });
-      } catch { /* The lock may have been released between checks. */ }
-      if (Date.now() >= deadline) throw new Error(`等待事务文件锁超时：${path.basename(target)}`);
-      wait(20);
-    }
-  }
+  // Synchronous host callbacks must not freeze HTTP/UI processing for seconds.
+  const deadline = Date.now() + 250;
+  const token = crypto.randomUUID();
+  const contenderPath = `${lockPath}.${token}.owner`;
+  const owner = JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() });
+  let acquired = false;
+  fs.writeFileSync(contenderPath, owner, { encoding: "utf8", flag: "wx", mode: 0o600 });
   try {
+    while (!acquired) {
+      try {
+        // Publish complete ownership atomically; no empty lock can be mistaken
+        // for an abandoned process between open and metadata write.
+        fs.linkSync(contenderPath, lockPath);
+        acquired = true;
+      } catch (error) {
+        if (!retryableCodes.has(errorCode(error))) throw error;
+        reclaimDeadTransactionLock(lockPath);
+        if (Date.now() >= deadline) throw new Error(`等待事务文件锁超时，请重试：${path.basename(target)}`);
+        wait(10);
+      }
+    }
     return operation();
   } finally {
-    try { fs.closeSync(descriptor); } catch { /* Best effort cleanup. */ }
-    try { fs.rmSync(lockPath, { force: true }); } catch { /* A stale lock is reclaimed on the next call. */ }
+    // A callback must never release a replacement owner's lock.
+    if (acquired) try { if (fs.readFileSync(lockPath, "utf8") === owner) fs.unlinkSync(lockPath); } catch { /* The lock may already be gone. */ }
+    try { fs.unlinkSync(contenderPath); } catch { /* Best effort temporary cleanup. */ }
   }
+}
+
+function reclaimDeadTransactionLock(lockPath: string) {
+  try {
+    const observed = fs.readFileSync(lockPath, "utf8");
+    let pid: number;
+    let token = "";
+    try { const owner = JSON.parse(observed) as { pid?: unknown; token?: unknown }; pid = Number(owner.pid); token = String(owner.token || ""); }
+    catch { pid = Number(observed.split("\n")[0]); } // Existing v1 locks.
+    if (!Number.isSafeInteger(pid) || pid <= 0) return; // Unknown owner: fail closed.
+    try { process.kill(pid, 0); return; }
+    catch (error) { if (errorCode(error) !== "ESRCH") return; }
+    const identity = crypto.createHash("sha256").update(observed).digest("hex");
+    const reclaimPath = `${lockPath}.${identity}.reclaim`;
+    // Only one reclaimer may remove this particular dead owner's lock. Without
+    // this claim two contenders could delete a newly acquired replacement.
+    let claim: number;
+    try { claim = fs.openSync(reclaimPath, "wx", 0o600); }
+    catch { return; }
+    try {
+      if (fs.readFileSync(lockPath, "utf8") === observed) {
+        fs.unlinkSync(lockPath);
+        if (/^[0-9a-f-]{36}$/.test(token)) try { fs.unlinkSync(`${lockPath}.${token}.owner`); } catch { /* Optional stale contender link. */ }
+      }
+    } finally {
+      fs.closeSync(claim);
+      fs.unlinkSync(reclaimPath);
+    }
+  } catch { /* A live/replaced/unreadable lock is never taken over by age alone. */ }
 }

@@ -98,6 +98,16 @@ try {
   assert.equal((await request(`/api/task-contexts/${context.id}/handoff`, { sessionId: "other-owner" })).status, 404);
   const handedOff = await request(`/api/task-contexts/${context.id}/handoff`, { sessionId: "session" });
   assert.equal(handedOff.status, 200);
+  const history = await request(`/api/task-contexts/${context.id}/history?sessionId=session`, undefined, "GET");
+  assert.equal(history.status, 200);
+  assert.equal(history.body.entries.length, 1);
+  assert.equal(history.body.entries[0].text, "Original goal [REDACTED]");
+  assert.equal((await request(`/api/task-contexts/${context.id}/history?sessionId=session`, undefined, "GET", "other-owner")).status, 404);
+  assert.equal((await request(`/api/task-contexts/${context.id}/history`, undefined, "GET")).status, 400);
+  assert.equal((await request(`/api/task-contexts/${context.id}/history?sessionId=unlinked`, undefined, "GET")).status, 404);
+  const exactHistory = await request(`/api/task-contexts/${context.id}/history?sessionId=session&referenceId=${history.body.entries[0].referenceId}`, undefined, "GET");
+  assert.equal(exactHistory.body.entries[0].text, history.body.entries[0].text);
+
   assert.equal(JSON.stringify(handedOff.body).includes(secret), false);
   assert.equal(handedOff.body.handoffs[0].goal, "Original goal [REDACTED]");
   assert.equal((await request(`/api/task-contexts/${context.id}/conversation`, { workflowId: "unlinked" })).status, 409);

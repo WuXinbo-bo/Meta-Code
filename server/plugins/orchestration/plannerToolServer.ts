@@ -2,12 +2,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
+import { registerWorkflowTaskHistoryTool } from "./taskHistoryTool.js";
 import {
   applyWorkflowPlanOperations,
   commitWorkflowPlanTransaction,
   finishWorkflowPlanTransactionWithoutChange,
   readWorkflowPlanTransaction,
   replaceWorkflowPlanDraft,
+  submitWorkflowPlan,
   validateWorkflowPlanTransaction,
   type WorkflowPlanEditOperation
 } from "./plannerTransactions.js";
@@ -16,9 +18,10 @@ const transactionPath = process.env.WORKFLOW_PLANNER_TRANSACTION_PATH || "";
 if (!transactionPath) throw new Error("WORKFLOW_PLANNER_TRANSACTION_PATH 未配置");
 
 const server = new McpServer({ name: "workbench-workflow-planner", version: "1.0.0" });
+registerWorkflowTaskHistoryTool(server);
 const result = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const mutationResult = (transaction: ReturnType<typeof readWorkflowPlanTransaction>, appliedOperations?: number) => result({
-  ok: true,
+  ok: transaction.validationErrors.length === 0,
   status: transaction.status,
   revision: transaction.operations.length,
   appliedOperations,
@@ -61,6 +64,7 @@ const nodeSchema = z.object({
   objective: z.string(),
   nonGoals: stringList,
   constraints: stringList,
+  contractRefs: stringList.optional(),
   dependsOn: stringList,
   provider: providerSchema,
   providerReason: z.string(),
@@ -78,6 +82,8 @@ const nodeSchema = z.object({
 });
 const planSchema = z.object({
   planSchemaVersion: z.number().int(),
+  validationMode: z.enum(["standard", "strict", "deterministic"]).optional(),
+  sharedContracts: z.array(z.object({ id: z.string(), version: z.number().int().positive(), constraints: stringList })).max(40).optional(),
   title: z.string(),
   summary: z.string(),
   assumptions: stringList,
@@ -87,8 +93,14 @@ const planSchema = z.object({
   audit: auditSchema,
   nodes: z.array(nodeSchema)
 });
+const draftNodeSchema = nodeSchema.partial().extend({
+  id: z.string().min(1), objective: z.string().min(1), workspaceAccess: z.enum(["read", "write"]), acceptance: z.array(z.string().min(1)).min(1)
+});
+const draftPlanSchema = planSchema.partial().extend({ title: z.string().min(1), validationMode: z.enum(["standard", "strict"]).default("standard"), finalDelivery: finalDeliverySchema, nodes: z.array(draftNodeSchema).min(1).max(40) });
 const planFieldSchema = z.object({
   planSchemaVersion: z.number().int().optional(),
+  validationMode: z.enum(["standard", "strict", "deterministic"]).optional(),
+  sharedContracts: planSchema.shape.sharedContracts,
   title: z.string().optional(),
   summary: z.string().optional(),
   assumptions: stringList.optional(),
@@ -103,6 +115,7 @@ const nodeFieldSchema = z.object({
   objective: z.string().optional(),
   nonGoals: stringList.optional(),
   constraints: stringList.optional(),
+  contractRefs: stringList.optional(),
   dependsOn: stringList.optional(),
   provider: providerSchema.optional(),
   providerReason: z.string().optional(),
@@ -120,6 +133,8 @@ const nodeFieldSchema = z.object({
 });
 const operationFieldsSchema = z.object({
   planSchemaVersion: z.number().int().optional(),
+  validationMode: z.enum(["standard", "strict", "deterministic"]).optional(),
+  sharedContracts: planSchema.shape.sharedContracts,
   title: z.string().optional(),
   summary: z.string().optional(),
   assumptions: stringList.optional(),
@@ -131,6 +146,7 @@ const operationFieldsSchema = z.object({
   objective: z.string().optional(),
   nonGoals: stringList.optional(),
   constraints: stringList.optional(),
+  contractRefs: stringList.optional(),
   dependsOn: stringList.optional(),
   provider: providerSchema.optional(),
   providerReason: z.string().optional(),
@@ -152,6 +168,12 @@ server.registerTool("workflow_read_plan", {
   inputSchema: {},
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
 }, async () => result(readWorkflowPlanTransaction(transactionPath)));
+
+server.registerTool("workflow_submit_plan", {
+  description: "一次提交审批候选计划。只描述目标、节点、依赖、真实写入范围、交付和验收；宿主补齐空数组、默认值和客观结构检查。成功返回 status=committed，失败返回具体错误并保留草稿；不会启动任务或修改业务文件。大型计划仍可先分批维护草稿。",
+  inputSchema: { plan: draftPlanSchema },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
+}, async ({ plan }) => mutationResult(submitWorkflowPlan(transactionPath, plan)));
 
 server.registerTool("workflow_replace_plan", {
   description: "由工作台预授权，用一份完整计划替换隔离事务草稿。只适合小型计划的首次规划、全新重做或大范围结构调整；大型计划必须改用 workflow_apply_operations 每批写入 2 至 4 个节点，避免参数截断。不会修改正式计划或工作区业务文件。",
