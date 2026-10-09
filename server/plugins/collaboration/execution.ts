@@ -4,6 +4,7 @@ import type { AgentProviderId } from "../../agents/types.js";
 import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
 import type { State, Session, DelegatedTask, Message } from "../../workbench/types.js";
 import type { AgentBridgeRequest } from "./broker.js";
+import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "../../runtime/workspaceExecutionCoordinator.js";
 
 export type DelegationExecutionPorts = {
   getState: () => Pick<State, "sessions" | "delegatedTasks">;
@@ -29,6 +30,7 @@ type ExecutionJob = {
   promise: Promise<void>;
   resolve: () => void;
   reject: (error: unknown) => void;
+  executionLease?: WorkspaceExecutionLease;
 };
 
 export function createDelegationExecution(ports: DelegationExecutionPorts) {
@@ -98,10 +100,23 @@ export function createDelegationExecution(ports: DelegationExecutionPorts) {
       const parentActive = [...active.values()].filter((id) => id === job.task.parentSessionId).length;
       const externalActive = Math.max(0, ports.getExternalActiveCount?.() || 0);
       if (parentActive >= MAX_DELEGATED_TASKS_PER_PARENT || active.size + externalActive >= MAX_DELEGATED_TASKS_GLOBAL) continue;
+      let executionLease: WorkspaceExecutionLease | null;
+      try {
+        executionLease = workspaceExecutionCoordinator.tryAcquire({ root: job.task.cwd, ownerId: `session:${job.task.parentSessionId}`, label: job.task.nickname || "委派任务", access: "write" });
+      } catch (error) {
+        // Invalid persisted tasks must settle without aborting queue dispatch
+        // or leaving a queued task permanently holding its parent barrier.
+        jobs.delete(job.task.id);
+        void handleFailure(job.task.id, error, job.generation).then(job.resolve, job.reject);
+        continue;
+      }
+      if (!executionLease) continue;
+      job.executionLease = executionLease;
       // Reserve synchronously before runtime discovery or persistence awaits.
       // Queued retries can exceed the admission limit, but never execution slots.
       leases.set(job.task.id, job.task.parentSessionId);
       void runJob(job).then(job.resolve, job.reject).finally(() => {
+        job.executionLease?.release();
         leases.delete(job.task.id);
         if (jobs.get(job.task.id) === job) jobs.delete(job.task.id);
         pump();

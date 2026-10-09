@@ -49,7 +49,7 @@ try {
   assert.equal(queued.length, 1, "stopping cancels recovery admission");
 
   const parent = { id: "parent", status: "running" };
-  const task = { id: "task", parentSessionId: "parent", provider: "codex", status: "queued", nickname: "fixture", task: "research", mode: "analysis" };
+  const task = { id: "task", parentSessionId: "parent", provider: "codex", status: "queued", nickname: "fixture", task: "research", cwd: root, mode: "analysis" };
   const state = { sessions: [parent], delegatedTasks: [task] };
   let executions = 0;
   let coordinator;

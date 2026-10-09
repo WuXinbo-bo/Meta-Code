@@ -89,6 +89,8 @@ export type PendingInput = QueuePendingInput<Attachment, SkillPolicies>;
 
 export type Session = {
   id: string;
+  /** Optional host-owned task context shared with orchestration runs. */
+  taskContextId?: string | null;
   ownerUserId: string;
   title: string;
   scopeKind: "workspace" | "standalone";

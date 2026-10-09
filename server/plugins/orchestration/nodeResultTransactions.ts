@@ -1,11 +1,31 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveWorkflowResultPath } from "./executionRoot.js";
 import { normalizeWorkflowNodeResult, validateWorkflowNodeResultValue, workflowNodeResultGateIssues } from "./execution.js";
 import { withTransactionFileLock, writeJsonAtomically } from "./transactionFile.js";
 import type { WorkflowNodeCheck, WorkflowNodeOutcome, WorkflowNodeOutput, WorkflowNodeResult } from "./types.js";
 
 export type WorkflowNodeResultTransactionStatus = "editing" | "validated" | "committed" | "aborted";
+
+export type WorkflowNodeHostVerification = {
+  executor: "workbench";
+  phase: "before_agent";
+  checks: WorkflowNodeCheck[];
+  changedFiles: string[];
+  verifiedAt: string;
+};
+
+export function mergeWorkflowNodeHostChecks(result: WorkflowNodeResult, checks: WorkflowNodeCheck[]) {
+  const names = new Set(checks.map((check) => check.name));
+  const commands = new Set(checks.map((check) => check.command).filter(Boolean));
+  return { ...result, checks: [...result.checks.filter((check) => !names.has(check.name) && (!check.command || !commands.has(check.command))), ...checks] };
+}
+
+export function workflowNodeHostVerification(transaction: WorkflowNodeResultTransaction): WorkflowNodeHostVerification | null {
+  const verification = transaction.taskContract.systemVerification as WorkflowNodeHostVerification | undefined;
+  return verification?.executor === "workbench" && verification.phase === "before_agent" && Array.isArray(verification.checks) ? verification : null;
+}
 
 export type WorkflowNodeResultContract = {
   schemaVersion: 1;
@@ -75,6 +95,8 @@ function assertMutable(transaction: WorkflowNodeResultTransaction) {
 }
 
 function writeTransaction(target: string, transaction: WorkflowNodeResultTransaction, operation?: string) {
+  const hostVerification = workflowNodeHostVerification(transaction);
+  if (hostVerification) transaction.draftResult = mergeWorkflowNodeHostChecks(transaction.draftResult, hostVerification.checks);
   transaction.updatedAt = new Date().toISOString();
   transaction.baseRevision += 1;
   transaction.status = "editing";
@@ -119,25 +141,38 @@ export function readWorkflowNodeResultTransaction(target: string) {
   const value = JSON.parse(fs.readFileSync(target, "utf8")) as WorkflowNodeResultTransaction;
   if (value.transactionSchemaVersion !== 1 || !value.transactionId || !value.workflowId || !value.attemptId) throw new Error("节点结果事务文件格式无效");
   value.draftResult = normalizeWorkflowNodeResult(value.draftResult);
+  const hostVerification = workflowNodeHostVerification(value);
+  if (hostVerification) value.draftResult = mergeWorkflowNodeHostChecks(value.draftResult, hostVerification.checks);
   value.selfReview ||= null;
   return value;
+}
+
+/** Only the host publishes approved-command evidence; result MCP cannot edit it. */
+export function recordWorkflowNodeHostVerification(target: string, verification: WorkflowNodeHostVerification) {
+  return withTransactionFileLock(target, () => {
+    const transaction = readWorkflowNodeResultTransaction(target); assertMutable(transaction);
+    const contract = transaction.taskContract as { execution?: { workspaceAccess?: string }; outputs?: { verificationCommands?: string[] } };
+    if (contract.execution?.workspaceAccess !== "read") throw new Error("前置系统验收只适用于只读节点");
+    const expected = contract.outputs?.verificationCommands || [];
+    const actual = verification.checks.filter((check) => check.command).map((check) => check.command);
+    if (JSON.stringify(expected) !== JSON.stringify(actual)) throw new Error("前置系统验收命令与已审批合同不一致");
+    transaction.taskContract.systemVerification = verification;
+    return writeTransaction(target, transaction, "host_verification");
+  });
 }
 
 export function workflowNodeResultTransactionIssues(transaction: WorkflowNodeResultTransaction) {
   const errors: string[] = [];
   try { transaction.draftResult = validateWorkflowNodeResultValue(transaction.draftResult); }
   catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
-  const contract = transaction.taskContract as { execution?: { workDirectory?: string }; outputs?: { deliverables?: string[] } };
-  const workDirectory = String(contract.execution?.workDirectory || "").trim();
+  const contract = transaction.taskContract as { execution?: { executionRoot?: string; workDirectory?: string }; outputs?: { deliverables?: string[] } };
+  const workDirectory = String(contract.execution?.executionRoot || contract.execution?.workDirectory || "").trim();
   errors.push(...workflowNodeResultGateIssues(transaction.draftResult, {
     downstreamNodeIds: transaction.downstreamNodeIds,
     deliverables: contract.outputs?.deliverables || [],
     artifactIssue: workDirectory ? (reportedPath) => {
-      const resolved = path.isAbsolute(reportedPath) ? path.resolve(reportedPath) : path.resolve(workDirectory, reportedPath);
-      const root = path.resolve(workDirectory);
-      const inside = resolved === root || resolved.startsWith(`${root}${path.sep}`);
-      if (!inside) return `产物路径越出任务目录：${reportedPath}`;
-      return fs.existsSync(resolved) ? null : `声明的产物不存在：${reportedPath}`;
+      try { resolveWorkflowResultPath({ workDirectory }, reportedPath, true); return null; }
+      catch (error) { return error instanceof Error ? error.message : String(error); }
     } : undefined
   }));
   if (transaction.requireSelfReview) {

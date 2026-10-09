@@ -13,6 +13,9 @@ import { workflowLog } from "./logs.js";
 import { failedDependencyReason, missingRequiredArtifacts, workflowFailureCategory, workflowRetryLimit, workflowAgentRetryAllowed } from "./execution.js";
 import { timeoutReason } from "../../orchestration/timeouts.js";
 import { WorkflowNodeOutcomeError, WorkflowNodeStageRetryError } from "./errors.js";
+import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "../../runtime/workspaceExecutionCoordinator.js";
+import { captureWorkspaceSnapshot } from "./enforcement.js";
+import { workflowCompletedFileIntegrityIssues } from "./fileIntegrity.js";
 
 export type OrchestrationSchedulerPorts = {
   workflowTicks: Set<string>;
@@ -38,7 +41,10 @@ export type OrchestrationSchedulerPorts = {
   isEnabled: () => boolean;
 };
 
-export function workflowAuthorizedWriteScopes(scopes: string[]) {
+export function workflowAuthorizedWriteScopes(scopes: string[], executionTarget: WorkflowRecord["executionTarget"] = "isolated") {
+  // Only historical isolated tasks used an implicit artifacts mirror. Direct
+  // project execution must honor the approved write contract exactly.
+  if (executionTarget !== "isolated") return [...scopes];
   const expanded = new Set(scopes);
   for (const scope of scopes) {
     const normalized = scope.replaceAll("\\", "/").replace(/^\.\//, "");
@@ -47,9 +53,35 @@ export function workflowAuthorizedWriteScopes(scopes: string[]) {
   return [...expanded];
 }
 
+export function workflowWriteScopesOverlap(left: string[], right: string[]) {
+  if (!left.length || !right.length) return true;
+  const describe = (value: string) => {
+    const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "").toLowerCase();
+    const wildcard = normalized.search(/[\*?]/);
+    return { prefix: wildcard < 0 ? normalized : normalized.slice(0, wildcard), wildcard: wildcard >= 0 };
+  };
+  const within = (parent: string, child: string) => parent === child || child.startsWith(`${parent}/`);
+  return left.some((a) => right.some((b) => {
+    const x = describe(a); const y = describe(b);
+    if (!x.prefix || !y.prefix || x.prefix === "." || y.prefix === ".") return true;
+    if (!x.wildcard && !y.wildcard) return within(x.prefix, y.prefix) || within(y.prefix, x.prefix);
+    if (x.wildcard && y.wildcard) return x.prefix.startsWith(y.prefix) || y.prefix.startsWith(x.prefix);
+    const pattern = x.wildcard ? x : y;
+    const literal = x.wildcard ? y : x;
+    return literal.prefix.startsWith(pattern.prefix) || within(literal.prefix, pattern.prefix.replace(/\/$/, ""));
+  }));
+}
+
 export function createOrchestrationScheduler(ports: OrchestrationSchedulerPorts) {
   const { workflowTicks, workspaceById, syncWorkflowProtocolFiles, appendWorkflowProtocolEvent, workflowEvent, activeWorkflowNodes, activeWorkflowIntegrations, activeDelegationTasks, integrateWorkflow, currentWorkflowProviderCapabilities, runtimeBindingForProvider, WORKFLOW_RUNNER_ID, workflowNodeIntents, skillProjectionManager, workspaceTreeIndex, executeWorkflowNode, workflowResultDigest, workflowRepository, workflowStateFiles, isEnabled } = ports;
 const retryTimers = new Map<string, NodeJS.Timeout>();
+const pendingTicks = new Set<string>();
+const executionLeases = new Map<string, WorkspaceExecutionLease>();
+const releaseIdleExecution = (workflowId: string) => {
+  if (activeWorkflowIntegrations.has(workflowId) || [...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflowId}:`))) return;
+  executionLeases.get(workflowId)?.release();
+  executionLeases.delete(workflowId);
+};
 function scheduleTick(workflowId: string, ownerUserId: string, delay: number) {
   if (!isEnabled()) return;
   const previous = retryTimers.get(workflowId);
@@ -64,18 +96,24 @@ function scheduleTick(workflowId: string, ownerUserId: string, delay: number) {
 function dispose() {
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
+  pendingTicks.clear();
+  for (const workflowId of executionLeases.keys()) releaseIdleExecution(workflowId);
 }
-function scopesOverlap(left: string[], right: string[]) {
-  if (!left.length || !right.length) return true;
-  const clean = (value: string) => value.replaceAll("\\", "/").replace(/\/\*\*?$/, "").replace(/\/$/, "");
-  return left.some((a) => right.some((b) => { const x = clean(a); const y = clean(b); return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`); }));
-}
-
 
 function queueWorkflowTick(workflowId: string, ownerUserId: string) {
-  if (!isEnabled() || workflowTicks.has(workflowId)) return;
+  if (!isEnabled()) return;
+  const delayed = retryTimers.get(workflowId);
+  if (delayed) { clearTimeout(delayed); retryTimers.delete(workflowId); }
+  if (workflowTicks.has(workflowId)) { pendingTicks.add(workflowId); return; }
   workflowTicks.add(workflowId);
-  setImmediate(() => void tickWorkflow(workflowId, ownerUserId).catch((error) => console.error("Workflow scheduler failed", error)).finally(() => workflowTicks.delete(workflowId)));
+  setImmediate(() => void tickWorkflow(workflowId, ownerUserId).catch((error) => {
+    console.error("Workflow scheduler failed", error);
+    releaseIdleExecution(workflowId);
+    scheduleTick(workflowId, ownerUserId, 1_000);
+  }).finally(() => {
+    workflowTicks.delete(workflowId);
+    if (pendingTicks.delete(workflowId)) queueWorkflowTick(workflowId, ownerUserId);
+  }));
 }
 
 function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: string) {
@@ -97,9 +135,45 @@ function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: stri
 }
 
 async function tickWorkflow(workflowId: string, ownerUserId: string) {
-  if (!isEnabled()) return;
-  const workflow = workflowRepository.get(workflowId, ownerUserId); if (!workflow || ["completed", "canceled", "failed", "paused", "awaiting_approval", "planning", "draft", "needs_review"].includes(workflow.status)) return;
-  const workspace = workspaceById(workflow.workspaceId, workflow.ownerUserId); if (!workspace) return;
+  const workflow = workflowRepository.get(workflowId, ownerUserId);
+  if (!isEnabled() || !workflow || ["completed", "canceled", "failed", "paused", "awaiting_approval", "planning", "draft", "needs_review"].includes(workflow.status)) {
+    releaseIdleExecution(workflowId);
+    return;
+  }
+  const workspace = workspaceById(workflow.workspaceId, workflow.ownerUserId); if (!workspace) { releaseIdleExecution(workflowId); return; }
+  if (!executionLeases.has(workflowId)) {
+    const workflowAccess = workflow.nodes.some((node) => node.workspaceAccess === "write") ? "write" : "read";
+    const lease = workspaceExecutionCoordinator.tryAcquire({ root: workflow.executionRoot || workflow.workDirectory || workspace.root, ownerId: `workflow:${workflowId}`, label: workflow.title, access: workflowAccess });
+    if (!lease) { scheduleTick(workflowId, ownerUserId, 500); return; }
+    executionLeases.set(workflowId, lease);
+    if (workflow.nodes.some((node) => node.status === "completed" && (node.summary?.fileIntegrity || workflow.executionTarget === "workspace" || workflow.executionTarget === "worktree"))) {
+      let snapshot;
+      try {
+        snapshot = await captureWorkspaceSnapshot(workflow.executionRoot || workflow.workDirectory || workspace.root);
+      } catch (error) {
+        const latest = workflowRepository.get(workflowId, ownerUserId);
+        if (!latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
+        const reason = `恢复前无法读取业务执行目录，已停止消费已完成结果：${error instanceof Error ? error.message : String(error)}`;
+        const current = workflowRepository.blockStaleFileResults(workflowId, ownerUserId, new Map(latest.nodes.filter((node) => node.status === "completed").map((node) => [node.id, reason])));
+        syncWorkflowProtocolFiles(workflowId, ownerUserId);
+        appendWorkflowProtocolEvent(workflowId, ownerUserId, "workflow.needs_review", { reason: "snapshot_failed", error: reason });
+        workflowEvent(workflowId, "workflow.needs_review", ownerUserId, current.workspaceId, current.revision);
+        releaseIdleExecution(workflowId);
+        return;
+      }
+      const latest = workflowRepository.get(workflowId, ownerUserId);
+      if (!latest || !["queued", "running", "integrating"].includes(latest.status)) { releaseIdleExecution(workflowId); return; }
+      const issues = workflowCompletedFileIntegrityIssues(latest, snapshot);
+      if (issues.size) {
+        const current = workflowRepository.blockStaleFileResults(workflowId, ownerUserId, issues);
+        for (const [nodeId, issue] of issues) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.result_stale", { reason: issue }, nodeId);
+        syncWorkflowProtocolFiles(workflowId, ownerUserId);
+        workflowEvent(workflowId, "workflow.needs_review", ownerUserId, current.workspaceId, current.revision);
+        releaseIdleExecution(workflowId);
+        return;
+      }
+    }
+  }
   const nowMs = Date.now();
   let nextRetryDelay: number | null = null;
   for (const node of workflow.nodes.filter((item) => item.status === "retry_wait")) {
@@ -136,27 +210,35 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
   const hasRequiredFailure = workflow.nodes.some((node) => node.required && ["failed", "blocked", "canceled"].includes(node.status));
   const hasActiveNode = workflow.nodes.some((node) => ["running", "queued", "retry_wait"].includes(node.status));
   const hasRunnableNode = workflow.nodes.some((node) => ["pending", "ready", "interrupted"].includes(node.status) && node.dependsOn.every((id) => completed.has(id)));
-  if (hasRequiredFailure && !hasActiveNode && !hasRunnableNode) { workflowRepository.updateRun(workflowId, "needs_review"); syncWorkflowProtocolFiles(workflowId, ownerUserId); appendWorkflowProtocolEvent(workflowId, ownerUserId, "workflow.needs_review", { reason: "required_node_failed" }); workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workflow.workspaceId, workflow.revision + 1); return; }
+  if (hasRequiredFailure && !hasActiveNode && !hasRunnableNode) { workflowRepository.updateRun(workflowId, "needs_review"); syncWorkflowProtocolFiles(workflowId, ownerUserId); appendWorkflowProtocolEvent(workflowId, ownerUserId, "workflow.needs_review", { reason: "required_node_failed" }); workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workflow.workspaceId, workflow.revision + 1); releaseIdleExecution(workflowId); return; }
   if (workflow.nodes.length && workflow.nodes.every((node) => node.status === "completed" || (!node.required && ["failed", "blocked", "skipped", "canceled"].includes(node.status)))) {
     const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
     if (globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
       scheduleTick(workflowId, ownerUserId, 1_000);
       return;
     }
-    await integrateWorkflow(workflowId, ownerUserId);
+    try { await integrateWorkflow(workflowId, ownerUserId); }
+    finally {
+      const latest = workflowRepository.get(workflowId, ownerUserId);
+      if (!latest || !["queued", "running", "integrating"].includes(latest.status)) releaseIdleExecution(workflowId);
+    }
     return;
   }
   if (workflow.status === "queued") { workflowRepository.updateRun(workflowId, "running"); syncWorkflowProtocolFiles(workflowId, ownerUserId); }
   const running = workflow.nodes.filter((node) => node.status === "running" || node.status === "queued");
   const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
+  if (workflowRepository.get(workflowId, ownerUserId)?.status !== "running") return;
   for (const node of workflow.nodes) {
     if (node.status !== "pending" && node.status !== "ready" && node.status !== "interrupted") continue;
     if (!node.dependsOn.every((id) => completed.has(id))) continue;
-    if (node.workspaceAccess === "write" && running.some((other) => other.workspaceAccess === "write" && scopesOverlap(workflowAuthorizedWriteScopes(node.writeScope), workflowAuthorizedWriteScopes(other.writeScope)))) continue;
+    if (node.workspaceAccess === "write" && running.some((other) => other.workspaceAccess === "write" && workflowWriteScopesOverlap(workflowAuthorizedWriteScopes(node.writeScope, workflow.executionTarget), workflowAuthorizedWriteScopes(other.writeScope, workflow.executionTarget)))) continue;
     const workflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
     const taskLimit = workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS;
     const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
-    if (workflowActive >= taskLimit || globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) break;
+    if (workflowActive >= taskLimit || globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
+      scheduleTick(workflowId, ownerUserId, 1_000);
+      break;
+    }
     if (node.provider === "auto") { node.provider = resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities); workflowRepository.updateNode(node); }
     const checkpointRoot = path.join(workflowStateFiles.directoryFor(workflow.id), "nodes", node.id, "plans", String(node.planVersion), "attempts");
     let attempt: WorkflowNodeAttemptRecord;
@@ -166,6 +248,7 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
       // occupies the budget. Recheck immediately before the synchronous claim.
       const currentWorkflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
       const currentGlobalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + (ports.getDelegationActiveCount?.() ?? activeDelegationTasks.size);
+      if (workflowRepository.get(workflowId, ownerUserId)?.status !== "running") break;
       if (currentWorkflowActive >= taskLimit || currentGlobalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
         scheduleTick(workflowId, ownerUserId, 1_000);
         break;
@@ -284,6 +367,8 @@ async function tickWorkflow(workflowId: string, ownerUserId: string) {
         if (leaseHeartbeat) clearInterval(leaseHeartbeat);
         activeWorkflowNodes.delete(key);
         workflowNodeIntents.delete(key);
+        const currentStatus = workflowRepository.get(workflowId, ownerUserId)?.status;
+        if (!isEnabled() || !currentStatus || !["queued", "running", "integrating"].includes(currentStatus)) releaseIdleExecution(workflowId);
         queueWorkflowTick(workflowId, ownerUserId);
       }
     }).catch((error) => console.error("Workflow node state or cleanup failed", error));

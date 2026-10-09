@@ -1,13 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
-function comparable(value: string) {
+/**
+ * Return a stable lexical key for an absolute path.
+ *
+ * Windows paths are case-insensitive, while macOS and Linux must preserve
+ * case because both support case-sensitive volumes/filesystems.  Keeping this
+ * policy in one helper avoids accidental `.toLowerCase()` comparisons that
+ * break valid APFS case-sensitive workspaces.
+ */
+export function pathKey(value: string) {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 export function isPathInside(root: string, target: string, allowRoot = true) {
-  const relative = path.relative(comparable(root), comparable(target));
+  const relative = path.relative(pathKey(root), pathKey(target));
   return (allowRoot && relative === "") || (Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
@@ -31,4 +39,3 @@ export function assertPathInsideRoot(root: string, input: string, options: { all
   }
   return target;
 }
-

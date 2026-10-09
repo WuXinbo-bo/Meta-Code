@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { workflowNodeContractDigest } from "./plan.js";
+import { captureWorkspaceSnapshotSync, type WorkspaceSnapshot } from "./enforcement.js";
+import { workflowExecutionRoot } from "./executionRoot.js";
+import { workflowCompletedFileIntegrityIssues, workflowResultFileIntegrityIssue } from "./fileIntegrity.js";
 import type { WorkflowNodeResult, WorkflowPlan, WorkflowRecord } from "./types.js";
 
 export type WorkflowPlanImpact = {
@@ -115,7 +118,7 @@ function resultDigest(result: WorkflowNodeResult | null) {
   return crypto.createHash("sha256").update(JSON.stringify({ outputs: result.outputs, decisions: result.decisions, handoff: result.handoff, checks: result.checks })).digest("hex");
 }
 
-export function calculateWorkflowPlanImpact(workflow: WorkflowRecord, nextPlan: WorkflowPlan): WorkflowPlanImpact {
+export function calculateWorkflowPlanImpact(workflow: WorkflowRecord, nextPlan: WorkflowPlan, snapshot?: WorkspaceSnapshot): WorkflowPlanImpact {
   const previous = new Map((workflow.plan?.nodes || []).map((node) => [node.id, node]));
   const next = new Map(nextPlan.nodes.map((node) => [node.id, node]));
   const added = [...next.keys()].filter((id) => !previous.has(id));
@@ -124,6 +127,24 @@ export function calculateWorkflowPlanImpact(workflow: WorkflowRecord, nextPlan: 
     const old = previous.get(node.id);
     return old && workflowNodeContractDigest(old) !== workflowNodeContractDigest(node);
   }).map((node) => node.id));
+  const completedNodes = workflow.nodes.filter((node) => node.status === "completed" && node.summary);
+  let currentSnapshot = snapshot;
+  let snapshotIssue: string | null = null;
+  if (!currentSnapshot && completedNodes.some((node) => node.summary?.fileIntegrity)) {
+    try { currentSnapshot = captureWorkspaceSnapshotSync(workflowExecutionRoot(workflow)); }
+    catch (error) { snapshotIssue = error instanceof Error ? error.message : String(error); }
+  }
+  const eligibleWriters = new Set(workflow.nodes.filter((node) => next.has(node.id) && previous.has(node.id)
+    && workflowNodeContractDigest(previous.get(node.id)!) === workflowNodeContractDigest(next.get(node.id)!)).map((node) => node.id));
+  let writerEligibilityChanged = true;
+  while (writerEligibilityChanged) {
+    writerEligibilityChanged = false;
+    for (const node of nextPlan.nodes) if (eligibleWriters.has(node.id) && node.dependsOn.some((id) => !eligibleWriters.has(id))) {
+      eligibleWriters.delete(node.id); writerEligibilityChanged = true;
+    }
+  }
+  const fileIssues = currentSnapshot ? workflowCompletedFileIntegrityIssues(workflow, currentSnapshot, eligibleWriters) : null;
+  for (const node of completedNodes) if (snapshotIssue || (fileIssues ? fileIssues.has(node.id) : workflowResultFileIntegrityIssue(workflow, node.summary))) directlyChanged.add(node.id);
   const affected = new Set(directlyChanged);
   let expanded = true;
   while (expanded) {

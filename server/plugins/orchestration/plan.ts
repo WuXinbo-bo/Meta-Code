@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowPlan, type WorkflowPlanNode, type WorkflowPlanningMode } from "./types.js";
+import { CURRENT_WORKFLOW_PLAN_SCHEMA_VERSION, type WorkflowExecutionTarget, type WorkflowPlan, type WorkflowPlanNode, type WorkflowPlanningMode } from "./types.js";
 import { WORKFLOW_ROLE_SKILLS } from "./roles.js";
 import { validateVerificationCommand } from "./enforcement.js";
 
@@ -101,17 +101,29 @@ export function workflowNodeContractDigest(node: WorkflowPlanNode) {
   })).digest("hex");
 }
 
-function stringList(value: unknown) {
+function stringList(value: unknown, preservePathControls = false) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => {
     if (item === null || item === undefined) return "";
-    if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") return String(item).trim();
+    if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+      const text = String(item);
+      return preservePathControls && PATH_CONTROL_CHARACTERS.test(text) ? text : text.trim();
+    }
     throw new Error("计划中的文本数组只能包含字符串，不能写入结构化对象");
   }).filter(Boolean);
 }
 
-const normalizedRelativePath = (value: unknown) => String(value || "").trim().replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
-const pathInsideDirectory = (file: string, directory: string) => file.startsWith(`${directory}/`);
+const PATH_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+export function isWorkflowRelativePath(value: string) {
+  return Boolean(value) && !path.posix.isAbsolute(value) && !path.win32.isAbsolute(value)
+    && !/^[a-z]:/i.test(value) && !value.split(/[\\/]/).includes("..") && !PATH_CONTROL_CHARACTERS.test(value);
+}
+const normalizedRelativePath = (value: unknown) => {
+  const raw = String(value || "");
+  const normalized = (PATH_CONTROL_CHARACTERS.test(raw) ? raw : raw.trim()).replaceAll("\\", "/").replace(/^\.\//, "");
+  return normalized.replace(/\/+$/, "") || normalized;
+};
+const pathInsideDirectory = (file: string, directory: string) => isWorkflowRelativePath(file) && (directory === "." || file.startsWith(`${directory}/`));
 const artifactPathMatches = (required: string, available: string) => {
   const target = normalizedRelativePath(required).toLowerCase();
   const candidate = normalizedRelativePath(available).toLowerCase();
@@ -135,8 +147,8 @@ export function normalizeWorkflowPlan(value: unknown): WorkflowPlan {
       nonGoals: stringList(node.nonGoals), constraints: stringList(node.constraints),
       dependsOn: stringList(node.dependsOn), provider, providerReason: String(node.providerReason || "").trim(), skills: stringList(node.skills), workspaceAccess,
       mcpServers: stringList(node.mcpServers), mcpRequired: node.mcpRequired === true,
-      writeScope: workspaceAccess === "write" ? stringList(node.writeScope) : [], requiredArtifacts: stringList(node.requiredArtifacts),
-      deliverables: stringList(node.deliverables), acceptance: stringList(node.acceptance), verificationCommands: stringList(node.verificationCommands),
+      writeScope: workspaceAccess === "write" ? stringList(node.writeScope, true) : [], requiredArtifacts: stringList(node.requiredArtifacts, true),
+      deliverables: stringList(node.deliverables, true), acceptance: stringList(node.acceptance), verificationCommands: stringList(node.verificationCommands),
       failurePolicy: node.failurePolicy === "review" ? "review" : "retry_then_review", required: node.required !== false
     };
   }) : [];
@@ -166,7 +178,7 @@ export function normalizeWorkflowPlan(value: unknown): WorkflowPlan {
       directory: deliveryDirectory,
       primary: normalizedRelativePath(deliverySource.primary) || null,
       format: String(deliverySource.format || "").trim().toLowerCase(),
-      additional: stringList(deliverySource.additional).map(normalizedRelativePath),
+      additional: stringList(deliverySource.additional, true).map(normalizedRelativePath),
       producerNodeId: String(deliverySource.producerNodeId || "").trim() || null,
       reason: String(deliverySource.reason || (legacyPlan ? "历史计划兼容：原计划未声明用户文件交付" : "")).trim()
     },
@@ -212,15 +224,15 @@ export function validateWorkflowPlan(plan: WorkflowPlan, availableSkills: Set<st
     else if (node.workspaceAccess === "read" && !provider.workspaceRead) errors.push(`节点「${node.id}」需要读取，但 ${provider.displayName} 没有工作区读取能力`);
   }
   const delivery = plan.finalDelivery;
-  if (!delivery.directory || path.isAbsolute(delivery.directory) || delivery.directory.split("/").includes("..") || delivery.directory === ".workflow" || delivery.directory.startsWith(".workflow/")) errors.push("finalDelivery.directory 必须是任务目录内的非 .workflow 相对目录");
+  if (!isWorkflowRelativePath(delivery.directory) || delivery.directory === ".workflow" || delivery.directory.startsWith(".workflow/")) errors.push("finalDelivery.directory 必须是业务执行目录内的非 .workflow 相对目录");
+  const deliveryFiles = [delivery.primary, ...delivery.additional].filter((item): item is string => Boolean(item));
+  for (const file of deliveryFiles) {
+    if (!pathInsideDirectory(file, delivery.directory)) errors.push(`最终交付路径必须位于 ${delivery.directory}/：${file}`);
+  }
   if (delivery.required) {
     if (!delivery.primary) errors.push("需要用户交付物时 finalDelivery.primary 不能为空");
     if (!delivery.format) errors.push("需要用户交付物时 finalDelivery.format 不能为空");
     if (!delivery.producerNodeId) errors.push("需要用户交付物时必须指定 finalDelivery.producerNodeId");
-    const deliveryFiles = [delivery.primary, ...delivery.additional].filter((item): item is string => Boolean(item));
-    for (const file of deliveryFiles) {
-      if (path.isAbsolute(file) || file.split("/").includes("..") || !pathInsideDirectory(file, delivery.directory)) errors.push(`最终交付路径必须位于 ${delivery.directory}/：${file}`);
-    }
     const producer = delivery.producerNodeId ? plan.nodes.find((node) => node.id === delivery.producerNodeId) : null;
     if (delivery.producerNodeId && !producer) errors.push(`最终交付生产节点不存在：${delivery.producerNodeId}`);
     if (producer) {
@@ -309,10 +321,10 @@ export function plannerTurnPrompt(system: string, originalPrompt: string, option
     : mode === "fresh"
       ? `这是全新重做。不要沿用上一版拆分结构，重新寻找合理方案。${reviewNote ? `\n用户重做要求：\n${reviewNote}` : ""}`
       : reviewNote ? `本次规划偏好：\n${reviewNote}` : "";
-  return `${system}\n\n本次任务：\n${originalPrompt}${normalized.workspaceRoot ? `\n\n待规划工作区根目录（仅允许读取）：${normalized.workspaceRoot}` : ""}${revisionInstruction ? `\n\n${revisionInstruction}` : ""}\n\n机器计划只能通过 workbench-workflow-plan 工具维护。先调用 workflow_read_plan 读取事务草稿，再通过 workflow_replace_plan 或 workflow_apply_operations 分批修改并自审；调用 workflow_validate_draft 校验，通过后调用 workflow_commit_candidate 提交候选计划。自然语言最终回复只面向用户，简述结果即可，禁止在回复中输出机器 JSON。如果用户只是问候、询问或没有提出明确计划修改，调用 workflow_no_change 后正常回复，不得重规划。规划期间不得修改工作区业务文件、执行写入命令或启动任何子 Agent。`;
+  return `${system}\n\n本次任务：\n${originalPrompt}${normalized.workspaceRoot ? `\n\n待规划工作区根目录（仅允许读取）：${normalized.workspaceRoot}` : ""}${revisionInstruction ? `\n\n${revisionInstruction}` : ""}\n\n机器计划只能通过 workbench-workflow-plan 工具维护。先调用 workflow_read_plan 读取事务草稿，再通过 workflow_replace_plan 或 workflow_apply_operations 分批修改并自审；调用 workflow_validate_draft 校验，通过后调用 workflow_commit_candidate 提交候选计划。自然语言最终回复只面向用户，简述结果即可，禁止在回复中输出机器 JSON。如果用户只是问候、询问或没有提出明确计划修改，调用 workflow_no_change 后正常回复，不得重规划；reason 参数必填，例如 workflow_no_change({reason: '用户仅询问进度，保持计划不变'})。规划期间不得修改工作区业务文件、执行写入命令或启动任何子 Agent。`;
 }
 
-export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] = [], skillContext = "", maxConcurrentAgents = 5, providerCapabilitiesInput: WorkflowProviderCapabilitiesInput = DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES) {
+export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] = [], skillContext = "", maxConcurrentAgents = 5, providerCapabilitiesInput: WorkflowProviderCapabilitiesInput = DEFAULT_WORKFLOW_PROVIDER_CAPABILITIES, executionTarget: WorkflowExecutionTarget = "isolated") {
   const providerCapabilities = normalizeWorkflowProviderCapabilities(providerCapabilitiesInput);
   const providerStatus = Object.entries(providerCapabilities.providers).map(([id, provider]) => `${provider.displayName}（${id}）：${provider.available ? "可用" : "不可用"}${provider.workspaceWrite ? "、可写" : "、只读"}`).join("；");
   return [
@@ -342,6 +354,7 @@ export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] 
     "auto 不是运行时动态能力比较：workspaceAccess=write 时会解析为 Codex，workspaceAccess=read 时会解析为 Claude。能够明确判断时直接填写 claude 或 codex；只有两者没有明显质量差异且接受上述固定映射时才使用 auto，并在 providerReason 中说明。",
     "每个节点必须一次会话可完成，目标单一，输入明确，产物可登记，验收可验证。无法定义验收标准的节点应标记风险或请求澄清。",
     "每个节点用 nonGoals 明确禁止扩张的范围，用 constraints 声明不可违反的业务或技术约束。需要机器复核时，把用户审批后可安全运行的命令写入 verificationCommands；仅允许直接调用 node/npm/pnpm/yarn/bun/python/pytest/cargo/go/dotnet，不得使用 shell 拼接、重定向、安装命令或内联脚本。",
+    "只读节点的已批准 verificationCommands 由工作台在 Agent 回合开始前执行，并提供真实执行证据；Agent 应审查这些证据，不得把自行重复执行或额外未声明命令设为验收要求。",
     "任何需要创建或修改文件的节点都必须使用 workspaceAccess=write，并给出最小且明确的 writeScope；纯分析且不落盘的节点才使用 read。有重叠写入范围的节点不能并行；读取会被另一并行节点修改的内容也不能并行，必须增加真实依赖或隔离输入快照。不得创建动态条件、循环或隐藏执行步骤。",
     "requiredArtifacts 只填写依赖链祖先节点必须真实提供并在 deliverables 登记的文件或目录路径；调度器会沿完整祖先链验证产物来源，不要为了引用祖先产物添加传递性冗余直接依赖。非文件结论、事实、决策和使用说明通过 dependsOn 对应节点的结构化 handoff 传递，不得伪装成文件路径。",
     "把推断但尚未确认的前提写入 assumptions，把会实质改变计划且必须由用户决定的问题写入 questions，把可能影响交付的风险写入 risks；没有则使用空数组。不得把待确认事项藏在 summary 或节点 objective 中。",
@@ -349,11 +362,16 @@ export function planSystemPrompt(skillNames: string[], mcpServerNames: string[] 
     "共享合同自审：对每个汇合点建立字段/枚举/schema/单位对照表，逐字比较所有生产、消费和终端 QA 节点；如果某节点只写抽象一致性要求、遗漏字面值或与其他节点大小写/字段不同，计划不得提交。",
     "规划自审必须包含六个固定 key：dependency-minimality 说明已删除不必要或传递性冗余依赖；critical-path 说明最长串行链及无法继续缩短的原因；concurrency-utilization 说明首批与主要波次如何利用并发上限；read-write-consistency 说明写写和读写冲突如何隔离；provider-allocation 说明模型分配依据；final-delivery 说明主文件格式、生产节点和用户可用性门禁。",
     "audit 只记录可公开的审查结论，不输出隐藏推理。status=revised 表示本轮自审后修改过草案；needs_input 只用于存在必须由用户决定且无法安全假设的问题。checks 必须覆盖主要审查维度，changes 记录自审实际修改内容。",
-    "计划字段契约由规划工具校验。计划必须包含 title、summary、assumptions、questions、risks、audit 和 nodes；每个节点必须包含稳定 id、单一目标、依赖、模型理由、权限、产物和验收契约。",
-    "用户交付协议：编排插件独立保存机器计划、结果和事件，不能充当用户成果。每个新计划必须声明 finalDelivery，并默认建立 deliverables 目录保存用户可直接打开和使用的最终文件；中间过程文件可按需放在 work 或 assets。",
-    "按任务性质选择主交付物：研究、分析、策划、总结默认 deliverables/final.md；正式方案书可选 deliverables/final.docx 或 final.pdf；数据任务使用 deliverables/data.csv 或 data.json 并附 README.md；软件任务至少生成可运行源码及 deliverables/README.md；网页、图片和多媒体任务登记实际可用文件及说明。不要把 results.json 或 handoff.facts 当作用户最终文件。",
-    "新计划通常必须设置 finalDelivery.required=true、directory=deliverables、primary、format、additional 和 producerNodeId。只有纯状态变更、控制操作或明确不产生独立成果的后台任务可以 required=false，并在 reason 说明原因；不得仅因任务是纯分析就省略用户文件。",
-    "必须安排一个位于 DAG 末端的最终交付生产节点：它消费所有必要上游结果，workspaceAccess=write，writeScope 覆盖 finalDelivery 文件，在 deliverables 中登记主文件，并以‘文件存在、非空、内容完整、用户可直接打开使用’作为验收条件。中间分析节点可以只交付结构化 handoff，不要强迫每个节点创建 Markdown。",
+    "计划字段契约由规划工具校验。完整计划必须包含 planSchemaVersion、title、summary、assumptions、questions、risks、finalDelivery、audit 和 nodes。每个完整节点必须包含 id、title、objective、nonGoals、constraints、dependsOn、provider、providerReason、skills、mcpServers、mcpRequired、workspaceAccess、writeScope、requiredArtifacts、deliverables、acceptance、verificationCommands、failurePolicy、required；没有内容的数组也必须传 []，没有 MCP 依赖时传 mcpServers=[]、mcpRequired=false。failurePolicy 只能是 retry_then_review 或 review。",
+    "audit={status,checks,changes}：audit.status 只能是 passed、revised 或 needs_input；每个 checks 元素必须包含 key、status、note，checks.status 只能是 passed、revised 或 warning，不得用 ok、complete、result 或 reason 等替代字段。finalDelivery 必须包含 required、directory、primary、format、additional、producerNodeId、reason；没有主文件时 primary 和 producerNodeId 使用 null。",
+    executionTarget === "isolated"
+      ? "用户交付协议：编排插件独立保存机器计划、结果和事件，不能充当用户成果。每个新计划必须声明 finalDelivery，并默认建立 deliverables 目录保存用户可直接打开和使用的最终文件；中间过程文件可按需放在 work 或 assets。"
+      : "当前目标是现有项目直接维护。所有业务修改必须使用现有项目的真实路径；不得创建任务副本、任务子目录，或为了编排额外创建 deliverables/artifacts/nodes 目录。机器计划、结果、日志由插件在项目外保存。finalDelivery.directory 可以设为现有业务目录，或使用 . 表示项目根目录。",
+    executionTarget === "isolated"
+      ? "按任务性质选择主交付物：研究、分析、策划、总结默认 deliverables/final.md；正式方案书可选 deliverables/final.docx 或 final.pdf；数据任务使用 deliverables/data.csv 或 data.json 并附 README.md；软件任务至少生成可运行源码及 deliverables/README.md；网页、图片和多媒体任务登记实际可用文件及说明。不要把 results.json 或 handoff.facts 当作用户最终文件。"
+      : "源码维护、修复或重构以已修改的真实源码、配置、测试和受控验收结果作为成果；只在任务确实需要新报告或独立交付文件时生成文件。不要为了证明完成而强制创建 README 或总结目录。finalDelivery 可选一个必需业务文件作为 primary，其他必需文件写入 additional；需要跨目录交付时 directory=.。",
+    "新计划通常设置 finalDelivery.required=true、primary、format、additional 和 producerNodeId。纯状态变更、控制操作、只删除文件或不产生独立文件的任务可以 required=false，并在 reason 说明原因；独立研究报告仍需用户可打开的文件成果。",
+    "finalDelivery.required=true 时，必须安排最终交付生产节点：它消费生产文件所需的上游结果，workspaceAccess=write，writeScope 覆盖 finalDelivery 文件，在 deliverables 中登记主文件，并以‘文件存在、非空、内容完整、用户可直接打开使用’作为验收条件；之后可以有只读验收节点。required=false 时不强制创建写入交付节点，直接以业务变更、验证或结构化结论收束。中间分析节点可以只交付结构化 handoff，不要强迫每个节点创建 Markdown。",
     `可用 Skill（只能从中选择）：${skillNames.length ? skillNames.join(", ") : "无"}`,
     skillContext ? `工作区 Skill 规划上下文：\n${skillContext}` : "当前没有可注入的工作区 Skill 规划上下文。",
     `可用 MCP（只在任务确实需要外部工具时选择）：${mcpServerNames.length ? mcpServerNames.join(", ") : "无"}`,

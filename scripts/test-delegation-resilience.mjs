@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { createDelegationBroker } from "../server/plugins/collaboration/broker.ts";
 import { createDelegationExecution } from "../server/plugins/collaboration/execution.ts";
 
@@ -9,8 +11,8 @@ async function waitFor(check, message) {
   while (!check()) { if (Date.now() >= deadline) throw Error(message); await new Promise((done) => setTimeout(done, 10)); }
 }
 const usage = () => ({ input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 });
-function task(id, parentSessionId = "parent") {
-  return { id, parentSessionId, provider: "codex", status: "queued", nickname: id, task: "fixture", cwd: process.cwd(), mode: "implementation", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), usage: usage() };
+function task(id, parentSessionId = "parent", cwd = process.cwd()) {
+  return { id, parentSessionId, provider: "codex", status: "queued", nickname: id, task: "fixture", cwd, mode: "implementation", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), usage: usage() };
 }
 function harness({ parents = ["parent"], externalCount = () => 0, binding = async () => ({}), execute, save = async () => {} } = {}) {
   const state = { sessions: parents.map((id) => ({ id, status: "running" })), delegatedTasks: [] };
@@ -48,6 +50,24 @@ function harness({ parents = ["parent"], externalCount = () => 0, binding = asyn
   assert.ok(reads > 0); await h.coordinator.stop();
 }
 console.log("delegation lazy cross-subsystem dependency closure passed");
+
+// A malformed persisted task must fail durably, settle its parent barrier,
+// and leave the same dispatch queue able to run subsequent valid work.
+{
+  const h = harness({ execute: async () => {} });
+  const invalid = task("invalid-cwd");
+  delete invalid.cwd;
+  const failed = h.submit(invalid);
+  await failed;
+  assert.equal(invalid.status, "failed");
+  assert.match(invalid.lastError, /目录|身份/);
+  assert.equal(h.coordinator.activeCount(), 0);
+  assert.deepEqual(h.calls, []);
+  await h.submit(task("after-invalid-cwd"));
+  assert.deepEqual(h.calls, ["after-invalid-cwd"]);
+  await h.coordinator.stop();
+}
+console.log("delegation invalid cwd failure settlement and queue continuity passed");
 
 // Runtime discovery must reserve a slot before its first await, and duplicate
 // launches of the same persisted task cannot create a second worker.
@@ -93,7 +113,8 @@ console.log("delegation queued capacity and per-parent execution budget passed")
 }
 {
   const h = harness({ parents: ["p0", "p1", "p2", "p3", "p4"] });
-  const promises = Array.from({ length: 25 }, (_, index) => h.submit(task(`global-${index}`, `p${Math.floor(index / 5)}`)));
+  const fixtureRoots = path.join(os.tmpdir(), `metacode-delegation-capacity-${crypto.randomUUID()}`);
+  const promises = Array.from({ length: 25 }, (_, index) => { const parent = `p${Math.floor(index / 5)}`; return h.submit(task(`global-${index}`, parent, path.join(fixtureRoots, parent))); });
   await waitFor(() => h.calls.length === 20, "global first 20 workers did not start");
   assert.equal(h.coordinator.activeCount(), 20);
   for (const id of [...h.completions.keys()]) h.finish(id);
@@ -102,6 +123,23 @@ console.log("delegation queued capacity and per-parent execution budget passed")
   await Promise.all(promises); assert.equal(h.maximum(), 20); await h.coordinator.stop();
 }
 console.log("delegation global execution budget and external capacity wake passed");
+
+// Independent conversations writing one project serialize, while sibling
+// workers belonging to the same parent retain their shared ownership.
+{
+  const h = harness({ parents: ["writer-a", "writer-b"] });
+  const first = h.submit(task("same-project-a", "writer-a"));
+  const second = h.submit(task("same-project-b", "writer-b"));
+  await waitFor(() => h.calls.length === 1, "first project writer did not start");
+  assert.deepEqual(h.calls, ["same-project-a"]);
+  assert.equal(h.state.delegatedTasks[1].status, "queued");
+  h.finish("same-project-a");
+  await waitFor(() => h.calls.length === 2, "waiting project writer did not start after release");
+  assert.equal(h.maximum(), 1);
+  h.finish("same-project-b");
+  await Promise.all([first, second]); await h.coordinator.stop();
+}
+console.log("delegation cross-parent project serialization and lease release passed");
 
 // Simulate a provider persisting its failed status before throwing. A newly
 // admitted replacement uses the free admission slot while the retry waits.

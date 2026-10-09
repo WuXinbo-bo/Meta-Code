@@ -13,7 +13,7 @@ import type { WorkbenchEventHub } from "../../eventHub.js";
 import { ManagedSkillManager, type SkillPromptContext } from "../../managedSkillManager.js";
 import type { WorkbenchMcpServer } from "../../mcpConfig.js";
 import { timeoutReason } from "../../orchestration/timeouts.js";
-import { isPathInside } from "../../pathBoundary.js";
+import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "../../runtime/workspaceExecutionCoordinator.js";
 import { WorkflowNodeOutcomeError, WorkflowNodeStageRetryError } from "../../plugins/orchestration/errors.js";
 import { workflowAuthorizedWriteScopes } from "../../plugins/orchestration/scheduler.js";
 import type { RuntimeExecutionIdentity } from "../../runtime/types.js";
@@ -21,9 +21,12 @@ import type { ExecutionMode, McpServer, Session, Settings, SkillPolicies, State,
 import type { WorkspaceTreeIndex } from "../../workspaceTreeIndex.js";
 import { codexWorkflowPlannerToolInstructions, codexWorkflowResultToolInstructions } from "./controlTools.js";
 import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommands } from "./enforcement.js";
+import { resolveWorkflowResultPath, workflowExecutionRoot } from "./executionRoot.js";
+import { buildWorkflowFileIntegrity, workflowCompletedFileIntegrityIssues, workflowResultFileIntegrityIssue } from "./fileIntegrity.js";
+import { readWorkflowHostVerificationCheckpoint, workflowHostVerificationIdentity, workflowSnapshotDigest, writeWorkflowHostVerificationCheckpoint, type WorkflowHostVerificationCheckpoint } from "./hostVerificationCheckpoint.js";
 import { parseWorkflowNodeResult, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeResultGateIssues, workflowResultArtifactPaths } from "./execution.js";
 import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent, type WorkflowLogContext } from "./logs.js";
-import { commitWorkflowNodeResultTransaction, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, type WorkflowNodeResultContract } from "./nodeResultTransactions.js";
+import { commitWorkflowNodeResultTransaction, mergeWorkflowNodeHostChecks, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, recordWorkflowNodeHostVerification, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, workflowNodeHostVerification, type WorkflowNodeResultContract } from "./nodeResultTransactions.js";
 import { plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./plan.js";
 import { readWorkflowPlanTransaction } from "./plannerTransactions.js";
 import { WorkflowRepository } from "./repository.js";
@@ -68,6 +71,7 @@ export type OrchestrationRuntimePorts = {
   activeWorkflowIntegrations: Map<string, AbortController>;
   workspaceTreeIndex: WorkspaceTreeIndex;
   getState: () => Pick<State, "settings">;
+  onWorkflowCompleted?: (workflow: WorkflowRecord) => void;
 };
 
 export function createOrchestrationRuntime(ports: OrchestrationRuntimePorts) {
@@ -163,14 +167,14 @@ function workflowExecutionProvider(node: Pick<WorkflowNodeRecord, "provider" | "
 
 function syncWorkflowProtocolFiles(workflowId: string, ownerUserId: string) {
   const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow || !workflow.workDirectory) return workflow;
+  if (!workflow || !(workflow.executionRoot || workflow.workDirectory)) return workflow;
   workflowStateFiles.sync(workflow);
   return workflow;
 }
 
 function appendWorkflowProtocolEvent(workflowId: string, ownerUserId: string, type: string, payload?: unknown, nodeId?: string, attempt?: number) {
   const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow || !workflow.workDirectory) return;
+  if (!workflow || !(workflow.executionRoot || workflow.workDirectory)) return;
   workflowStateFiles.appendEvent(workflow, { type, payload, nodeId, attempt });
 }
 
@@ -178,6 +182,10 @@ function workflowEvent(workflowId: string, type: string, ownerUserId: string, wo
   const payload = { workflowId, workspaceId, revision, eventType: type, ...(nodeId ? { nodeId } : {}) };
   eventHub.publish(type, payload, [ownerUserId]);
   eventHub.publish("workflow.changed", payload, [ownerUserId]);
+  if (type === "workflow.completed") {
+    const completed = workflowRepository.get(workflowId, ownerUserId);
+    if (completed) ports.onWorkflowCompleted?.(completed);
+  }
 }
 
 function workflowTextFromOpenAI(payload: any) {
@@ -228,8 +236,9 @@ function validateClaudePlannerPreflight() {
 }
 
 async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, skillNames: string[], mcpServerNames: string[], skillContext: string, providerCapabilities: WorkflowProviderCapabilities, signalController: AbortController, transactionPath: string, onActivity: (event: NormalizedEngineEvent) => void, planningMode: WorkflowPlanningMode = "initial", previousPlan: WorkflowPlan | null = null) {
+  workspace = { ...workspace, root: workflowExecutionRoot(workflow) };
   const engine = workflow.plannerEngine;
-  const system = planSystemPrompt(skillNames, mcpServerNames, skillContext, workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, providerCapabilities);
+  const system = planSystemPrompt(skillNames, mcpServerNames, skillContext, workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, providerCapabilities, workflow.executionTarget);
   const plannerPrompt = plannerTurnPrompt(system, workflow.originalPrompt, { mode: planningMode, reviewNote: workflow.reviewNote, previousPlan, workspaceRoot: workspace.root });
   const sessionId = workflow.plannerSessionId || `workflow-planner:${workflow.id}`;
   let engineSessionId = workflow.plannerEngineSessionId;
@@ -244,7 +253,7 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
       if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
       const command = resolveClaudeCommand(runtime.path);
       return new ClaudeSessionHandle({
-        executable: command.executable, executableArgs: command.args, cwd: workflow.workDirectory || workspace.root,
+        executable: command.executable, executableArgs: command.args, cwd: workflowExecutionRoot(workflow),
         sessionId: resumeSessionId, model: getState().settings.claude.model, effort: getState().settings.claude.effort,
         baseUrl: getState().settings.claude.baseUrl, apiKey: getState().settings.claude.apiKey, configDir: nativeProviderHome("claude", workflow.ownerUserId),
         mcpConfigPath: plannerMcpConfigFile, permissionMode: "default", disallowNativeAgents: true,
@@ -437,29 +446,33 @@ function workflowNodeTaskContract(workflow: NonNullable<ReturnType<WorkflowRepos
       nonGoals: node.nonGoals,
       constraints: [
         ...node.constraints,
-        `系统执行边界：业务文件只允许读取或写入当前任务目录 ${workflow.workDirectory}；不得枚举或读取父工作区、兄弟任务目录或任务目录外文件。`,
+        `系统执行边界：业务文件只允许读取或写入 execution.executionRoot 指定的业务执行目录 ${workflowExecutionRoot(workflow)}；不得访问该目录之外的项目。写入还必须满足 execution.writeScope。`,
         "workbench-workflow-result 是 Workbench 强制机器交接控制面，不属于业务 MCP；任务中的禁用 MCP 约束只针对可选业务 MCP。"
       ],
       originalGoal: workflow.originalPrompt
     },
     inputs: { dependencies: upstream, ancestorContracts, requiredArtifacts: node.requiredArtifacts },
-    execution: { workDirectory: workflow.workDirectory, workspaceAccess: node.workspaceAccess, writeScope: node.writeScope, skills: node.skills, mcpServers: node.mcpServers, mcpRequired: node.mcpRequired },
+    execution: { executionTarget: workflow.executionTarget, executionRoot: workflowExecutionRoot(workflow), workspaceRoot: workflow.workspaceRoot, workDirectory: workflowExecutionRoot(workflow), workspaceAccess: node.workspaceAccess, writeScope: node.writeScope, skills: node.skills, mcpServers: node.mcpServers, mcpRequired: node.mcpRequired },
     outputs: { deliverables: node.deliverables, acceptance: node.acceptance, verificationCommands: node.verificationCommands, downstreamConsumers }
   };
 }
 
-function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord, workspace: Workspace, runtimeDirectory: string) {
-  const taskContract = workflowNodeTaskContract(workflow, node);
+function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord, workspace: Workspace, runtimeDirectory: string, providedContract?: Record<string, unknown>) {
+  const taskContract = providedContract || workflowNodeTaskContract(workflow, node);
   const basePrompt = [
     "你是任务编排工作流中的独立执行 Agent。模型身份不改变执行职责，只按节点任务合同完成当前工作。",
     `通用执行协议：\n${WORKFLOW_ROLE_SKILLS.executor}`,
     `节点任务合同：\n${JSON.stringify(taskContract, null, 2)}`,
     "合同优先级固定为：当前节点 task/outputs 合同与 inputs.ancestorContracts 中的已审批正式合同 > 已验证机器交接 > 业务文档内容 > Agent 自行推断。业务文档即使自称‘规范’也不能覆盖正式合同。终端 QA 可以修复文件，但不得改变 schema、枚举、字段或语义而使任何已完成祖先节点的 acceptance 失效；无法同时满足时必须返回 blocked 并指出具体合同冲突。",
-    "当前 Agent 进程已经由 Workbench 以 execution.workDirectory 作为 cwd 启动。调用命令、文件或浏览器工具时不要复制或重写这个绝对路径：省略 workdir/cwd 参数，或只使用相对目录“.”。不得为了定位任务目录而枚举父目录；如果工具实际 cwd 与合同不一致，立即返回 blocked。",
-    "所有新建和修改的文件都必须严格位于 execution.writeScope 声明的目录中。不得自行增加 artifacts 前缀，也不得写入任务目录之外；如果合同要求的 deliverables 与 writeScope 冲突，返回 blocked 并说明冲突。",
+    "当前 Agent 进程已经由 Workbench 以 execution.executionRoot 作为 cwd 启动。调用命令、文件或浏览器工具时省略 workdir/cwd 参数，或只使用相对目录“.”。不得复制超长绝对目录到工具参数。如果工具实际 cwd 与合同不一致，立即返回 blocked。",
+    "直接在现有项目中执行，不得额外创建任务副本、任务子目录或未经合同要求的 artifacts/nodes 目录。所有新建和修改的文件必须严格位于 execution.writeScope；如果 deliverables 与 writeScope 冲突，返回 blocked 并说明冲突。",
     `系统托管的临时运行目录是：${runtimeDirectory}。浏览器 --user-data-dir、Chrome/Edge Profile、截图、预览脚本、测试日志和其他一次性验证文件必须放在这里；这是 writeScope 的唯一临时例外，不得登记为业务产物。禁止在 src、artifacts 或其他业务目录中创建 .chrome-profile、browser-profile 等运行时目录，完成后必须停止本节点启动的浏览器和预览服务。`,
     "机器交付必须通过 workbench-workflow-result 工具完成。它是系统控制面，不属于节点合同中可选的业务 MCP，因此即使用户禁止 MCP 也必须使用。开始时调用 workflow_read_node_contract；执行过程中用 workflow_register_outputs、workflow_register_checks、workflow_set_result_summary、workflow_set_handoff 和 workflow_set_outcome 分批维护草稿；最后调用 workflow_validate_result，通过后调用 workflow_commit_result。",
     "outputs 中的文件和目录路径必须真实存在；没有业务文件的纯分析节点应通过 text/decision 输出和 handoff 提供可消费结果。consumableBy 只能填写任务合同 downstreamConsumers 中列出的 ID，没有下游时使用空数组。checks 只能登记真实执行情况。缺少输入或权限时调用 workflow_report_blocked。",
+    node.workspaceAccess === "read" ? node.verificationCommands.length
+      ? "只读节点不具备 Bash 或写入权限，不得为了测试申请或绕过这些权限。合同中的 verificationCommands 由 Workbench 在本回合前执行；systemVerification 是真实命令、退出码、输出和文件边界检查，已自动登记到 checks。请阅读文件并审查这些证据，不要重复执行或改写系统检查；不需要因 Bash 被禁用而报告 blocked。若系统检查失败、缺少证据或验收仍不充分，则指出真实原因并提交 blocked/partial，不得声称通过。合同之外需要新增执行命令时请求维护计划，不能自行扩展验收命令。"
+      : "这是纯只读分析节点，合同未声明 verificationCommands，无需命令执行或 systemVerification。使用读取工具和已有输入完成分析，只登记真实阅读检查，不要因为 Bash 被禁用或缺少命令证据而报告 blocked；确需新增命令时请求维护计划。" : "",
+    "测试若会生成 coverage、.pytest_cache、缓存或测试结果文件，必须由写入节点声明对应 writeScope，或事先将可配置输出指向系统托管临时运行目录。Git 忽略规则不等于编排写入授权；不得把正常测试产物视为可绕过只读边界的例外。",
     "自然语言最终回复只面向用户，简短总结本节点工作即可。不要在聊天回复中输出机器 JSON；聊天文本不再作为机器交付和完成依据。只有 workflow_commit_result 成功才代表候选机器结果已封存，正式完成状态仍由 Workbench 验收决定。",
     "提交前必须调用 workflow_read_result_draft 复核完整草稿，按通用执行协议完成六项固定自审并调用 workflow_self_review_result。已明确属于 downstreamConsumers 的后续验证写入 warnings 或 handoff，不得放入 unresolved 或据此降低当前节点 outcome。自审后立即校验和提交；若再次修改草稿，必须重新自审。",
     node.attempt > 1 && node.summary ? `这是第 ${node.attempt} 次纠正执行。保留并复用已经真实存在的业务产物，只针对上次验收问题补充或修正，不要无条件从头重做。上次结果反馈：\n${JSON.stringify({ outcome: node.summary.outcome, humanSummary: node.summary.humanSummary, warnings: node.summary.warnings, unresolved: node.summary.unresolved, outputs: node.summary.outputs }, null, 2)}` : ""
@@ -470,21 +483,13 @@ function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository[
     undefined,
     undefined,
     node.skills,
-    { engine: workflowExecutionProvider(node), workspaceRoot: workflow.workDirectory }
+    { engine: workflowExecutionProvider(node), workspaceRoot: workflowExecutionRoot(workflow) }
   );
 }
 
 function workflowResultPath(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, reportedPath: string, mustExist: boolean) {
-  const raw = reportedPath.trim();
-  if (!raw) throw new Error("执行结果包含空文件路径");
-  const workflowRoot = path.resolve(workflow.workDirectory);
-  const candidates = path.isAbsolute(raw) ? [path.resolve(raw)] : [path.resolve(workflow.workDirectory, raw), path.resolve(workspace.root, raw)];
-  const resolved = mustExist
-    ? candidates.find((candidate) => isPathInside(workflowRoot, candidate) && fs.existsSync(candidate))
-    : candidates.find((candidate) => isPathInside(workflowRoot, candidate));
-  if (!resolved) throw new Error(`执行结果路径越出任务目录：${raw}`);
-  if (mustExist && !fs.existsSync(resolved)) throw new Error(`Agent 声明的产物不存在：${raw}`);
-  return { absolute: resolved, relative: path.relative(workflowRoot, resolved).replaceAll("\\", "/") || "." };
+  void workspace;
+  return resolveWorkflowResultPath(workflow, reportedPath, mustExist);
 }
 
 function verifyWorkflowNodeResult(
@@ -596,6 +601,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   const beforeSnapshotPath = path.join(attempt.checkpointDirectory, "before-snapshot.json");
   const rawOutputPath = path.join(attempt.checkpointDirectory, "raw-output.txt");
   const resultTransactionPath = path.join(attempt.checkpointDirectory, "result-transaction.json");
+  const hostVerificationPath = path.join(attempt.checkpointDirectory, "host-verification.json");
   const runtimeDirectory = path.join(pluginRuntimeDirectory, "node-runtime", crypto.createHash("sha256").update(`${workflowId}:${current.planVersion}:${nodeId}:${attempt.attempt}`).digest("hex"));
   fs.mkdirSync(runtimeDirectory, { recursive: true });
   const leaseUntil = () => new Date(Date.now() + 60_000).toISOString();
@@ -648,6 +654,17 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
     requireSelfReview: true
   };
   const { resumed: resultTransactionResumed } = openWorkflowNodeResultTransaction(resultTransactionPath, resultContract);
+  const hostVerificationIdentity = workflowHostVerificationIdentity(resultContract, workflowExecutionRoot(workflow), current.verificationCommands);
+  const observedNodeChanges = (before: Map<string, string>, after: Map<string, string>) => {
+    const changedFiles = changedWorkspaceFiles(before, after);
+    const currentStartedAt = Date.parse(current.startedAt || "");
+    const writerScopes = (workflowRepository.get(workflowId, ownerUserId)?.nodes || [])
+      .filter((item) => item.id !== current.id && item.workspaceAccess === "write" && item.startedAt && (!item.finishedAt || !Number.isFinite(currentStartedAt) || Date.parse(item.finishedAt) >= currentStartedAt))
+      .flatMap((item) => workflowAuthorizedWriteScopes(item.writeScope, workflow.executionTarget));
+    const concurrentWriterChanges = writerScopes.length ? changedFiles.filter((file) => filesOutsideWriteScope([file], writerScopes, workflowExecutionRoot(workflow), workflowExecutionRoot(workflow)).length === 0) : [];
+    const concurrentWriterFiles = new Set(concurrentWriterChanges);
+    return { actualChangedFiles: changedFiles.filter((file) => !concurrentWriterFiles.has(file)), concurrentWriterChanges };
+  };
   if (!workflowPhaseAtLeast(attempt.phase, "agent_running")) attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_draft_started", leaseExpiresAt: leaseUntil() });
 
   const resultFromTransactionOrLegacy = async (finalText: string, engineError?: unknown) => {
@@ -702,9 +719,9 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
       const resultServer = workflowNodeResultToolServer(resultTransactionPath);
       try {
         if (workflowExecutionProvider(current) === "codex") {
-          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
+          await assertCodexWorkflowControlPlane(resultServer, workflowExecutionRoot(workflow), "result");
           const codex = buildCodex(getState().settings, undefined, true, workspace, [], [resultServer]);
-          const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
+          const workflowWorkspace = { ...workspace, root: workflowExecutionRoot(workflow) };
           const repairOptions = { ...delegatedThreadOptions(workflowWorkspace, getState().settings), sandboxMode: "read-only" as const };
           const terminal = await runCodexSessionTurn({
             createThread: () => codex.startThread(repairOptions),
@@ -727,7 +744,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
           const repairMcpConfig = await workflowNodeMcpConfigPath(workspace, [], [resultServer]);
           const repairTurn = await runClaudeSessionTurn({
             createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
-              cwd: workflow.workDirectory, sessionId: resumeSessionId, mcpConfigPath: repairMcpConfig, permissionMode: "plan",
+              cwd: workflowExecutionRoot(workflow), sessionId: resumeSessionId, mcpConfigPath: repairMcpConfig, permissionMode: "plan",
               allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([resultServer])],
               disallowedTools: [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS], signal: controller.signal,
               ownerId: `${workflowId}:${nodeId}:result-repair`,
@@ -764,21 +781,66 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   };
 
   if (!workflowPhaseAtLeast(attempt.phase, "agent_output_received") && !workflowPhaseAtLeast(attempt.phase, "result_parsed")) {
-    try {
-      beforeSnapshot = await captureWorkspaceSnapshot(workflow.workDirectory);
-      writeSnapshotCheckpoint(beforeSnapshotPath, beforeSnapshot);
-      if (attempt.snapshotRetryCount) attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount: 0, leaseExpiresAt: leaseUntil() });
-    } catch (error) {
-      const detail = `执行前工作区快照失败：${error instanceof Error ? error.message : String(error)}`;
-      const snapshotRetryCount = attempt.snapshotRetryCount + 1;
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount, leaseExpiresAt: leaseUntil() });
-      current.logs.push(attemptLog("error", "工作区快照暂时失败", `${detail}；${snapshotRetryCount <= 2 ? "将只重试快照阶段" : "已停止自动重试"}`));
+    const snapshotForStage = async (stage: string) => {
+      try { return await captureWorkspaceSnapshot(workflowExecutionRoot(workflow)); }
+      catch (error) {
+        const detail = `${stage}工作区快照失败：${error instanceof Error ? error.message : String(error)}`;
+        const snapshotRetryCount = attempt.snapshotRetryCount + 1;
+        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount, leaseExpiresAt: leaseUntil() });
+        current.logs.push(attemptLog("error", "工作区快照暂时失败", `${detail}；${snapshotRetryCount <= 2 ? "将只重试快照阶段，保留已执行命令证据" : "已停止自动重试"}`));
+        workflowRepository.updateNode(current);
+        if (snapshotRetryCount <= 2) throw new WorkflowNodeStageRetryError("snapshot", detail);
+        const failure = workflowFailureResult(detail);
+        if (fs.existsSync(hostVerificationPath) && fs.existsSync(beforeSnapshotPath)) {
+          try { failure.checks = readWorkflowHostVerificationCheckpoint(hostVerificationPath, hostVerificationIdentity, readSnapshotCheckpoint(beforeSnapshotPath))?.checks || []; }
+          catch { /* The failure itself remains authoritative if a checkpoint is damaged. */ }
+        }
+        throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, failure), false);
+      }
+    };
+    const blockVerificationRecovery = (detail: string) => {
+      throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, workflowFailureResult(detail, "blocked")), false);
+    };
+    const currentSnapshot = await snapshotForStage("执行前");
+    const savedHostCheckpoint = fs.existsSync(hostVerificationPath);
+    if (savedHostCheckpoint && !fs.existsSync(beforeSnapshotPath)) blockVerificationRecovery("只读系统验收原始快照缺失，请检查项目并显式重新执行节点");
+    beforeSnapshot = savedHostCheckpoint ? readSnapshotCheckpoint(beforeSnapshotPath) : currentSnapshot;
+    if (!savedHostCheckpoint) writeSnapshotCheckpoint(beforeSnapshotPath, beforeSnapshot);
+    if (current.workspaceAccess === "read" && current.verificationCommands.length) {
+      let checkpoint: WorkflowHostVerificationCheckpoint | null = null;
+      try { checkpoint = readWorkflowHostVerificationCheckpoint(hostVerificationPath, hostVerificationIdentity, beforeSnapshot); }
+      catch (error) { blockVerificationRecovery(error instanceof Error ? error.message : String(error)); }
+      if (checkpoint?.phase === "snapshot_completed" && checkpoint.afterDigest !== workflowSnapshotDigest(currentSnapshot)) blockVerificationRecovery("只读系统验收之后业务文件已变化，不能复用过期证据，请检查项目并显式重新执行节点");
+      if (!checkpoint) {
+        current.logs.push(attemptLog("status", "开始只读系统验收", `${current.verificationCommands.length} 条已审批受控命令；执行 Agent 保持只读权限`));
+        workflowRepository.updateNode(current);
+        checkpoint = { schemaVersion: 1, identityDigest: hostVerificationIdentity, beforeDigest: workflowSnapshotDigest(beforeSnapshot), phase: "commands_running", checks: [], verification: null, afterDigest: null, commandRunCount: 1 };
+        writeWorkflowHostVerificationCheckpoint(hostVerificationPath, checkpoint);
+        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { verificationRunCount: 1, leaseExpiresAt: leaseUntil() });
+        const checks = await runVerificationCommands(current.verificationCommands, workflowExecutionRoot(workflow), controller.signal, `workflow:${workflowId}:${nodeId}:verify`);
+        // Persist output before the next filesystem operation so a locked
+        // directory only retries the snapshot, never the approved command.
+        checkpoint = { ...checkpoint, phase: "commands_completed", checks };
+        writeWorkflowHostVerificationCheckpoint(hostVerificationPath, checkpoint);
+        if (controller.signal.aborted) throw controller.signal.reason || new Error("只读系统验收已取消");
+      } else current.logs.push(attemptLog("status", "恢复只读系统验收", "已保留真实命令证据，不重复执行已审批验收命令"));
+      if (checkpoint.phase === "commands_completed") {
+        const afterVerification = await snapshotForStage("只读系统验收后");
+        const { actualChangedFiles } = observedNodeChanges(beforeSnapshot, afterVerification);
+        const checks = [...checkpoint.checks];
+        if (actualChangedFiles.length) checks.push({ name: "只读系统验收文件边界", command: null, status: "failed", exitCode: null, evidence: `已审批验收命令修改了只读业务文件：${actualChangedFiles.join(", ")}；文件已保留供人工检查，不能判定验收通过。` });
+        const verification = { executor: "workbench" as const, phase: "before_agent" as const, checks, changedFiles: actualChangedFiles, verifiedAt: new Date().toISOString() };
+        checkpoint = { ...checkpoint, phase: "snapshot_completed", checks, verification, afterDigest: workflowSnapshotDigest(afterVerification) };
+        writeWorkflowHostVerificationCheckpoint(hostVerificationPath, checkpoint);
+      }
+      recordWorkflowNodeHostVerification(resultTransactionPath, checkpoint.verification!);
+      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { verificationRunCount: checkpoint.commandRunCount, leaseExpiresAt: leaseUntil() });
+      for (const check of checkpoint.checks) current.logs.push(attemptLog(check.status === "failed" ? "error" : "status", `只读系统验收 · ${check.status}`, [check.command || check.name, check.evidence].filter(Boolean).join("\n")));
       workflowRepository.updateNode(current);
-      if (snapshotRetryCount <= 2) throw new WorkflowNodeStageRetryError("snapshot", detail);
-      throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, workflowFailureResult(detail)), false);
     }
+    if (attempt.snapshotRetryCount) attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount: 0, leaseExpiresAt: leaseUntil() });
     attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "agent_running", leaseExpiresAt: leaseUntil() });
-    const prompt = workflowNodePrompt(workflow, current, workspace, runtimeDirectory); let finalText = "";
+    const prompt = workflowNodePrompt(workflow, current, workspace, runtimeDirectory, readWorkflowNodeResultTransaction(resultTransactionPath).taskContract); let finalText = "";
     if (current.summary) {
       current.summary = null;
       current.logs.push(attemptLog("status", "开始新的执行尝试", "上一尝试结果仅保留在历史记录中，不参与本次终态判断"));
@@ -794,9 +856,9 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
       try {
         if (workflowExecutionProvider(current) === "codex") {
           const resultServer = workflowNodeResultToolServer(resultTransactionPath);
-          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
+          await assertCodexWorkflowControlPlane(resultServer, workflowExecutionRoot(workflow), "result");
           const codex = buildCodex(getState().settings, undefined, true, workspace, current.mcpServers, [resultServer]);
-          const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
+          const workflowWorkspace = { ...workspace, root: workflowExecutionRoot(workflow) };
           const threadOptions = { ...delegatedThreadOptions(workflowWorkspace, getState().settings), sandboxMode: current.workspaceAccess === "write" ? "danger-full-access" as const : "read-only" as const };
           const previousThreadId = current.engineThreadId;
           const contextStrategy = workflowCodexContextStrategy(current);
@@ -851,7 +913,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
           const nodeMcpConfig = await workflowNodeMcpConfigPath(workspace, current.mcpServers, [resultServer]);
           const claudeTurn = await runClaudeSessionTurn({
             createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
-              cwd: workflow.workDirectory, sessionId: resumeSessionId, mcpConfigPath: nodeMcpConfig,
+              cwd: workflowExecutionRoot(workflow), sessionId: resumeSessionId, mcpConfigPath: nodeMcpConfig,
               permissionMode: current.workspaceAccess === "write" ? "bypassPermissions" : "plan",
               allowedTools: current.workspaceAccess === "read" ? [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([...resolvedMcpServers, resultServer])] : undefined,
               disallowedTools: current.workspaceAccess === "read" ? [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS] : undefined,
@@ -949,10 +1011,13 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   }
 
   if (!workflowPhaseAtLeast(attempt.phase, "verification_completed")) {
-    if (structured.outcome === "completed" && current.verificationCommands.length) {
+    const hostVerification = workflowNodeHostVerification(readWorkflowNodeResultTransaction(resultTransactionPath));
+    if (hostVerification) {
+      structured = mergeWorkflowNodeHostChecks(structured, hostVerification.checks);
+    } else if (structured.outcome === "completed" && current.verificationCommands.length) {
       current.logs.push(attemptLog("status", "开始系统验收", `${current.verificationCommands.length} 条受控命令`));
       workflowRepository.updateNode(current);
-      const systemChecks = await runVerificationCommands(current.verificationCommands, workflow.workDirectory, controller.signal, `workflow:${workflowId}:${nodeId}:verify`);
+      const systemChecks = await runVerificationCommands(current.verificationCommands, workflowExecutionRoot(workflow), controller.signal, `workflow:${workflowId}:${nodeId}:verify`);
       const verificationRunCount = attempt.verificationRunCount + 1;
       for (const check of systemChecks) current.logs.push(attemptLog(check.status === "failed" ? "error" : "status", `系统验收 · ${check.status}`, check.command || check.name));
       current.logs = current.logs.slice(-300); workflowRepository.updateNode(current);
@@ -970,11 +1035,25 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
   let records: Array<{ path: string; kind: string; hash: string | null; summary: string }> = [];
   if (workflowPhaseAtLeast(attempt.phase, "result_verified") && attempt.verifiedResult) {
     resultToPersist = attempt.verifiedResult;
+    let currentSnapshot;
+    try { currentSnapshot = await captureWorkspaceSnapshot(workflowExecutionRoot(workflow)); }
+    catch (error) {
+      throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, {
+        ...resultToPersist, outcome: "blocked", unresolved: [...resultToPersist.unresolved, `恢复已验证结果时无法读取业务目录：${error instanceof Error ? error.message : String(error)}`]
+      }), false);
+    }
+    const checkpointWorkflow = { ...workflow, nodes: workflow.nodes.map((node) => node.id === current.id ? { ...node, status: "completed" as const, summary: resultToPersist } : node) };
+    const integrityIssue = resultToPersist.fileIntegrity
+      ? workflowCompletedFileIntegrityIssues(checkpointWorkflow, currentSnapshot).get(current.id)
+      : workflowResultFileIntegrityIssue(workflow, resultToPersist, currentSnapshot);
+    if (integrityIssue) throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, {
+      ...resultToPersist, outcome: "blocked", unresolved: [...resultToPersist.unresolved, integrityIssue]
+    }), false);
     if (!workflowPhaseAtLeast(attempt.phase, "result_committed")) records = verifyWorkflowNodeResult(workflow, current, workspace, resultToPersist, resultToPersist.changedFiles, []).records;
   }
   else {
     let afterSnapshot = beforeSnapshot;
-    try { afterSnapshot = await captureWorkspaceSnapshot(workflow.workDirectory); }
+    try { afterSnapshot = await captureWorkspaceSnapshot(workflowExecutionRoot(workflow)); }
     catch (error) {
       const detail = `执行后工作区快照失败：${error instanceof Error ? error.message : String(error)}`;
       const snapshotRetryCount = attempt.snapshotRetryCount + 1;
@@ -985,13 +1064,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
       preserveBusinessArtifacts = true;
       structured = { ...structured, outcome: "partial", unresolved: [...structured.unresolved, detail] };
     }
-    const observedChangedFiles = changedWorkspaceFiles(beforeSnapshot, afterSnapshot);
-    const currentStartedAt = Date.parse(current.startedAt || "");
-    const overlappingWriterScopes = (workflowRepository.get(workflowId, ownerUserId)?.nodes || [])
-      .filter((item) => item.id !== current.id && item.workspaceAccess === "write" && item.startedAt && (!item.finishedAt || !Number.isFinite(currentStartedAt) || Date.parse(item.finishedAt) >= currentStartedAt))
-      .flatMap((item) => workflowAuthorizedWriteScopes(item.writeScope));
-    const concurrentWriterChanges = overlappingWriterScopes.length ? new Set(observedChangedFiles.filter((file) => filesOutsideWriteScope([file], overlappingWriterScopes, workflow.workDirectory, workflow.workDirectory).length === 0)) : new Set<string>();
-    const actualChangedFiles = observedChangedFiles.filter((file) => !concurrentWriterChanges.has(file));
+    const { actualChangedFiles, concurrentWriterChanges } = observedNodeChanges(beforeSnapshot, afterSnapshot);
     if (systemDerivedResult && actualChangedFiles.length) {
       preserveBusinessArtifacts = true;
       structured = {
@@ -1000,8 +1073,8 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
         warnings: [...structured.warnings, "这些输出由文件快照推导，只证明文件发生变化，不代表业务验收通过。"]
       };
     }
-    const authorizedWriteScopes = workflowAuthorizedWriteScopes(current.writeScope);
-    const outsideWriteScope = current.workspaceAccess === "write" ? filesOutsideWriteScope(actualChangedFiles, authorizedWriteScopes, workflow.workDirectory, workflow.workDirectory) : actualChangedFiles;
+    const authorizedWriteScopes = workflowAuthorizedWriteScopes(current.writeScope, workflow.executionTarget);
+    const outsideWriteScope = current.workspaceAccess === "write" ? filesOutsideWriteScope(actualChangedFiles, authorizedWriteScopes, workflowExecutionRoot(workflow), workflowExecutionRoot(workflow)) : actualChangedFiles;
     const writeManifestPath = path.join(attempt.checkpointDirectory, "write-manifest.json");
     if (!fs.existsSync(writeManifestPath)) atomicWriteWorkflowCheckpoint(writeManifestPath, JSON.stringify({ schemaVersion: 1, workflowId, nodeId, attempt: attempt.attempt, capturedAt: new Date().toISOString(), changedFiles: actualChangedFiles, concurrentWriterChanges: [...concurrentWriterChanges], outsideWriteScope }, null, 2));
     let verified = verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
@@ -1014,7 +1087,7 @@ async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, n
         workflowRepository.updateNode(current);
       }
     }
-    resultToPersist = verified.result; records = verified.records;
+    resultToPersist = { ...verified.result, fileIntegrity: buildWorkflowFileIntegrity(workflow, current, verified.result, beforeSnapshot, afterSnapshot, attempt.checkpointDirectory) }; records = verified.records;
     attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_verified", verifiedResult: resultToPersist, leaseExpiresAt: leaseUntil() });
   }
   const digest = workflowResultDigest(resultToPersist);
@@ -1055,7 +1128,7 @@ async function runWorkflowTextAgent(
   if (engine === "claude") {
     const turn = await runClaudeSessionTurn({
       createHandle: (sessionId) => createWorkflowClaudeHandle({
-        cwd: workflow.workDirectory, sessionId, permissionMode: "default",
+        cwd: workflowExecutionRoot(workflow), sessionId, permissionMode: "default",
         allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS], disallowedTools: [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS],
         signal: controller.signal, ownerId,
         onEvent: (event) => { if (event.type === "assistant") finalText = event.text; onEvent(event); }
@@ -1067,7 +1140,7 @@ async function runWorkflowTextAgent(
   }
   if (!getState().settings.apiKey) throw new Error("请先配置 Codex / OpenAI API Key");
   const codex = buildCodex(getState().settings, undefined, true);
-  const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
+  const workflowWorkspace = { ...workspace, root: workflowExecutionRoot(workflow) };
   const thread = codex.startThread({ ...threadOptions(workflowWorkspace, getState().settings), sandboxMode: "read-only", approvalPolicy: "never" });
   const streamController = new AbortController();
   const { events } = await thread.runStreamed(prompt, { signal: AbortSignal.any([controller.signal, streamController.signal]) });
@@ -1212,6 +1285,7 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
   const controller = new AbortController();
   // Claim the scheduler's checked slot before runtime discovery yields.
   activeWorkflowIntegrations.set(workflowId, controller);
+  let executionLease: WorkspaceExecutionLease | undefined;
   const appendEvent = (phase: "Integrator" | "Validator") => (event: NormalizedEngineEvent) => {
     if (!event.text) return;
     const log = workflowLogFromEngineEvent(event, `${phase.toLowerCase()}:${event.sourceId || event.type}`);
@@ -1233,6 +1307,11 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
     throw lastError;
   };
   try {
+    // Integration only reads business files; results/checkpoints belong to the
+    // plugin runtime. Upgrading concurrent readers to writers would deadlock.
+    executionLease = await workspaceExecutionCoordinator.acquire({ root: workflowExecutionRoot(workflow), ownerId: `workflow:${workflowId}`, label: workflow.title, access: "read" }, { signal: controller.signal });
+    const currentState = workflowRepository.get(workflowId, ownerUserId);
+    if (!currentState || currentState.status === "canceled" || currentState.status === "paused") return;
     const integrationBinding = await runtimeBindingForProvider(workflow.plannerEngine);
     controller.signal.throwIfAborted();
     const integrationRuntime = workflowRepository.beginIntegration(workflowId, integrationBinding);
@@ -1303,8 +1382,9 @@ async function integrateWorkflow(workflowId: string, ownerUserId: string) {
     workflowStateFiles.appendEvent(current, { type: "integration.failed", payload: { error: failed.unresolved.join("；") } });
     workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workspace.id, current.revision);
   } finally {
+    executionLease?.release();
     if (activeWorkflowIntegrations.get(workflowId) === controller) activeWorkflowIntegrations.delete(workflowId);
-    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
+    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflowExecutionRoot(workflow)));
   }
 }
 
