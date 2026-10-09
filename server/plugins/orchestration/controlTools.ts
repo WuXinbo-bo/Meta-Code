@@ -1,5 +1,6 @@
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import fs from "node:fs";
 import type { WorkbenchMcpServer } from "../../mcpConfig.js";
 
 export const WORKFLOW_PLANNER_MCP_SERVER = "workbench-workflow-plan";
@@ -26,6 +27,9 @@ export const WORKFLOW_RESULT_TOOL_NAMES = [
   "workflow_validate_result",
   "workflow_commit_result"
 ] as const;
+export const WORKFLOW_COMPACT_RESULT_TOOL_NAMES = [
+  "workflow_read_node_contract", "workflow_read_result_draft", "workflow_checkpoint_result", "workflow_submit_result", "workflow_report_blocked"
+] as const;
 
 function codexIdentifier(value: string) {
   return value.replace(/[^a-zA-Z0-9_]/g, "_");
@@ -36,7 +40,7 @@ export function codexMcpToolFunction(server: string, tool: string) {
 }
 
 export function codexWorkflowPlannerToolInstructions() {
-  const functions = WORKFLOW_PLANNER_TOOL_NAMES.map((tool) => `- ${tool}: tools.${codexMcpToolFunction(WORKFLOW_PLANNER_MCP_SERVER, tool)}(...)`).join("\n");
+  const functions = [...WORKFLOW_PLANNER_TOOL_NAMES, "workflow_submit_plan"].map((tool) => `- ${tool}: tools.${codexMcpToolFunction(WORKFLOW_PLANNER_MCP_SERVER, tool)}(...)`).join("\n");
   return [
     "Codex 规划工具调用约定：这些 MCP 工具通过统一 exec 工具暴露，必须使用下面的完整 JavaScript 函数名，不能调用 tools.workflow_read_plan 等短名称。",
     functions,
@@ -45,12 +49,15 @@ export function codexWorkflowPlannerToolInstructions() {
   ].join("\n");
 }
 
-export function codexWorkflowResultToolInstructions() {
-  const functions = WORKFLOW_RESULT_TOOL_NAMES.map((tool) => `- ${tool}: tools.${codexMcpToolFunction(WORKFLOW_RESULT_MCP_SERVER, tool)}(...)`).join("\n");
+export function codexWorkflowResultToolInstructions(protocolVersion: 1 | 2 = 1) {
+  const names = protocolVersion === 2 ? WORKFLOW_COMPACT_RESULT_TOOL_NAMES : WORKFLOW_RESULT_TOOL_NAMES;
+  const functions = names.map((tool) => `- ${tool}: tools.${codexMcpToolFunction(WORKFLOW_RESULT_MCP_SERVER, tool)}(...)`).join("\n");
   return [
     "Codex 机器交接工具调用约定：这些 MCP 工具通过统一 exec 工具暴露，必须使用下面的完整 JavaScript 函数名，不能调用 tools.workflow_read_node_contract 等短名称。",
     functions,
-    `首次读取示例：const result = await tools.${codexMcpToolFunction(WORKFLOW_RESULT_MCP_SERVER, "workflow_read_node_contract")}({}); text(result);`,
+    protocolVersion === 2
+      ? "任务合同已随本轮提供，无需重复读取。完成业务目标后一次 workflow_submit_result；服务器返回 ok=true、status=committed 后交接完成。仅长任务按需 checkpoint，恢复时按需读取草稿。"
+      : `首次读取示例：const result = await tools.${codexMcpToolFunction(WORKFLOW_RESULT_MCP_SERVER, "workflow_read_node_contract")}({}); text(result);`,
     "如果需要核对函数，可在 exec 中从 ALL_TOOLS 筛选 workbench_workflow_result；不得因短名称不存在而判定结果 MCP 未挂载。"
   ].join("\n");
 }
@@ -92,5 +99,7 @@ export function assertWorkflowPlannerTools(server: WorkbenchMcpServer, cwd: stri
 }
 
 export function assertWorkflowResultTools(server: WorkbenchMcpServer, cwd: string, timeoutMs = 15_000) {
-  return assertWorkflowControlTools(server, cwd, WORKFLOW_RESULT_MCP_SERVER, WORKFLOW_RESULT_TOOL_NAMES, "结果工具", timeoutMs);
+  const transactionPath = server.env?.WORKFLOW_NODE_RESULT_TRANSACTION_PATH;
+  const version = transactionPath ? (JSON.parse(fs.readFileSync(transactionPath, "utf8")) as { resultProtocolVersion?: number }).resultProtocolVersion : 1;
+  return assertWorkflowControlTools(server, cwd, WORKFLOW_RESULT_MCP_SERVER, version === 2 ? WORKFLOW_COMPACT_RESULT_TOOL_NAMES : WORKFLOW_RESULT_TOOL_NAMES, "结果工具", timeoutMs);
 }

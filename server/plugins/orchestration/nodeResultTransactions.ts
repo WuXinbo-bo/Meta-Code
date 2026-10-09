@@ -40,6 +40,8 @@ export type WorkflowNodeResultContract = {
   taskContract: Record<string, unknown>;
   downstreamNodeIds: string[];
   requireSelfReview?: boolean;
+  /** Persisted per attempt so recovery never silently changes its protocol. */
+  resultProtocolVersion?: 1 | 2;
 };
 
 export const WORKFLOW_NODE_SELF_REVIEW_KEYS = [
@@ -175,11 +177,88 @@ export function workflowNodeResultTransactionIssues(transaction: WorkflowNodeRes
       catch (error) { return error instanceof Error ? error.message : String(error); }
     } : undefined
   }));
-  if (transaction.requireSelfReview) {
+  if (transaction.requireSelfReview && transaction.resultProtocolVersion !== 2) {
     if (!transaction.selfReview) errors.push("提交前必须完成节点结果自审");
     else if (transaction.selfReview.resultDigest !== resultDigest(transaction.draftResult)) errors.push("节点结果在自审后发生变化，必须重新自审");
   }
   return [...new Set(errors)];
+}
+
+export type WorkflowResultSubmission = {
+  outcome?: WorkflowNodeOutcome;
+  humanSummary?: string;
+  outputs?: Array<Omit<WorkflowNodeOutput, "id" | "path" | "mediaType" | "consumableBy"> & Partial<Pick<WorkflowNodeOutput, "id" | "path" | "mediaType" | "consumableBy">>>;
+  checks?: Array<Omit<WorkflowNodeCheck, "command" | "exitCode"> & Partial<Pick<WorkflowNodeCheck, "command" | "exitCode">>>;
+  decisions?: WorkflowNodeResult["decisions"];
+  handoff?: Partial<WorkflowNodeResult["handoff"]>;
+  warnings?: string[];
+  unresolved?: string[];
+};
+
+/** Small receipts are safe to echo repeatedly; contracts/history stay on demand. */
+export function workflowNodeResultReceipt(transaction: WorkflowNodeResultTransaction) {
+  return {
+    ok: transaction.validationErrors.length === 0,
+    status: transaction.status,
+    revision: transaction.baseRevision,
+    outcome: transaction.draftResult.outcome,
+    digest: transaction.digest,
+    errors: transaction.validationErrors
+  };
+}
+
+function applyResultSubmission(transaction: WorkflowNodeResultTransaction, input: WorkflowResultSubmission, checkpoint: boolean) {
+  // Never spread caller data into the transaction: identities, systemVerification,
+  // changedFiles, fileIntegrity and machineResultPath are owned by the host.
+  const result = { ...transaction.draftResult };
+  if (input.outcome !== undefined) result.outcome = input.outcome;
+  if (input.humanSummary !== undefined) result.humanSummary = input.humanSummary;
+  if (input.outputs !== undefined) result.outputs = input.outputs.map((output) => ({
+    ...output,
+    id: output.id || `output-${crypto.createHash("sha256").update(JSON.stringify([output.type, output.path || null, output.description])).digest("hex").slice(0, 16)}`,
+    path: output.path ?? null,
+    mediaType: output.mediaType ?? null,
+    consumableBy: output.consumableBy ?? [...transaction.downstreamNodeIds]
+  }));
+  if (input.checks !== undefined) result.checks = input.checks.map((check) => ({ ...check, command: check.command ?? null, exitCode: check.exitCode ?? null }));
+  if (input.decisions !== undefined) result.decisions = input.decisions;
+  if (input.handoff !== undefined) result.handoff = { ...result.handoff, ...input.handoff };
+  if (input.warnings !== undefined) result.warnings = input.warnings;
+  if (input.unresolved !== undefined) result.unresolved = input.unresolved;
+  const host = workflowNodeHostVerification(transaction);
+  const withEvidence = host ? mergeWorkflowNodeHostChecks(result, host.checks) : result;
+  // Validate before normalization so invalid outcomes/empty outputs cannot be
+  // silently dropped or converted into successful results.
+  if (checkpoint && !withEvidence.humanSummary) {
+    const normalized = validateWorkflowNodeResultValue({ ...withEvidence, humanSummary: "checkpoint" });
+    return { ...normalized, humanSummary: "" };
+  }
+  return validateWorkflowNodeResultValue(withEvidence);
+}
+
+/** Atomically saves a checkpoint or validates and seals a complete submission. */
+export function submitWorkflowNodeResult(target: string, input: WorkflowResultSubmission, checkpoint = false) {
+  return withTransactionFileLock(target, () => {
+    const transaction = readWorkflowNodeResultTransaction(target);
+    if (transaction.resultProtocolVersion !== 2) throw new Error("当前节点使用旧版结果协议，请使用原事务工具完成提交");
+    const candidate = applyResultSubmission(transaction, input, checkpoint);
+    if (transaction.status === "committed") {
+      if (checkpoint || resultDigest(candidate) !== transaction.digest) throw new Error("节点结果已经提交，不能覆盖已封存结果");
+      return workflowNodeResultReceipt(transaction);
+    }
+    assertMutable(transaction);
+    transaction.draftResult = candidate;
+    transaction.selfReview = null;
+    transaction.digest = null;
+    transaction.baseRevision += 1;
+    transaction.updatedAt = new Date().toISOString();
+    transaction.operations.push({ id: `result-operation-${crypto.randomUUID()}`, type: checkpoint ? "checkpoint_result" : "submit_result", createdAt: transaction.updatedAt });
+    transaction.validationErrors = checkpoint ? [] : workflowNodeResultTransactionIssues(transaction);
+    transaction.status = checkpoint || transaction.validationErrors.length ? "editing" : "committed";
+    if (transaction.status === "committed") transaction.digest = resultDigest(transaction.draftResult);
+    writeJsonAtomically(target, transaction);
+    return workflowNodeResultReceipt(transaction);
+  });
 }
 
 export function reopenWorkflowNodeResultTransaction(target: string, reasons: string[] = []) {

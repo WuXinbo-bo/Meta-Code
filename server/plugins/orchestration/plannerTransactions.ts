@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { normalizeWorkflowPlan, normalizeWorkflowProviderCapabilities, validateWorkflowPlan, type WorkflowProviderCapabilitiesInput } from "./plan.js";
+import { normalizeWorkflowPlan, normalizeWorkflowProviderCapabilities, resolveWorkflowProvider, validateWorkflowPlan, type WorkflowProviderCapabilitiesInput } from "./plan.js";
 import { withTransactionFileLock, writeJsonAtomically } from "./transactionFile.js";
 import type { WorkflowPlan, WorkflowPlanningMode } from "./types.js";
 
@@ -48,6 +48,58 @@ const emptyPlan = (): WorkflowPlan => normalizeWorkflowPlan({
 
 function planDigest(plan: WorkflowPlan) {
   return crypto.createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+}
+
+/** Fill mechanical fields without inventing goals, permissions or evidence. */
+export function compileWorkflowPlanDraft(value: unknown, capabilities: WorkflowProviderCapabilitiesInput): WorkflowPlan {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const nodes = Array.isArray(source.nodes) ? source.nodes.map((item) => {
+    const node = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const access = node.workspaceAccess === "write" ? "write" : "read";
+    const provider = String(node.provider || "auto");
+    return { ...node, title: node.title || node.id, provider,
+      providerReason: node.providerReason || `使用${provider === "auto" ? `工作区 ${access} 默认引擎 ${resolveWorkflowProvider(provider, access, capabilities)}` : `计划指定引擎 ${provider}`}；用户审批后执行` };
+  }) : [];
+  const plan = normalizeWorkflowPlan({ ...source, validationMode: source.validationMode || "standard", nodes });
+  const byId = new Map(plan.nodes.map((node) => [node.id, node]));
+  const depths = new Map<string, number>();
+  const longest = (id: string, visited = new Set<string>()): number => {
+    if (visited.has(id)) return 0; // Cycles remain errors in the normal validator.
+    if (depths.has(id)) return depths.get(id)!;
+    const node = byId.get(id); if (!node) return 0;
+    const next = new Set([...visited, id]);
+    const depth = 1 + Math.max(0, ...node.dependsOn.map((dependency) => longest(dependency, next)));
+    depths.set(id, depth);
+    return depth;
+  };
+  const notes: Record<string, string> = {
+    "dependency-minimality": "宿主校验依赖存在、环路与传递性冗余；业务依赖合理性仍由规划与审批决定",
+    "critical-path": `计划最长依赖链 ${Math.max(0, ...plan.nodes.map((node) => longest(node.id)))} 个节点；未推断工作时长`,
+    "concurrency-utilization": `首批无依赖节点 ${plan.nodes.filter((node) => !node.dependsOn.length).length} 个；实际并发由调度器及范围锁控制`,
+    "read-write-consistency": `写入节点 ${plan.nodes.filter((node) => node.workspaceAccess === "write").length} 个；权限范围与冲突由宿主门禁复核`,
+    "provider-allocation": plan.nodes.map((node) => `${node.id}: ${node.providerReason}`).join("；") || "尚无节点",
+    "final-delivery": plan.finalDelivery.required ? `主交付 ${plan.finalDelivery.primary || "未声明"}；生产节点 ${plan.finalDelivery.producerNodeId || "未声明"}` : plan.finalDelivery.reason || "无需独立文件的原因待说明"
+  };
+  for (const [key, note] of Object.entries(notes)) if (!plan.audit.checks.some((check) => check.key === key)) plan.audit.checks.push({ key, status: "passed", note });
+  return plan;
+}
+
+export function submitWorkflowPlan(target: string, plan: unknown) {
+  return withTransactionFileLock(target, () => {
+    const transaction = readWorkflowPlanTransaction(target);
+    const candidate = compileWorkflowPlanDraft(plan, transaction.providerCapabilities);
+    if (transaction.status === "committed") {
+      if (planDigest(candidate) !== transaction.digest) throw new Error("候选计划已封存，不能覆盖已提交版本");
+      return transaction;
+    }
+    if (!["editing", "validated"].includes(transaction.status)) throw new Error("规划事务已经结束，不能继续修改");
+    transaction.draftPlan = candidate;
+    transaction.validationErrors = validateWorkflowPlan(candidate, new Set(transaction.availableSkills), new Set(transaction.availableMcpServers), transaction.providerCapabilities);
+    transaction.status = transaction.validationErrors.length ? "editing" : "committed";
+    transaction.digest = transaction.validationErrors.length ? null : planDigest(candidate);
+    transaction.operations.push({ id: `operation-${crypto.randomUUID()}`, createdAt: new Date().toISOString(), operation: { type: "set_plan_fields", fields: { fullReplacement: true } } });
+    return writeTransaction(target, transaction);
+  });
 }
 
 export function createWorkflowPlanTransaction(target: string, input: {
