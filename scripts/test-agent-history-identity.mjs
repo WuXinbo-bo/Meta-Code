@@ -26,11 +26,12 @@ const messageForResponse = vm.runInNewContext(`${extract(serverSource, "server/i
 }, { filename: "server/index.ts:messageForResponse" });
 
 const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-const functions = ["asRecord", "parseJsonRecord", "collectDeepValues", "firstDeepString", "subagentInfo", "subagentStatusLabel", "EventMessage"];
+const functions = ["asRecord", "parseJsonRecord", "collectDeepValues", "firstDeepString", "subagentInfo", "subagentStatusLabel", "subagentActionLabel", "subagentActivityText", "agentProviderLabel", "EventMessage"];
 const ProviderIcon = () => null;
 const context = vm.createContext({
   React: { createElement: (type, props, ...children) => ({ type, props: { ...props, children } }) },
   useState: () => [false, () => {}], ProviderIcon, ChevronRight: () => null,
+  compactLine: (value, max = 180) => String(value).slice(0, max),
   claudeQuestions: () => [],
 });
 vm.runInContext(`${extract(appSource, "src/App.tsx", functions, ["SUBAGENT_ACTIONS", "DEEP_SCAN_SKIP_KEYS"])}\nthis.identityFunctions = { subagentInfo, EventMessage };`, context, { filename: "src/App.tsx:agent-identity" });

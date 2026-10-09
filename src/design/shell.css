@@ -436,6 +436,13 @@
 .session-context-menu > button:hover,
 .session-context-menu summary:hover,
 .session-folder-submenu button:hover { color: var(--mc-text); background: var(--mc-hover); }
+.session-context-record { display: grid; gap: 3px; max-width: 220px; padding: 7px 8px 9px; border-bottom: 1px solid var(--mc-line); margin-bottom: 3px; }
+.session-context-record > span, .session-context-record > small { color: var(--mc-text-tertiary); font-size: 11px; }
+.session-context-record > strong, .session-context-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-context-record > strong { font-size: 11px; font-weight: 550; }
+.session-context-target { max-width: 210px; }
+.session-pin-submenu { max-width: 240px; }
+.session-pin-submenu > button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .tree-search {
   border-color: var(--mc-line);
