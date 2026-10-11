@@ -1,0 +1,31 @@
+.native-conversation-control { position: relative; display: inline-flex; align-items: center; }
+.native-conversation-menu { position: absolute; bottom: calc(100% + 12px); left: 0; width: min(310px, calc(100vw - 40px)); padding: 14px; border: 1px solid var(--mc-line); border-radius: 10px; background: var(--mc-surface); box-shadow: 0 8px 28px #0002; z-index: 35; color: var(--mc-text); }
+.native-conversation-menu header, .native-prompt-card header, .native-prompt-card footer { display: flex; gap: 8px; align-items: center; }
+.native-conversation-menu header strong, .native-prompt-card header strong { flex: 1; font-size: 12px; }
+.native-conversation-menu header button { padding: 3px; border: 0; background: transparent; color: inherit; }
+.native-conversation-menu p, .native-conversation-menu small { display: block; margin: 8px 0; font-size: 11px; color: var(--mc-text-secondary); line-height: 1.5; }
+.native-conversation-menu fieldset { display: grid; gap: 12px; margin: 12px 0; padding: 0; border: 0; min-width: 0; }
+.native-conversation-menu label { display: grid; gap: 5px; font-size: 11px; }
+.native-conversation-menu select, .native-prompt-card select, .native-prompt-card input { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px; border: 1px solid var(--mc-line); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); font-size: 12px; }
+.native-mode-options { display: flex; gap: 6px; }
+.native-mode-options button, .native-fork-action { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 7px; border: 1px solid var(--mc-line); border-radius: 6px; color: var(--mc-text-secondary); background: transparent; font-size: 11px; }
+.native-mode-options button { flex: 1; }
+.native-mode-options button[aria-pressed="true"] { color: var(--mc-text); background: var(--mc-surface-muted); border-color: var(--mc-line-strong); }
+.native-fork-action { width: 100%; }
+.native-conversation-menu button:disabled { opacity: .45; cursor: default; }
+.native-prompt-stack { position: fixed; bottom: 142px; left: 50%; transform: translateX(-50%); width: min(560px, calc(100vw - 44px)); max-height: min(55vh, 560px); overflow: auto; z-index: 34; display: grid; gap: 8px; }
+.native-prompt-card { padding: 14px; border: 1px solid var(--mc-line-strong); border-radius: 10px; background: var(--mc-surface); box-shadow: 0 6px 24px #0002; color: var(--mc-text); }
+.native-prompt-card header small { font-size: 11px; color: var(--mc-text-tertiary); }
+.native-prompt-card details { margin: 10px 0; font-size: 11px; }
+.native-prompt-card pre { max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.native-prompt-card label { display: grid; gap: 7px; margin: 12px 0; font-size: 12px; }
+.native-question { display: grid; gap: 7px; margin: 12px 0; font-size: 12px; }
+.native-prompt-card .native-question-choice { display: flex; align-items: center; margin: 6px 0; }
+.native-question-choice input { width: auto; }
+.native-question-choice small { color: var(--mc-text-secondary); }
+.native-prompt-card footer { justify-content: flex-end; }
+.native-control-error, .native-prompt-card p { color: var(--mc-text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .native-conversation-menu { position: fixed; left: 60px; right: 14px; bottom: 96px; width: auto; max-height: 65vh; overflow-y: auto; }
+  .native-prompt-stack { left: 60px; right: 14px; width: auto; transform: none; bottom: 132px; }
+}

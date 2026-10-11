@@ -34,6 +34,7 @@ export type CustomAgentLoadOptions = {
   userHome?: string;
   maxFileBytes?: number;
   maxAgents?: number;
+  providerHomes?: Partial<Record<CustomAgentProvider, string>>;
 };
 
 export type CustomAgentLoadResult = {
@@ -215,8 +216,8 @@ function contained(root: string, target: string) {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-async function readScope(options: { root: string; scope: CustomAgentScope; provider: CustomAgentProvider; format: CustomAgentSourceFormat; maxFileBytes: number; maxAgents: number }, diagnostics: CustomAgentDiagnostic[]) {
-  const directory = path.resolve(options.root, `.${options.provider}`, "agents");
+async function readScope(options: { root: string; directory?: string; scope: CustomAgentScope; provider: CustomAgentProvider; format: CustomAgentSourceFormat; maxFileBytes: number; maxAgents: number }, diagnostics: CustomAgentDiagnostic[]) {
+  const directory = options.directory || path.resolve(options.root, `.${options.provider}`, "agents");
   const result: CustomAgentDefinition[] = [];
   let entries;
   try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
@@ -245,7 +246,7 @@ async function readScope(options: { root: string; scope: CustomAgentScope; provi
         ? parseClaudeAgentMarkdown(source)
         : (() => {
           const metadata = parseCodexAgentToml(source);
-          return { metadata, instructions: cleanText(metadata.instructions || metadata.prompt || metadata["agent.instructions"] || metadata["agent.prompt"]) };
+          return { metadata, instructions: cleanText(metadata.developer_instructions || metadata.instructions || metadata.prompt || metadata["agent.instructions"] || metadata["agent.prompt"]) };
         })();
       result.push(definitionFrom(options.provider, options.scope, sourcePath, options.format, parsed.metadata, parsed.instructions, fallback));
       if (result.length >= options.maxAgents) break;
@@ -270,7 +271,7 @@ export async function loadCustomAgents(options: CustomAgentLoadOptions): Promise
   const all: CustomAgentDefinition[] = [];
   for (const scope of ["user", "project"] as const) for (const provider of ["claude", "codex"] as const) {
     const root = scope === "user" ? userHome : projectRoot;
-    all.push(...await readScope({ root, scope, provider, format: provider === "claude" ? "markdown" : "toml", maxFileBytes, maxAgents }, diagnostics));
+    all.push(...await readScope({ root, ...(scope === "user" && options.providerHomes?.[provider] ? { directory: path.join(options.providerHomes[provider]!, "agents") } : {}), scope, provider, format: provider === "claude" ? "markdown" : "toml", maxFileBytes, maxAgents }, diagnostics));
   }
   return { agents: mergeCustomAgents(all).slice(0, maxAgents), diagnostics };
 }

@@ -123,6 +123,9 @@ export type Session = {
   providerConfigValues?: Record<string, string | boolean>;
   runtimeBinding?: RuntimeExecutionIdentity;
   creationMutationId?: string;
+  nativeOptions?: import("../engines/nativeInteraction.js").NativeConversationOptions;
+  /** Claude fork is materialized by the official CLI on its first turn. */
+  nativeForkSourceId?: string;
 };
 
 export type McpTransport = "stdio" | "http" | "sse";
