@@ -6,6 +6,9 @@ Codex 与 Claude 的工作台普通对话支持按任务保存原生模式、审
 - `ask` 将命令、文件修改、权限请求或官方问题显示为可回答卡片。
 - Codex 原生历史分支调用官方 `thread/fork`；Claude 使用官方 `--resume --fork-session` 在首次发送时 materialize。
 - 自定义 Agent 来源于当前项目和对应原生配置目录；工作台不会把自定义 Agent 指令复制到持久化聊天。
+- Claude Agent 使用原文件和官方 `--agent`，保留 Hooks、Skills、Memory、MCP 和工具限制；支持 `.claude/agents/` 内的子目录。工作台只解析 YAML 数据，不执行 YAML 标签。
 - 请求绑定任务和用户，任务停止、进程退出或取消后请求立即失效。
+
+Claude 项目 Agent 的 Hooks 和内联 MCP 受官方目录信任检查约束。新目录需从任务的“原生 CLI 终端”进入并确认官方信任提示。仅运行普通非交互对话、信任父目录或打开工作台不等同于此授权；未确认时 Agent 仍可运行，但 Claude 会跳过这些扩展。工作台不会自动修改官方信任记录。用户级 Agent 的规则由官方 CLI 决定。
 
 能力声明不等于端点支持。Provider 新协议、专用联网搜索、实验性功能和 Windows ConPTY 仍需按官方版本与实际环境单独验收。

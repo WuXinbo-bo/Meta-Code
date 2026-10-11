@@ -9,6 +9,7 @@ export function appServerItem(item: Record<string, any>) {
   return { ...item, type: types[item.type] || item.type,
     ...(item.type === "collabAgentToolCall" ? { receiver_thread_ids: item.receiverThreadIds || [], agents_states: item.agentsStates || {}, sender_thread_id: item.senderThreadId, status: item.status === "inProgress" ? "in_progress" : item.status } : {}),
     ...(item.type === "commandExecution" ? { aggregated_output: item.aggregatedOutput || "", exit_code: item.exitCode ?? undefined, status: item.status === "inProgress" ? "in_progress" : item.status } : {}),
+    ...(item.type === "fileChange" ? { changes: (item.changes || []).map((change: any) => ({ ...change, nativeKind: change.kind, kind: typeof change.kind === "object" ? change.kind.type : change.kind })), status: item.status === "inProgress" ? "in_progress" : item.status } : {}),
     ...(item.type === "reasoning" ? { text: [...(item.summary || []), ...(item.content || [])].join("\n") } : {}),
     ...(item.type === "webSearch" ? { query: item.action?.query || item.action?.queries?.join("; ") || item.query || "" } : {}) };
 }
