@@ -85,3 +85,34 @@
   .workflow-extension-panel { left: 10px; width: calc(100% - 20px); max-height: calc(100% - 190px); }
 }
 @media (prefers-reduced-motion: reduce) { .workflow-workbench .spin { animation: none; } }
+
+.workflow-plugin-notice { position: absolute; z-index: 5; left: 14px; top: 51px; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 28px); padding: 8px 10px; border: 1px solid var(--mc-line); border-radius: 8px; background: var(--mc-overlay); color: var(--mc-text-secondary); font-size: 11px; }
+.workflow-plugin-notice button { flex: 0 0 auto; border: 0; background: var(--mc-hover); color: var(--mc-text); border-radius: 5px; padding: 3px 6px; font: inherit; cursor: pointer; }
+
+/* Small screens keep every node reachable without shrinking the desktop canvas. */
+@media (max-width: 700px) {
+  .workflow-workbench .workflow-canvas-shell { min-height: 0; overflow-y: auto; overflow-x: hidden; cursor: auto; user-select: auto; touch-action: pan-y; }
+  .workflow-workbench .workflow-canvas-stage { position: relative; inset: auto; min-width: 0; min-height: 0; width: 100%; transform: none !important; }
+  .workflow-workbench .workflow-graph-root { min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 64px 12px 250px; }
+  .workflow-workbench .workflow-graph-edges { display: none; }
+  .workflow-workbench .workflow-origin-card,
+  .workflow-workbench .workflow-agent-card,
+  .workflow-workbench .workflow-plan-card,
+  .workflow-workbench .workflow-planner-stack,
+  .workflow-workbench .workflow-plan-columns,
+  .workflow-workbench .workflow-plan-columns .workflow-column,
+  .workflow-workbench .workflow-branch-rail { width: 100% !important; min-width: 0; flex-basis: auto !important; transform: none !important; }
+  .workflow-workbench .workflow-agent-card { height: auto; min-height: 150px; }
+  .workflow-workbench .workflow-origin-card { height: auto; min-height: 160px; }
+  .workflow-workbench .workflow-origin-card.expanded { min-height: 430px; }
+  .workflow-workbench .workflow-plan-columns,
+  .workflow-workbench .workflow-branch-rail { flex-direction: column; gap: 12px; }
+  .workflow-workbench .workflow-agent-card > header strong { font-size: 12px; }
+  .workflow-workbench .workflow-canvas-hint { max-width: calc(100% - 70px); }
+  .workflow-workbench .workflow-zoom button:not(.workflow-review-toggle):not(.workflow-delivery-toggle),
+  .workflow-workbench .workflow-zoom > span { display: none; }
+  .workflow-workbench .workflow-zoom:not(:has(.workflow-review-toggle, .workflow-delivery-toggle)) { display: none; }
+}
+
+.workflow-load-notice { position: absolute; top: 54px; left: 14px; z-index: 10; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 28px); padding: 7px 9px; border: 1px solid var(--mc-line); border-radius: var(--mc-r-md); color: var(--mc-text-secondary); background: var(--mc-overlay); font-size: 11px; }
+.workflow-loading-card button, .workflow-load-notice button { border: 0; border-radius: var(--mc-r-sm); padding: 4px 7px; color: var(--mc-text-secondary); background: var(--mc-hover); font: inherit; cursor: pointer; }

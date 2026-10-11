@@ -161,13 +161,13 @@ export class WorkflowRepository {
   listNavigation(ownerUserId: string) {
     const rows = this.db.prepare(`
       SELECT id, title, workspace_id, work_directory, execution_target, execution_root, workspace_root, worktree_id, planner_engine, max_concurrent_agents,
-             status, revision, pinned, archived_at, folder_id, updated_at, created_at
+             status, active_plan_version, revision, pinned, archived_at, folder_id, updated_at, created_at
       FROM workflow_runs
       WHERE owner_user_id = ?
       ORDER BY updated_at DESC
     `).all(ownerUserId) as Array<Pick<WorkflowRow,
       "id" | "title" | "workspace_id" | "work_directory" | "execution_target" | "execution_root" | "workspace_root" | "worktree_id" | "planner_engine" |
-      "max_concurrent_agents" | "status" | "revision" | "pinned" | "archived_at" |
+      "max_concurrent_agents" | "status" | "active_plan_version" | "revision" | "pinned" | "archived_at" |
       "folder_id" | "updated_at" | "created_at"
     >>;
     return rows.map((row) => ({
@@ -182,6 +182,7 @@ export class WorkflowRepository {
       plannerEngine: row.planner_engine,
       maxConcurrentAgents: row.max_concurrent_agents,
       status: row.status,
+      activePlanVersion: row.active_plan_version,
       revision: row.revision,
       pinned: Boolean(row.pinned),
       archivedAt: row.archived_at,

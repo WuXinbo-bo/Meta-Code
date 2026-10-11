@@ -3,13 +3,14 @@ import { ArrowDown } from "lucide-react";
 import type { useAgentOutputFollow } from "./AgentConversation";
 
 /** Shared shell; each caller retains its own execution state and controls. */
-export function AgentDrawer({ title, header, navigation, followOutput, children, className = "", onClose }: {
+export function AgentDrawer({ title, header, navigation, followOutput, children, className = "", contentLabel, onClose }: {
   title: string;
   header: ReactNode;
   navigation?: ReactNode;
   followOutput: ReturnType<typeof useAgentOutputFollow>;
   children: ReactNode;
   className?: string;
+  contentLabel?: string;
   onClose: () => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
@@ -34,7 +35,7 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
       {!followOutput.following && followOutput.pendingCount > 0 && <button type="button" className="agent-drawer-new-activity" onClick={followOutput.jumpToLatest}>
         <ArrowDown size={13} /> 新增 {followOutput.pendingCount > 99 ? "99+" : followOutput.pendingCount} 条活动
       </button>}
-      <div className="agent-drawer-body" ref={followOutput.containerRef} onScroll={followOutput.onScroll} role="region" aria-label={`${title}活动日志`}>
+      <div className="agent-drawer-body" tabIndex={0} ref={followOutput.containerRef} onScroll={followOutput.onScroll} role="region" aria-label={contentLabel || `${title}活动日志`}>
         <div className="agent-drawer-content" ref={followOutput.contentRef}>{children}</div>
       </div>
     </aside>

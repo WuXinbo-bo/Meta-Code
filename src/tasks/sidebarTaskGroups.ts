@@ -7,6 +7,7 @@ type TaskRecord = {
     title: string;
     status: string;
     updatedAt: string;
+    createdAt?: string;
     workspaceId: string;
     taskContextId?: string | null;
     pinned?: boolean;
@@ -20,6 +21,7 @@ export type SidebarTaskGroup<T extends TaskRecord> = {
   records: T[];
   pinned: boolean;
   mixedFolders: boolean;
+  title: string;
 };
 
 export type GroupedSidebarTask<T extends TaskRecord> = T & { group: SidebarTaskGroup<T> };
@@ -45,6 +47,7 @@ export function groupSidebarTasks<T extends TaskRecord>(items: T[]): Array<Group
       group: {
         key,
         records,
+        title: (records.find((item) => item.kind === "chat" && item.task.title.trim().length > 0 && item.task.title.trim().length <= 64 && !/^(?:新任务|新对话)$/u.test(item.task.title.trim())) || [...records].filter((item) => item.kind === "workflow").sort((a, b) => Date.parse(a.task.createdAt || a.task.updatedAt) - Date.parse(b.task.createdAt || b.task.updatedAt))[0] || ordered[0]).task.title,
         pinned: records.some((item) => Boolean(item.task.pinned)),
         mixedFolders: new Set(records.map((item) => `${item.task.workspaceId}:${item.task.folderId || ""}`)).size > 1
       }

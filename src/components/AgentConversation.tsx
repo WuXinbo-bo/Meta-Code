@@ -25,7 +25,7 @@ type Props = {
   showProgress?: boolean;
 };
 
-export function useAgentOutputFollow(version: string, identity = "") {
+export function useAgentOutputFollow(version: string, identity = "", enabled = true) {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
@@ -38,22 +38,27 @@ export function useAgentOutputFollow(version: string, identity = "") {
   }, []);
 
   useLayoutEffect(() => {
+    if (!enabled) return;
     if (!followingRef.current) {
       setPendingCount((count) => count + 1);
       return;
     }
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
-  }, [version, scrollToBottom]);
+  }, [version, scrollToBottom, enabled]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     followingRef.current = true;
     setFollowing(true);
     setPendingCount(0);
     scrollIntentRef.current = 0;
+    if (!enabled) {
+      if (containerRef.current) containerRef.current.scrollTop = 0;
+      return;
+    }
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
-  }, [identity, scrollToBottom]);
+  }, [identity, scrollToBottom, enabled]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -93,6 +98,7 @@ export function useAgentOutputFollow(version: string, identity = "") {
 
   useEffect(() => {
     const content = contentRef.current;
+    if (!enabled) return;
     if (!content || typeof ResizeObserver === "undefined") return;
     let frame = 0;
     const observer = new ResizeObserver(() => {
@@ -105,7 +111,7 @@ export function useAgentOutputFollow(version: string, identity = "") {
       observer.disconnect();
       window.cancelAnimationFrame(frame);
     };
-  }, [scrollToBottom]);
+  }, [scrollToBottom, enabled]);
 
   const onScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     // Virtual measurement, tab changes and viewport resize also emit scroll.

@@ -31,6 +31,7 @@
     "test:workflows": "npm run build && node scripts/test-workflows.mjs",
     "test:workflow-roots": "node --import tsx scripts/test-workflow-execution-root.mjs",
     "test:workflow-controls": "node --import tsx scripts/test-workflow-controls.mjs",
+    "test:workflow-agent-presentation": "node --import tsx scripts/test-workflow-agent-presentation.mjs",
     "test:workflow-public-activity": "node --import tsx scripts/test-workflow-public-activity.mjs",
     "test:workflow-readonly-integration": "node --import tsx scripts/test-workflow-readonly-integration.mjs",
     "test:workflow-readonly-verification": "node --import tsx scripts/test-workflow-readonly-verification.mjs",

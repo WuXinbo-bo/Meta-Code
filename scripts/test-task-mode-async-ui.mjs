@@ -26,12 +26,14 @@ try {
 
   for (const fail of [false, true]) {
     await open("compact");
+    await page.getByRole("button", { name: "展开编排进度交接" }).click();
     await page.getByRole("button", { name: "询问编排" }).click();
     await page.getByLabel("编排问题").fill("Question for A");
     await page.getByRole("button", { name: "发送编排请求" }).click();
     await waitRequest("/api/workflows/async-a/plan");
     await page.getByRole("button", { name: "Select B" }).click();
     await page.getByTitle("查看编排详情").filter({ hasText: "Task B" }).waitFor();
+    await page.getByRole("button", { name: "展开编排进度交接" }).click();
     await page.getByRole("button", { name: "调整计划" }).click();
     await page.getByLabel("计划调整要求").fill("New request for B");
     await resolve("/api/workflows/async-a/plan", fail ? { error: "Old A error" } : { workflow: await page.evaluate(() => window.__taskAsync.workflow("a")), queuedUntilCheckpoint: true }, fail ? 409 : 200);
@@ -44,6 +46,7 @@ try {
 
   await open("compact-answer");
   await page.waitForFunction(() => window.__taskAsync.calls.some((call) => call.path === "/api/workflows/async-a/maintenance"));
+  await page.getByRole("button", { name: "展开编排进度交接" }).click();
   await page.getByRole("button", { name: "询问编排" }).click();
   await page.getByLabel("编排问题").fill("What has completed?");
   await page.getByRole("button", { name: "发送编排请求" }).click();
