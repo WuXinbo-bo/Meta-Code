@@ -17,6 +17,8 @@ export function orchestrationLifecycle(ports: {
   disposeScheduler: () => void;
 }): PluginLifecycle {
   const { repository, stateFiles } = ports;
+  let reconciliationFailed = false;
+  let checkedAt: string | undefined;
   return {
     activate() {
       const workflows = repository.listAll();
@@ -37,6 +39,8 @@ export function orchestrationLifecycle(ports: {
         stateFiles.sync(run);
         stateFiles.appendEvent(run, { type: "workflow.recovered_after_restart" });
       }
+      reconciliationFailed = false;
+      checkedAt = new Date().toISOString();
       // Enabling is persisted by the host before any execution is admitted.
       const pending = setImmediate(() => {
         if (ports.isEnabled()) for (const run of recovered) ports.queueTick(run.id, run.ownerUserId);
@@ -50,13 +54,18 @@ export function orchestrationLifecycle(ports: {
             stateFiles.appendEvent(run, { type: "workflow.lease_recovered" });
             ports.queueTick(run.id, run.ownerUserId);
           }
-        } catch (error) { console.error("Workflow lease reconciliation failed", error); }
+          reconciliationFailed = false;
+          checkedAt = new Date().toISOString();
+        } catch (error) { reconciliationFailed = true; checkedAt = new Date().toISOString(); console.error("Workflow lease reconciliation failed", error); }
       }, 15_000);
       timer.unref();
       return () => { clearImmediate(pending); clearInterval(timer); ports.disposeScheduler(); };
     },
     beforeDisable() {
       if (ports.isBusy() || repository.listAll().some((run) => ["planning", "queued", "running", "integrating"].includes(run.status))) throw new Error("编排任务仍在运行，请先暂停或完成任务后停用插件");
+    },
+    healthCheck() {
+      return { health: reconciliationFailed ? "degraded" : "healthy", message: reconciliationFailed ? "编排租约恢复检查暂未成功，将自动重试。已有任务和日志仍保留。" : "编排恢复与租约检查正常。", checkedAt, busy: ports.isBusy() };
     }
   };
 }
