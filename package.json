@@ -175,7 +175,9 @@
     "test:workflow-conversation-source": "node --import tsx scripts/test-workflow-conversation-source.mjs",
     "test:workflow-existing-fixtures": "node scripts/test-workflow-existing-fixtures.mjs",
     "test:claude-background": "node --import tsx scripts/test-claude-background-lifecycle.mjs",
-    "test:native-terminal": "node --import tsx scripts/test-native-terminal.mjs"
+    "test:native-terminal": "node --import tsx scripts/test-native-terminal.mjs",
+    "test:codex-search-compatibility": "node --import tsx scripts/test-codex-search-compatibility.mjs",
+    "test:native-session-compatibility": "node --import tsx scripts/test-native-session-compatibility.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

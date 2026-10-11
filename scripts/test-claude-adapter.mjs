@@ -9,6 +9,29 @@ import { codexActivityFromEvent, codexTurnFailure, isCodexReconnectMessage, reco
 import { classifyClaudeFailure, claudeRetryAllowed } from "../dist-server/engines/claude/transport.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const authKeys = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+const originalAuth = Object.fromEntries(authKeys.map(key => [key, process.env[key]]));
+try {
+  Object.assign(process.env, {ANTHROPIC_API_KEY:"fixture-stale-key",ANTHROPIC_AUTH_TOKEN:"fixture-stale-token",ANTHROPIC_BASE_URL:"https://stale.fixture.test"});
+  for (const connection of [
+    {credentialKind:"auth-token",baseUrl:"https://bearer.fixture.test/",apiKey:"fixture-selected-token"},
+    {credentialKind:"api-key",baseUrl:"https://key.fixture.test/",apiKey:"fixture-selected-key"},
+    {credentialKind:"api-key",baseUrl:"",apiKey:""}
+  ]) {
+    const options = {executable:process.execPath,executableArgs:[path.join(root,"scripts","fixtures","fake-claude-auth-environment.mjs")],cwd:root,configDir:path.join(root,".runtime","claude-auth-test"),permissionMode:"default",signal:new AbortController().signal,onEvent:()=>{},...connection};
+    assert.equal((await runClaude({...options,prompt:"check credential isolation"})).finalText,"credentials-isolated");
+    const childEvents = [];
+    const handle = new ClaudeSessionHandle({...options,onEvent:event=>childEvents.push(event)});
+    try {
+      assert.equal((await handle.nextTurn()).failed,false);
+      assert.ok(childEvents.some(event=>event.type==="turn.completed" && event.text==="credentials-isolated"));
+    }
+    finally { handle.close(); }
+  }
+} finally {
+  for (const key of authKeys) if (originalAuth[key] === undefined) delete process.env[key]; else process.env[key] = originalAuth[key];
+}
+console.log("Claude process/session child environments preserve bearer/API-key/login isolation");
 assert.equal(claudeToolResultFailed({ is_error: true, content: "command failed" }), true);
 assert.equal(claudeToolResultFailed({ is_error: false, content: "Error: exit code 7" }), false);
 assert.equal(claudeToolResultFailed({ exit_code: 7, output: "ordinary failure" }), true);

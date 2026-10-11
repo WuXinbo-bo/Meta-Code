@@ -1,3 +1,4 @@
+import { claudeNativeTerminalEnvironment } from "../nativeTerminalLaunch.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import readline from "node:readline";
@@ -23,6 +24,7 @@ function systemStatusText(item: any, subtype: string) {
 }
 
 export type ClaudeRunOptions = {
+  credentialKind?: "api-key" | "auth-token";
   executable: string;
   executableArgs?: string[];
   cwd: string;
@@ -85,7 +87,7 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
   const args = buildClaudeProcessArgs(options, requestedSessionId);
 
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...claudeNativeTerminalEnvironment(process.env, options.baseUrl || "", options.credentialKind === "auth-token" ? "" : options.apiKey || "", options.credentialKind === "auth-token" ? options.apiKey || "" : ""),
     CLAUDE_CONFIG_DIR: options.configDir,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     ANTHROPIC_MAX_RETRIES: "2"
@@ -101,8 +103,6 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
   delete env.WORKBENCH_AGENT_BRIDGE_URL;
   delete env.WORKBENCH_AGENT_BRIDGE_TOKEN;
   env.CLAUDE_WORKER_DEPTH = "1";
-  if (options.baseUrl) env.ANTHROPIC_BASE_URL = options.baseUrl.replace(/\/+$/, "");
-  if (options.apiKey) env.ANTHROPIC_API_KEY = options.apiKey;
 
   const child = spawn(options.executable, args, { cwd: options.cwd, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", shell: process.platform === "win32" && /\.cmd$/i.test(options.executable) });
   registerProcessTree(options.ownerId || requestedSessionId, child);

@@ -11,6 +11,20 @@ export function claudeNativeSessionArgs(sessionId: string | null | undefined, fo
   return sessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : [];
 }
 
+/** Preserve the selected credential's header. A gateway bearer token must not
+ * be coerced into an official API key or inherited from another host account.
+ */
+export function claudeNativeTerminalEnvironment(env: Record<string, string | undefined>, baseUrl: string, apiKey: string, authToken = "") {
+  const result = { ...env };
+  delete result.ANTHROPIC_API_KEY;
+  delete result.ANTHROPIC_AUTH_TOKEN;
+  delete result.ANTHROPIC_BASE_URL;
+  if (baseUrl) result.ANTHROPIC_BASE_URL = baseUrl.replace(/\/+$/, "");
+  if (authToken) result.ANTHROPIC_AUTH_TOKEN = authToken;
+  else if (apiKey) result.ANTHROPIC_API_KEY = apiKey;
+  return result;
+}
+
 export type NativeTerminalDiagnostic = { code: string; message: string; action: string };
 
 /** Recognize CLI startup errors, not model-written claims about feature support. */

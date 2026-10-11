@@ -70,6 +70,7 @@ export type OrchestrationRuntimePorts = {
   workflowNodeResultToolServer: (transactionPath: string) => WorkbenchMcpServer;
   delegatedThreadOptions: (workspace: Workspace, settings: Settings) => ThreadOptions;
   workflowNodeMcpConfigPath: (workspace: Workspace, names: string[], additionalServers?: WorkbenchMcpServer[]) => Promise<string>;
+  claudeCredentialKind?: () => "api-key" | "auth-token";
   createWorkflowClaudeHandle: (options: { cwd: string; sessionId?: string | null | undefined; mcpConfigPath?: string | undefined; permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions"; tools?: string[]; snapshotOnly?: boolean; allowedTools?: string[] | undefined; disallowedTools?: string[] | undefined; additionalDirectories?: string[] | undefined; includeSystemStatus?: boolean | undefined; signal: AbortSignal; ownerId: string; onEvent: (event: NormalizedEngineEvent) => void | Promise<void>; }) => Promise<ClaudeSessionHandle>;
   claudeMcpAllowedTools: (servers: WorkbenchMcpServer[]) => string[];
   CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS: readonly ["Write", "Edit", "NotebookEdit", "Bash"];
@@ -331,7 +332,7 @@ async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowR
       return new ClaudeSessionHandle({
         executable: command.executable, executableArgs: command.args, cwd: workflowExecutionRoot(workflow),
         sessionId: resumeSessionId, model: getState().settings.claude.model, effort: getState().settings.claude.effort,
-        baseUrl: getState().settings.claude.baseUrl, apiKey: getState().settings.claude.apiKey, configDir: nativeProviderHome("claude", workflow.ownerUserId),
+        baseUrl: getState().settings.claude.baseUrl, apiKey: getState().settings.claude.apiKey, credentialKind: ports.claudeCredentialKind?.(), configDir: nativeProviderHome("claude", workflow.ownerUserId),
         mcpConfigPath: plannerMcpConfigFile, permissionMode: "default", disallowNativeAgents: true,
         disallowedTools: [...CLAUDE_PLANNER_DISALLOWED_TOOLS],
         allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, "mcp__workbench-workflow-plan__*"],

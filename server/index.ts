@@ -3,6 +3,8 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CodexSearchCompatibility } from "./engines/codex/searchCompatibility.js";
+import { canResumeNativeSession } from "./runtime/sessionCompatibility.js";
 import { Codex, type ThreadEvent, type ThreadOptions, type Usage } from "@openai/codex-sdk";
 import compression from "compression";
 import { parse as parseCsv } from "csv-parse/sync";
@@ -66,7 +68,7 @@ import { resolveClaudeCommand } from "./engines/claude/runtime.js";
 import { ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
 import { NativeTerminalManager } from "./engines/nativeTerminal.js";
 import { registerNativeTerminalRoutes } from "./engines/nativeTerminalRoutes.js";
-import { assertNativeTerminalExecutable, claudeNativeSessionArgs, codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
+import { assertNativeTerminalExecutable, claudeNativeSessionArgs, claudeNativeTerminalEnvironment, codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
 import { claudeTranscriptTerminalState } from "./engines/claude/transcriptLifecycle.js";
 import type { ClaudeInputOrigin } from "./engines/claude/backgroundTasks.js";
 import { codexActivityFromEvent, isCodexContextCompactionNotice, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
@@ -568,8 +570,9 @@ async function validateCodexModel(settings: Pick<Settings, "baseUrl" | "apiKey" 
   const response = await fetch(openAiResponsesUrl(baseUrl), {
     method: "POST",
     headers: openAiHeaders(settings.apiKey),
-    body: JSON.stringify({ model: settings.model, input: "Reply with OK.", max_output_tokens: 16 }),
-    signal: AbortSignal.timeout(30_000)
+    body: JSON.stringify({ model: settings.model, input: "Reply with OK.", max_output_tokens: 128,
+      ...(/^(?:gpt-[5-9]|o[134](?:-|$))/i.test(settings.model) ? { reasoning: { effort: "low" } } : {}) }),
+    signal: AbortSignal.timeout(60_000)
   });
   const text = await response.text();
   if (!response.ok) {
@@ -1708,7 +1711,7 @@ async function createWorkflowClaudeHandle(options: {
   const command = resolveClaudeCommand(runtime.path);
   return new ClaudeSessionHandle({
     executable: command.executable, executableArgs: command.args, cwd: options.cwd, sessionId: options.sessionId,
-    model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
+    model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
     configDir: CLAUDE_HOME, mcpConfigPath: options.mcpConfigPath, permissionMode: options.permissionMode, snapshotOnly: options.snapshotOnly, tools: options.tools, allowedTools: options.allowedTools,
     disallowedTools: options.disallowedTools, additionalDirectories: options.additionalDirectories, includeSystemStatus: options.includeSystemStatus,
     disallowNativeAgents: true, signal: options.signal, ownerId: options.ownerId, onEvent: options.onEvent
@@ -1891,8 +1894,8 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   );
   env.CODEX_HOME = codexHome;
   if (settings.apiKey) {
-    env.CODEX_API_KEY = settings.apiKey;
-    env.OPENAI_API_KEY = settings.apiKey;
+    env.CODEX_API_KEY = codexRuntimeConnection(settings).apiKey;
+    env.OPENAI_API_KEY = codexRuntimeConnection(settings).apiKey;
   }
   if (parentSession && delegationEnabled) {
     env.WORKBENCH_AGENT_BRIDGE_URL = AGENT_BRIDGE_URL;
@@ -1906,8 +1909,22 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   return env;
 }
 
+function claudeCredentialKind(): "api-key" | "auth-token" {
+  const profile = state.providerConnections.find((item) => item.providerId === "claude" && item.isDefault);
+  const environment = profile ? providerActiveEnvironment("claude", profile.authMethodId, providerConnectionEnvironment(profile)) : {};
+  return profile?.authMethodId === "anthropic-compatible" && Boolean(environment.ANTHROPIC_AUTH_TOKEN) ? "auth-token" : "api-key";
+}
+const codexSearchCompatibility = new CodexSearchCompatibility(PORT);
+function codexRuntimeConnection(settings: Settings) {
+  const profile = state.providerConnections.find((item) => item.providerId === "codex" && item.isDefault);
+  const legacy = profile?.authMethodId === "openai-compatible" && profile.env.METACODE_CODEX_LEGACY_SEARCH === "true";
+  return legacy && settings.baseUrl && settings.apiKey
+    ? { ...codexSearchCompatibility.connection(openAiApiRoot(settings.baseUrl), settings.apiKey), legacy: true }
+    : { baseUrl: settings.baseUrl ? openAiApiRoot(settings.baseUrl) : "", apiKey: settings.apiKey, legacy: false };
+}
 function codexProviderConfig(settings: Settings): CodexConfigObject {
-  return settings.baseUrl ? { model_provider: "modelx", model_providers: { modelx: { name: "ModelX API", base_url: openAiApiRoot(settings.baseUrl), env_key: "OPENAI_API_KEY", wire_api: "responses", supports_websockets: false, request_max_retries: 3, stream_max_retries: 5, stream_idle_timeout_ms: 300000 } } } : {};
+  const connection = codexRuntimeConnection(settings);
+  return connection.baseUrl ? { model_provider: "modelx", model_providers: { modelx: { name: "ModelX API", base_url: connection.baseUrl, ...(connection.legacy ? { supports_standalone_web_search: true } : {}), env_key: "OPENAI_API_KEY", wire_api: "responses", supports_websockets: false, request_max_retries: 3, stream_max_retries: 5, stream_idle_timeout_ms: 300000 } } } : {};
 }
 
 function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string, snapshotOnly = false) {
@@ -1925,7 +1942,7 @@ function buildCodex(settings: Settings, parentSession?: Session, disableNativeAg
   };
   return new Codex({
     ...(codexRuntimeDetection.peek()?.available ? { codexPathOverride: codexRuntimeDetection.peek()!.path } : {}),
-    ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+    ...(codexRuntimeConnection(settings).apiKey ? { apiKey: codexRuntimeConnection(settings).apiKey } : {}),
     ...(Object.keys(codexConfig).length ? { config: codexConfig } : {}),
     env: { ...envForCodex(settings, parentSession, disableNativeAgents, codexHomeOverride || CODEX_HOME), ...workspaceMcp.env }
   });
@@ -2931,8 +2948,8 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
       model: state.settings.claude.model,
       effort: state.settings.claude.effort,
       baseUrl: state.settings.claude.baseUrl,
-      apiKey: state.settings.claude.apiKey,
-      resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey }),
+      apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
+      resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind() }),
       configDir: nativeProviderHome("claude", parentSession.ownerUserId),
       mcpConfigPath,
       permissionMode: mode === "implementation" ? "bypassPermissions" : "plan",
@@ -3939,7 +3956,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
         executable: command.executable, executableArgs: command.args, cwd: workspace.root,
         sessionId, model: state.settings.claude.model,
         effort: state.settings.claude.effort,
-        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
+        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
         configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: state.settings.claude.permissionMode,
         bridgeUrl: delegationEnabled ? CODEX_BRIDGE_URL : undefined,
         bridgeToken: delegationEnabled ? CODEX_BRIDGE_TOKEN : undefined,
@@ -4040,7 +4057,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
 
 async function runSessionLoop(session: Session, workspace: Workspace, initialPrompt: string, activeRun: ActiveRun) {
   const runtimeBinding = await runtimeBindingForProvider(session.engine);
-  if (session.runtimeBinding && session.runtimeBinding.capabilityFingerprint !== runtimeBinding.capabilityFingerprint && session.engineSessionId) {
+  if (session.runtimeBinding && session.runtimeBinding.capabilityFingerprint !== runtimeBinding.capabilityFingerprint && !canResumeNativeSession(session.runtimeBinding, runtimeBinding) && session.engineSessionId) {
     appendMessage(session, {
       role: "event",
       text: `${mainEngineName(session)} 运行时或能力已变化，旧上下文不能安全续接；本轮将建立新上下文并保留工作台历史`,
@@ -5394,6 +5411,7 @@ const orchestrationRuntime = createOrchestrationRuntime({
   workflowNodeResultToolServer,
   delegatedThreadOptions,
   workflowNodeMcpConfigPath,
+  claudeCredentialKind,
   createWorkflowClaudeHandle,
   claudeMcpAllowedTools,
   CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS,
@@ -5525,6 +5543,7 @@ function queueWorkflowTick(workflowId: string, ownerUserId: string) { orchestrat
 function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: string) { return orchestrationScheduler.reopenRecoveredWorkflowDependents(workflowId, ownerUserId); }
 
 const app = express();
+codexSearchCompatibility.register(app);
 app.use(performanceMonitor.middleware);
 app.use(compression({
   threshold: 1_024,
@@ -5648,8 +5667,13 @@ registerNativeTerminalRoutes(app, {
       args.push("--mcp-config", await workspaceMcpConfigPath(workspace), "--strict-mcp-config");
       env.CLAUDE_CONFIG_DIR = nativeProviderHome("claude", owner);
       env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-      if (state.settings.claude.baseUrl) env.ANTHROPIC_BASE_URL = state.settings.claude.baseUrl.replace(/\/+$/, "");
-      if (state.settings.claude.apiKey) env.ANTHROPIC_API_KEY = state.settings.claude.apiKey;
+      const profile = ownerProviderProfiles(owner, "claude").find((item) => item.isDefault) || ownerProviderProfiles(owner, "claude")[0];
+      const profileEnv = providerActiveEnvironment("claude", profile?.authMethodId, providerConnectionEnvironment(profile));
+      const connectionEnv = claudeNativeTerminalEnvironment(env, state.settings.claude.baseUrl, state.settings.claude.apiKey, profileEnv.ANTHROPIC_AUTH_TOKEN);
+      delete env.ANTHROPIC_API_KEY;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+      delete env.ANTHROPIC_BASE_URL;
+      Object.assign(env, connectionEnv);
       if (input.agentTeams === true) env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
       else delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
     } else {
@@ -6443,14 +6467,14 @@ function nativeProviderHome(providerId: "codex" | "claude", ownerUserId: string)
 }
 
 function nativeProviderConnection(profile: ProviderConnectionProfile) {
-  const environment = providerConnectionEnvironment(profile);
+  const environment = providerActiveEnvironment(profile.providerId, profile.authMethodId, providerConnectionEnvironment(profile));
   if (profile.providerId === "codex") return {
     baseUrl: profile.authMethodId === "openai-compatible" ? String(environment.OPENAI_BASE_URL || profile.baseUrl || "") : "",
     apiKey: ["openai-api-key", "openai-compatible"].includes(profile.authMethodId) ? String(environment.OPENAI_API_KEY || profile.apiKey || "") : ""
   };
   return {
     baseUrl: profile.authMethodId === "anthropic-compatible" ? String(environment.ANTHROPIC_BASE_URL || profile.baseUrl || "") : "https://api.anthropic.com",
-    apiKey: ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId) ? String(environment.ANTHROPIC_API_KEY || profile.apiKey || "") : ""
+    apiKey: ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId) ? String(environment.ANTHROPIC_AUTH_TOKEN || environment.ANTHROPIC_API_KEY || profile.apiKey || "") : ""
   };
 }
 

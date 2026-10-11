@@ -4,7 +4,7 @@
 
 核心原生执行、子 Agent、会话恢复、Skill、项目指令、MCP、Hooks 和运行控制已有真实验证。Claude 原生 Dynamic Workflow 也已完成后台通知、自动唤醒及成果交付。Meta Code 的协作插件和编排插件另行回归通过。
 
-**不能据此宣称所有官方功能完整可用。** 当前 Codex 会话没有暴露联网搜索工具；Claude 官方交互 CLI 在启动初始化阶段返回 403，尚未进入 Agent Teams 创建阶段。实验性能力、官方服务、版本和兼容接口限制需要逐项验证，manifest 声明不等于实测结果。工作台的原生适配、Provider 原生 Workflow、Meta 编排插件和 Agent Teams 是不同能力。
+**不能据此宣称所有官方功能完整可用。** 本轮已在可见工作台中真实验证 Codex `search_query`（通过明确标注边界的兼容桥）和 Claude 原生 fork；Claude Agent Teams 结构、通信和普通停止请求已进入真实验证，但官方结构化单成员关闭仍受 CLI schema 限制。实验性能力、官方服务、版本和兼容接口限制需要逐项验证，manifest 声明不等于实测结果。工作台的原生适配、Provider 原生 Workflow、Meta 编排插件和 Agent Teams 是不同能力。
 
 ## 测试方法与证据
 
@@ -32,30 +32,42 @@
 | 项目 AGENTS.md / CLAUDE.md | 通过 | 通过 | 不同项目指令 marker 返回且与文件一致 |
 | 自定义 MCP | 通过 | 通过 | 真实 `native_add(-2,5)` 返回 3 与 MCP marker |
 | 项目 Hook | 官方终端通过 | 通过 | Codex SessionStart、Claude PostToolUse 均生成测试事件文件；Codex 按官方 exact-definition trust 审阅，不绕过信任 |
-| 联网搜索 | **受限 / 未通过** | 通过 | Codex 即使配置实时联网，也未暴露可调用搜索工具；Claude 真正 WebSearch 获得官方 Workflow 文档。没有用 curl 冒充 |
+| 联网搜索 | **通过（兼容边界）** | 通过 | Codex 真实 `search_query` 从可见工作台返回官方 URL；旧网关使用 `/alpha/search` → hosted `web_search_preview`，明确拒绝未实现的域名/时效/专用搜索控制。Claude 真正 WebSearch 获得官方文档。没有用 curl 冒充 |
 | 原生会话记忆与恢复 | 通过 | 通过 | 后续轮及重启后恢复同一会话，返回原标记 |
 | 排队输入 | 通过 | 通过 | QUEUE-FIRST 完成后执行 QUEUE-SECOND，记忆标记正确，队列为空 |
 | 暂停 → 恢复 | 通过 | 通过 | 观察真实 `sleep 30` 启动后暂停；没有延迟写文件；恢复仍返回原标记 |
 | 运行中引导 | 通过 | 通过 | 真正运行延迟命令后 steer，完成 STEER-OK；无旧目标文件副作用 |
 | 停止 → 继续对话 | 通过 | 通过 | stopped 终态，原延迟文件不存在，后续 RESUME-OK 成功 |
-| 官方交互 CLI 入口 | 通过 | 入口可启动，官方初始化受限 | 使用 PTY 与官方可执行文件；同一工作台认证、账号、模型、MCP、执行目录和互斥锁 |
+| 官方交互 CLI 入口 | 通过 | 通过（认证修复后） | 使用 PTY 与官方可执行文件；Claude 保留网关 Bearer 认证后进入交互；同一工作台账号、模型、MCP、执行目录和互斥锁 |
 | 官方终端关闭 / 回放 / 停止 | 通过 | 退出记录可读 | 关闭视图保留进程；重开同一实例回放，停止释放执行锁；不将终端对话冒充工作台普通时间线 |
-| Claude Agent Teams | 不适用 | **启动阻断 / 未通过** | 仅官方交互 CLI、in-process 与实验开关；CLI 启动访问 `api.anthropic.com` 返回 403，尚未进入团队创建阶段。不能将其直接归因于 Teams 权限 |
-| 原生 fork / review | 官方终端通过 | Claude fork 已接入、待官方服务可用后实测 | Codex `/fork` 选择当前 Git 目录，官方显示 Fork created；`/review` 对测试仓库真实完成。Claude 原生终端现在使用官方 `--resume <id> --fork-session`，工作台“从回复创建分支”仍是上下文重建，两者不混淆 |
+| Claude Agent Teams | 不适用 | **创建与通信通过；结构化关闭受限** | 官方 CLI named Agent 创建 math-reader/test-reader，lead 与成员及成员之间 SendMessage 真实成功；普通停止文字获确认但成员仍 available，结构化 shutdown 受官方 schema 冲突阻断。退出 lead 终端为 exit 0 |
+| 原生 fork / review | 官方终端通过 | **通过** | Codex `/fork` 选择当前 Git 目录，官方显示 Fork created；`/review` 对测试仓库真实完成。Claude 官方 `--resume <id> --fork-session` 保留原上下文、写入分支专属标记、读取源码并执行 `node --test`，源会话未出现分支标记。工作台“从回复创建分支”仍是上下文重建，两者不混淆 |
 | 所有斜杠命令 | 未逐一验证 | 未逐一验证 | 终端提供官方命令入口不等于每条命令已验证；登录、官方远程服务和实验功能仍受外部条件约束 |
 | 交互权限审批、计划模式全部转换 | 本轮未完整验证 | 本轮未完整验证 | 当前测试沿用已配置权限。未通过放宽保护或伪造 onboarding 达成验收 |
 | Windows 原生 ConPTY / 打包执行 | 本机无法真实执行 | 本机无法真实执行 | 共享源码同步与边界检查另行执行，不把 Mac PTY 测试当作 Windows 实机结果 |
 
-## 本轮诊断修复（2026-10-11）
+## 本轮真实可用性修复（2026-10-11）
 
-1. **能力声明不再等同于端点实测。** 新增原生功能诊断接口数据，Codex 联网搜索在自定义兼容端点显示为“待实测”，并给出端点、模型、运行时三者的检查建议；Claude Agent Teams 显示为“启动初始化待验证”。能力面板不再把 manifest 的 `tools.web=true` 当成当前端点已提供搜索工具。
+1. **能力声明不再等同于端点实测。** 新增原生功能诊断接口数据，能力面板不再把 manifest 的 `tools.web=true` 当成当前端点已提供搜索工具。Codex 搜索只有在真实搜索事件和来源 URL 都返回后才标记为通过。
 2. **官方启动错误可定位。** 原生终端捕获 Claude 官方启动输出中的 `api.anthropic.com: Status 403`，显示“官方初始化阻断”，并提示网络、代理、服务区域和认证检查；不会伪造 Teams 成功状态，也不会把普通插件会话判为不可用。
-3. **Claude 原生 fork 使用官方协议。** 原生终端对已有 Claude 会话提供 `--resume <id> --fork-session` 选项；没有会话时拒绝创建空分支。该选项复用官方 CLI，会话 ID 与工作台任务保持隔离。
+3. **Claude 原生 fork 使用官方协议。** 原生终端对已有 Claude 会话提供 `--resume <id> --fork-session` 选项；实测会话 ID 与源不同，分支标记只存在于分支 transcript，且源码测试通过；没有会话时拒绝创建空分支。该选项复用官方 CLI，会话 ID 与工作台任务保持隔离。
 4. **Windows ConPTY 验证门槛前移。** 原生终端边界测试增加 `.cmd/.bat` 拒绝、官方 `.exe` 接受、输入、缩放、退出和租约释放；Windows CI 使用 Node 24，Windows 实机仍需安装包级验收。
 
-本轮可见工作台复测：基础 Claude 任务在关闭 Teams 开关、只使用原生 fork 的情况下，官方 CLI 仍在 `api.anthropic.com` 启动初始化上返回 403；终端诊断正确显示 `official-initialization-forbidden`。这支持“通用交互启动阻断”的判断，不是 Teams 独有故障。基础任务与业务文件没有改动，终端回放留在指定测试目录的 `reports/claude-native-fork-fix-retest.json`。
+本轮可见工作台复测：Claude 网关 Bearer 认证已真实进入官方交互 CLI、Teams 创建与通信；fork 也已真实完成。官方结构化 shutdown schema 仍被 CLI 拒绝，普通文字停止后成员保持 `available`，因此该项保留受限结论。Codex `search_query` 经 `/alpha/search` 兼容桥真实返回官方 URL，并在重启后的第二轮复测通过。基础任务与业务文件没有改动，终端回放和搜索结果留在指定测试目录。
 
-Mac `npm run typecheck`、`npm run build`、134 项离线回归通过，新增 PTY 测试实际完成输入、缩放和退出；Windows ConPTY 本机无法执行，不能因此标为通过。新能力诊断已在当前工作台接口及 Provider 设置 UI 检查，两个特色插件 health 为 healthy。
+### 真实回归补充
+
+- `reports/codex-search-final-check.json`：工作台重启后，Codex `search_query` 返回 `developers.openai.com/codex/config-reference`，并完成 `node --test`（1/1）。
+- `reports/claude-fork-isolation-check.json`：Claude fork 退出码 0，分支专属 marker 不在源会话 transcript 中。
+- `claude/native-auth-final-regression.md`：重启后 Claude 普通会话真实读取源码并通过测试；本轮新会话没有前一轮 marker，报告明确记录 `NOT RECALLED`，没有读取私有 transcript 冒充恢复成功。
+- 原生 Codex Responses 兼容桥对 `/responses/compact` 做透明透传，避免搜索适配削弱长会话；认证、SSE、取消、大小限制和上游错误均有边界测试。
+- 原生 Claude 认证在 process、session、委派、编排和终端路径统一保留 Bearer/API Key 选择；子进程实测不存在旧环境凭据串用。
+- 原生会话在同一 CLI 路径、版本、适配器下只因能力声明变化不会清空上下文；CLI、路径、适配器或 ACP 变化仍触发安全重建。
+- `reports/claude-capability-resume-before.json` / `after.json`：旧控制任务在修复后的可见工作台继续运行，原生会话 ID 保持不变，真实召回 `CONTROL-CLAUDE-20261011`，无文件/私有 transcript 读取。这是原生恢复验收，前述新建上下文失败轮继续保留。
+
+Mac `npm run typecheck`、`npm run build` 与完整离线回归通过，新增 PTY 测试实际完成输入、缩放和退出；Windows ConPTY 本机无法执行，不能因此标为通过。当前工作台模型目录探测返回 Claude 11 个、Codex 10 个模型；兼容网关仍有偶发上游重试/超时，不将某次健康状态等同于永久服务保证。
+
+Codex 连接验证的旧 30 秒超时也会阻挡实际可用账号：本轮真实业务已成功，短探测却两次超时。探测改用低推理预算（支持该参数的模型）和 60 秒超时后，真实请求在约 35.2 秒返回成功，账号恢复 ready。业务任务仍使用用户自己的模型/推理强度；没有放宽权限，也没有伪造连接健康状态。
 
 ## 发现与修复
 
@@ -80,10 +92,11 @@ Mac `npm run typecheck`、`npm run build`、134 项离线回归通过，新增 P
 
 ## 自动验证与提交范围
 
-- `npm run test:ci`：134 项离线测试通过，包含构建、原有 Provider / 编排 / 插件边界及新增后台生命周期、原生终端测试。
+- `npm run test:ci`：136 项完整离线测试通过，包含构建、原有 Provider / 编排 / 插件边界及新增后台生命周期、原生终端、搜索兼容、原生会话连续性测试。
 - 新后台 fixture 实际启动子进程，覆盖中间 result、后台通知、最终 result、子工具隔离、用户来源和结构化终态。
 - 新终端测试覆盖 owner 隔离、缺失请求 body、替换实例 SSE、回放截断、容量与关闭期间启动；并实际运行已安装 PTY 执行 Node。
 - 最终 `npm run typecheck`、`npm run build` 与相关边界复测需通过后提交。变更为 shared，Windows main 应 cherry-pick 后独立检查；Windows 实机运行另行记录。
+- 提交前扫描 110 个源文件和本地实测文件，与现有凭据库比对，配置中的凭据匹配数为 0。真实任务数据、日志、终端回放和截图保留在用户测试目录，不进入仓库。
 
 ## 官方参考与后续验收门槛
 
@@ -96,4 +109,4 @@ Mac `npm run typecheck`、`npm run build`、134 项离线回归通过，新增 P
 - [Claude Dynamic Workflows](https://code.claude.com/docs/en/workflows)
 - [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/typescript)
 
-下一轮完整验收需要：可完成官方 Claude 初始化的环境验证 Agent Teams 创建/通信/结束；能暴露 Codex 搜索工具的 Provider/模型组合验证真实搜索；在官方服务可用时验证 Claude 原生 fork、完整计划 / 权限审批、长期后台能力与 Windows ConPTY 实机测试。当前无法消除的外部限制保持受限结论，不能靠伪造状态或降低权限要求标记成功。
+下一轮完整验收需要：验证 Claude Agent Teams 官方结构化成员关闭协议；在官方 Provider 直接暴露新版搜索协议时取消兼容桥并复测新版 filters/专用命令；完整计划/权限审批、长期后台能力与 Windows ConPTY 实机测试仍需逐项验证。当前无法消除的外部限制保持受限结论，不能靠伪造状态或降低权限要求标记成功。
