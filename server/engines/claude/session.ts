@@ -6,6 +6,7 @@ import { claudeToolPermissionError, claudeToolResultFailed, validateClaudeResult
 import { registerProcessTree, terminateProcessTree } from "../../processTree.js";
 import { WorkbenchTimeoutError } from "../../orchestration/timeouts.js";
 import { ClaudeTransportError, claudeApiRetryExhaustsProcess, classifyClaudeFailure, CLAUDE_DEFAULT_RETRY_POLICY, type ClaudeRetryPolicy, type ClaudeRuntimeMode } from "./transport.js";
+import { ClaudeBackgroundTasks, claudeUserInput, type ClaudeInputOrigin } from "./backgroundTasks.js";
 
 type Options = {
   executable: string; executableArgs?: string[]; cwd: string; sessionId?: string | null;
@@ -38,6 +39,7 @@ export type ClaudeSessionTurnOptions = {
   handle?: ClaudeSessionHandle | null;
   sessionId?: string | null;
   prompt: string;
+  inputOrigin?: ClaudeInputOrigin;
   sendPrompt?: boolean;
   recoveryAttempts?: number;
   signal: AbortSignal;
@@ -124,6 +126,7 @@ export class ClaudeSessionHandle {
   private outputTimer?: NodeJS.Timeout;
   private turnInFlight = false;
   private sessionId: string;
+  private readonly backgroundTasks = new ClaudeBackgroundTasks();
 
   constructor(private readonly options: Options) {
     this.sessionId = options.sessionId || crypto.randomUUID();
@@ -153,9 +156,9 @@ export class ClaudeSessionHandle {
   get closed() { return Boolean(this.closedError) || this.child.exitCode !== null; }
   get currentSessionId() { return this.sessionId; }
 
-  send(text: string) {
+  send(text: string, origin?: ClaudeInputOrigin) {
     if (this.closed) throw this.closedError || new Error("Claude CLI 会话已关闭");
-    const input = { type: "user", message: { role: "user", content: [{ type: "text", text }] } };
+    const input = claudeUserInput(text, origin);
     this.child.stdin.write(`${JSON.stringify(input)}\n`, "utf8");
     this.turnInFlight = true;
     this.armTimeout();
@@ -210,11 +213,16 @@ export class ClaudeSessionHandle {
       if (!line.trim()) continue; this.armTimeout();
       let item: any; try { item = JSON.parse(line); } catch { continue; }
       if (item.session_id) this.sessionId = String(item.session_id);
+      // Child messages share this stream on recent CLI versions. Their tools
+      // and replies belong to the child transcript, not the main-turn counters.
+      if (["assistant", "user", "stream_event", "tool_progress"].includes(item.type)
+        && (item.parent_tool_use_id || item.agent_id)) continue;
       if (item.type === "system" && item.subtype === "init") {
         await this.options.onEvent({ type: "session.started", rawType: "system.init", sessionId: this.sessionId, text: "Claude 会话已开始", payload: item });
         await this.options.onEvent({ type: "turn.started", rawType: "turn.started", text: "Working", payload: item });
       } else if (item.type === "system") {
         const subtype = String(item.subtype || "status");
+        this.backgroundTasks.apply(item);
         if (HIDDEN_SYSTEM_SUBTYPES.has(subtype) && !(this.options.includeSystemStatus && subtype !== "thinking_tokens")) continue;
         const sourceId = subtype === "api_retry" ? "system:api_retry" : String(item.uuid || `system:${subtype}`);
         await this.options.onEvent({ type: "status", rawType: `system.${subtype}`, sourceId, toolName: subtype, text: systemStatusText(item, subtype), payload: item });
@@ -254,7 +262,7 @@ export class ClaudeSessionHandle {
           const permissionError = claudeToolPermissionError(block);
           const failed = claudeToolResultFailed(block);
           if (permissionError) activity.permissionError = permissionError;
-          await this.options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: id, toolName: toolNames.get(id) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: block, phase: permissionError ? "failed" : failed ? "failed" : "completed", detail: { input: toolInputs.get(id), output: text, result: block } });
+          await this.options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: id, toolName: toolNames.get(id) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: { ...block, native_result: item.tool_use_result }, phase: permissionError ? "failed" : failed ? "failed" : "completed", detail: { input: toolInputs.get(id), output: text, result: block } });
         }
       } else if (item.type === "tool_progress" || item.type === "tool_use_summary") {
         const id = String(item.tool_use_id || item.uuid || crypto.randomUUID()); const name = String(item.tool_name || toolNames.get(id) || "工具"); if (item.tool_name) toolNames.set(id, name);
@@ -267,14 +275,15 @@ export class ClaudeSessionHandle {
         await this.options.onEvent({ type: "status", sourceId: String(item.uuid || item.type), toolName: item.type, text: String(item.message || "Claude 状态已更新"), payload: item });
       } else if (item.type === "result") {
         const usage = usageFrom(item.usage);
-        const validation = validateClaudeResult(item, usage, activity);
+        const waiting = item.subtype === "success" && !item.is_error && this.backgroundTasks.mustWait(item);
+        const validation = waiting ? { valid: true, reason: undefined, retryable: undefined } : validateClaudeResult(item, usage, activity);
         if (!validation.valid) {
           const error = validation.reason || "Claude CLI 返回了不完整结果";
           await this.options.onEvent({ type: "error", text: error, payload: { ...item, workbench_validation_error: error, retryable: validation.retryable } });
           this.settle({ sessionId: this.sessionId, usage, failed: true, retryable: validation.retryable, error });
         } else {
-          await this.options.onEvent({ type: "turn.completed", rawType: "result", text: String(item.result || "Claude 任务已完成"), usage, payload: item });
-          this.settle({ sessionId: this.sessionId, usage, failed: false });
+          await this.options.onEvent({ type: waiting ? "status" : "turn.completed", rawType: waiting ? "result.background_wait" : "result", toolName: waiting ? "background_wait" : undefined, text: waiting ? `Claude 后台任务仍在运行（${this.backgroundTasks.activeCount} 项），等待结果` : String(item.result || "Claude 任务已完成"), usage, payload: item, phase: waiting ? "running" : "completed" });
+          if (!waiting) this.settle({ sessionId: this.sessionId, usage, failed: false });
         }
         partial.clear(); toolNames.clear(); toolInputs.clear(); completedTools.clear(); messageId = "";
         activity = { assistantText: "", toolStarted: 0, toolCompleted: 0 };
@@ -313,7 +322,7 @@ export async function runClaudeSessionTurn(options: ClaudeSessionTurnOptions): P
     await options.onSessionId?.(value);
   };
   await persistSessionId(handle.currentSessionId);
-  if (options.sendPrompt !== false) handle.send(options.prompt);
+  if (options.sendPrompt !== false) handle.send(options.prompt, options.inputOrigin);
   try {
     for (let attempt = 0; ; attempt += 1) {
       let result: ClaudeSessionTurnResult;

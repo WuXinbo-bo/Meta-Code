@@ -65,6 +65,7 @@ export type AgentCapabilities = {
     stream: boolean;
     cancel: boolean;
     steer: boolean;
+    interactiveTerminal?: boolean;
   };
   workspace: {
     read: boolean;
