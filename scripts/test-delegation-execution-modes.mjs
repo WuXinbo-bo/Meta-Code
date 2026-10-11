@@ -66,6 +66,7 @@ function harness(provider, { transientFailure = false } = {}) {
       await options.onEvent({ type: "turn.completed", usage: emptyUsage() });
       return { threadId: "fixture-thread" };
     },
+    claudeCredentialKind: () => "auth-token",
     getClaudeRuntime: async () => ({ available: true, path: "fixture-claude-cli" }),
     resolveClaudeCommand: () => ({ executable: "fixture-cli", args: ["fixture-wrapper"] }),
     workspaceMcpConfigPath: async () => path.join(workspace.root, "fixture-mcp.json"),
@@ -101,6 +102,7 @@ function assertTransportMode(capture, expected, cwd) {
     assert.equal(capture.options.webSearchMode, "cached");
   } else {
     assert.equal(capture.options.cwd, cwd);
+    assert.equal(capture.options.credentialKind, "auth-token", "worker must preserve the selected credential header");
     assert.equal(flagValues(capture.args, "--permission-mode")[0], readOnly ? "plan" : "bypassPermissions");
     const disallowed = flagValues(capture.args, "--disallowedTools");
     for (const tool of ["Task", "Agent", "Workflow"]) assert.ok(disallowed.includes(tool));

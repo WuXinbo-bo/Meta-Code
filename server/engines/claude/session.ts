@@ -1,3 +1,4 @@
+import { claudeNativeTerminalEnvironment } from "../nativeTerminalLaunch.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import readline from "node:readline";
@@ -9,6 +10,7 @@ import { ClaudeTransportError, claudeApiRetryExhaustsProcess, classifyClaudeFail
 import { ClaudeBackgroundTasks, claudeUserInput, type ClaudeInputOrigin } from "./backgroundTasks.js";
 
 type Options = {
+  credentialKind?: "api-key" | "auth-token";
   executable: string; executableArgs?: string[]; cwd: string; sessionId?: string | null;
   model?: string; baseUrl?: string; apiKey?: string; configDir: string;
   mcpConfigPath?: string;
@@ -131,9 +133,7 @@ export class ClaudeSessionHandle {
   constructor(private readonly options: Options) {
     this.sessionId = options.sessionId || crypto.randomUUID();
     const args = buildClaudeSessionArgs(options, this.sessionId);
-    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: options.configDir, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ANTHROPIC_MAX_RETRIES: "2" };
-    if (options.baseUrl) env.ANTHROPIC_BASE_URL = options.baseUrl.replace(/\/+$/, "");
-    if (options.apiKey) env.ANTHROPIC_API_KEY = options.apiKey;
+    const env: NodeJS.ProcessEnv = { ...claudeNativeTerminalEnvironment(process.env, options.baseUrl || "", options.credentialKind === "auth-token" ? "" : options.apiKey || "", options.credentialKind === "auth-token" ? options.apiKey || "" : ""), CLAUDE_CONFIG_DIR: options.configDir, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ANTHROPIC_MAX_RETRIES: "2" };
     if (options.bridgeUrl) env.CLAUDE_CODEX_BRIDGE_URL = options.bridgeUrl;
     if (options.bridgeToken) env.CLAUDE_CODEX_BRIDGE_TOKEN = options.bridgeToken;
     if (options.claudeWorkerBridgeUrl) env.CLAUDE_WORKER_BRIDGE_URL = options.claudeWorkerBridgeUrl;

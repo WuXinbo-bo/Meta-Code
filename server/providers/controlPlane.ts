@@ -110,7 +110,8 @@ const DEFINITIONS: Record<string, ProviderConfigurationDefinition> = {
     ],
     fields: [
       { env: "OPENAI_BASE_URL", label: "Base URL", kind: "url", authMethodIds: ["openai-compatible"], placeholder: "https://api.example.com" },
-      { env: "OPENAI_API_KEY", label: "API Key", kind: "secret", authMethodIds: ["openai-api-key", "openai-compatible"], placeholder: "sk-..." }
+      { env: "OPENAI_API_KEY", label: "API Key", kind: "secret", authMethodIds: ["openai-api-key", "openai-compatible"], placeholder: "sk-..." },
+      { env: "METACODE_CODEX_LEGACY_SEARCH", label: "旧版联网搜索兼容", kind: "boolean", authMethodIds: ["openai-compatible"], description: "仅为支持 web_search_preview 的网关开启。官方 Codex 搜索通过工作台转换协议，保留搜索事件和引用；需使用实时联网，不支持缓存、域名过滤等新版控制。" }
     ]
   },
   claude: {
@@ -122,7 +123,8 @@ const DEFINITIONS: Record<string, ProviderConfigurationDefinition> = {
     ],
     fields: [
       { env: "ANTHROPIC_BASE_URL", label: "Base URL", kind: "url", authMethodIds: ["anthropic-compatible"], placeholder: "https://api.example.com" },
-      { env: "ANTHROPIC_API_KEY", label: "API Key", kind: "secret", authMethodIds: ["anthropic-api-key", "anthropic-compatible"], placeholder: "sk-ant-..." }
+      { env: "ANTHROPIC_API_KEY", label: "API Key（x-api-key）", kind: "secret", authMethodIds: ["anthropic-api-key", "anthropic-compatible"], placeholder: "sk-ant-..." },
+      { env: "ANTHROPIC_AUTH_TOKEN", label: "网关令牌（Bearer）", kind: "secret", authMethodIds: ["anthropic-compatible"], placeholder: "网关提供的令牌", description: "网关使用 Authorization 认证时填写。优先于 API Key；官方交互终端保持相同认证方式。" }
     ]
   },
   gemini: {
