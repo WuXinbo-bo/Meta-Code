@@ -91,6 +91,36 @@ assert.equal(cleanups, 2, "failed persistence disposes the newly activated runti
 fs.rmdirSync(registryPath);
 fs.renameSync(registryPath + ".saved", registryPath);
 failure.stop();
+let healthCalls = 0;
+let healthFailure = false;
+const diagnostics = new PluginHost(isolated("diagnostics"), [
+  { manifest: manifest("legacy"), healthCheck: () => "healthy" },
+  { manifest: manifest("reported"), healthCheck: () => {
+    healthCalls++;
+    if (healthFailure) throw Error("private fixture detail");
+    return { health: "degraded", message: "Recovery pending", checkedAt: "2026-10-11T00:00:00Z", busy: true };
+  } }
+]);
+diagnostics.start();
+assert.equal(diagnostics.snapshot("legacy").health, "healthy", "legacy string health remains compatible");
+const reported = diagnostics.snapshot("reported");
+assert.equal(healthCalls, 1, "a snapshot evaluates custom health once");
+assert.equal(reported.diagnostics.message, "Recovery pending");
+assert.equal(reported.diagnostics.checkedAt, "2026-10-11T00:00:00Z");
+assert.equal(reported.diagnostics.busy, true);
+const admitted = diagnostics.acquire("legacy");
+assert.equal(diagnostics.snapshot("legacy").diagnostics.activeRequests, 1);
+assert.equal(diagnostics.snapshot("legacy").diagnostics.busy, true);
+admitted();
+assert.equal(diagnostics.snapshot("legacy").diagnostics.busy, false);
+healthFailure = true;
+assert.equal(diagnostics.snapshot("reported").health, "degraded");
+assert.doesNotMatch(JSON.stringify(diagnostics.snapshot("reported")), /private fixture detail/, "exceptions must not leak through public diagnostics");
+diagnostics.setEnabled("reported", false);
+assert.equal(diagnostics.snapshot("reported").health, "disabled");
+assert.equal(diagnostics.snapshot("reported").diagnostics.busy, false);
+assert.ok(diagnostics.publicList().every((plugin) => !("runtimeDirectory" in plugin)));
+diagnostics.stop();
 fs.writeFileSync(registryPath, "not json");
 assert.throws(() => new PluginHost(lifecyclePaths, [{ manifest: manifest("fixture") }]).start(), /配置损坏/);
 assert.equal(fs.readFileSync(registryPath, "utf8"), "not json");

@@ -24,10 +24,12 @@ export type PluginManifest = {
 };
 
 export type PluginHealth = "healthy" | "disabled" | "degraded";
+export type PluginHealthReport = { health: PluginHealth; message: string; checkedAt?: string; busy?: boolean };
 
 export type PluginSnapshot = PluginManifest & {
   enabled: boolean;
   health: PluginHealth;
+  diagnostics: { message: string; checkedAt: string | null; activeRequests: number; busy: boolean };
   dataDirectory: string;
   runtimeDirectory: string;
 };
@@ -42,7 +44,7 @@ export type MetaCodePlugin = {
   manifest: PluginManifest;
   beforeDisable?: () => void;
   activate?: (context: PluginContext) => void | (() => void);
-  healthCheck?: (context: PluginContext) => PluginHealth;
+  healthCheck?: (context: PluginContext) => PluginHealth | PluginHealthReport;
 };
 
 export function assertPluginManifest(manifest: PluginManifest) {

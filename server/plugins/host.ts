@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import semver from "semver";
 import type { WorkbenchPaths } from "../appPaths.js";
-import { assertPluginManifest, type MetaCodePlugin, type PluginContext, type PluginHealth, type PluginSnapshot } from "./types.js";
+import { assertPluginManifest, type MetaCodePlugin, type PluginContext, type PluginHealth, type PluginHealthReport, type PluginSnapshot } from "./types.js";
 
 type Registry = { schemaVersion: 1; enabled: Record<string, boolean> };
 export type PluginLifecycle = Pick<MetaCodePlugin, "activate" | "healthCheck" | "beforeDisable">;
@@ -170,13 +170,21 @@ export class PluginHost {
   }
 
   health(id: string): PluginHealth {
-    if (!this.isEnabled(id)) return "disabled";
-    try { return this.require(id).healthCheck?.(this.context(id)) || "healthy"; }
-    catch { return "degraded"; }
+    return this.healthReport(id).health;
+  }
+
+  private healthReport(id: string): PluginHealthReport {
+    if (!this.isEnabled(id)) return { health: "disabled", message: "插件已停用，历史任务和日志仍保留。" };
+    try {
+      const report = this.require(id).healthCheck?.(this.context(id)) || "healthy";
+      return typeof report === "string" ? { health: report, message: report === "healthy" ? "插件宿主运行正常。" : "插件运行检查需要处理。" } : report;
+    } catch { return { health: "degraded", message: "插件运行检查暂未成功，请刷新检查或查看工作台日志。" }; }
   }
 
   snapshot(id: string): PluginSnapshot {
-    return { ...structuredClone(this.require(id).manifest), enabled: this.isEnabled(id), health: this.health(id), dataDirectory: this.context(id).dataDirectory, runtimeDirectory: this.context(id).runtimeDirectory };
+    const report = this.healthReport(id);
+    const activeRequests = this.admissions.get(id) || 0;
+    return { ...structuredClone(this.require(id).manifest), enabled: this.isEnabled(id), health: report.health, diagnostics: { message: report.message, checkedAt: report.checkedAt || null, activeRequests, busy: Boolean(report.busy || activeRequests) }, dataDirectory: this.context(id).dataDirectory, runtimeDirectory: this.context(id).runtimeDirectory };
   }
   list(): PluginSnapshot[] { return [...this.plugins.keys()].map((id) => this.snapshot(id)); }
   publicList() { return this.list().map(({ dataDirectory: _data, runtimeDirectory: _runtime, ...plugin }) => plugin); }

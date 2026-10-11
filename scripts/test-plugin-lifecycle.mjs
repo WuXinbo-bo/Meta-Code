@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { mock } from "node:test";
 import { PluginHost } from "../server/plugins/host.ts";
 import { orchestrationPlugin } from "../server/plugins/orchestration.ts";
 import { orchestrationLifecycle } from "../server/plugins/orchestration/lifecycle.ts";
@@ -47,6 +48,24 @@ try {
   await new Promise(setImmediate);
   assert.equal(disposals, 2);
   assert.equal(queued.length, 1, "stopping cancels recovery admission");
+
+  mock.timers.enable({ apis: ["setInterval"] });
+  let leaseFailure = true;
+  const recoveryLifecycle = orchestrationLifecycle({
+    repository: { listAll: () => [], recoverAfterRestart: () => [], recoverExpiredLeases: () => { if (leaseFailure) throw Error("fixture unavailable"); return []; } },
+    stateFiles: {}, legacyTransactions: path.join(root, "absent"), transactions: runtime,
+    isEnabled: () => true, isBusy: () => false, activeNodeKeys: () => new Set(), queueTick() {}, disposeScheduler() {}
+  });
+  const stopRecovery = recoveryLifecycle.activate({});
+  const originalError = console.error;
+  try {
+    console.error = () => {};
+    mock.timers.tick(15_000);
+    assert.equal(recoveryLifecycle.healthCheck({}).health, "degraded", "failed reconciliation is visible");
+    leaseFailure = false;
+    mock.timers.tick(15_000);
+    assert.equal(recoveryLifecycle.healthCheck({}).health, "healthy", "the next successful reconciliation restores health");
+  } finally { console.error = originalError; stopRecovery(); mock.timers.reset(); }
 
   const parent = { id: "parent", status: "running" };
   const task = { id: "task", parentSessionId: "parent", provider: "codex", status: "queued", nickname: "fixture", task: "research", cwd: root, mode: "analysis" };
