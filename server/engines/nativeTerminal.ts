@@ -2,8 +2,9 @@ import { prepareNativePty } from "./nativePtyRuntime.js";
 import crypto from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
 import type { IPty } from "node-pty";
+import { nativeTerminalStartupDiagnostic, type NativeTerminalDiagnostic } from "./nativeTerminalLaunch.js";
 
-export type NativeTerminalEvent = { sequence: number; type: "data" | "exit"; data?: string; exitCode?: number };
+export type NativeTerminalEvent = { sequence: number; type: "data" | "exit" | "diagnostic"; data?: string; exitCode?: number; diagnostic?: NativeTerminalDiagnostic };
 type TerminalProcess = Pick<IPty, "pid" | "write" | "resize" | "kill" | "onData" | "onExit">;
 export type NativeTerminalOptions = {
   sessionId: string; ownerId: string; provider: string; cwd: string;
@@ -15,6 +16,7 @@ type TerminalEntry = {
   process: TerminalProcess; status: "running" | "exited"; sequence: number;
   events: NativeTerminalEvent[]; bytes: number; createdAt: string;
   listeners: Set<(event: NativeTerminalEvent) => void>;
+  diagnostic: NativeTerminalDiagnostic | null;
 };
 type PtyFactory = (options: NativeTerminalOptions) => Promise<TerminalProcess>;
 const MAX_REPLAY_BYTES = 256_000;
@@ -47,7 +49,7 @@ export class NativeTerminalManager {
     if (!entry) return null;
     return { id: entry.id, sessionId, provider: entry.provider, cwd: entry.cwd, status: entry.status, sequence: entry.sequence, createdAt: entry.createdAt,
       truncated: after > 0 && after < (entry.events[0]?.sequence || 0) - 1,
-      events: entry.events.filter((event) => event.sequence > after) };
+      diagnostic: entry.diagnostic, events: entry.events.filter((event) => event.sequence > after) };
   }
 
   async start(options: NativeTerminalOptions) {
@@ -61,7 +63,7 @@ export class NativeTerminalManager {
     const release = () => { if (!released) { released = true; options.release(); } };
     try {
       const process = await this.factory(options);
-      const entry: TerminalEntry = { id: crypto.randomUUID(), sessionId: options.sessionId, ownerId: options.ownerId, provider: options.provider, cwd: options.cwd, process, status: "running", sequence: 0, events: [], bytes: 0, createdAt: new Date().toISOString(), listeners: new Set() };
+      const entry: TerminalEntry = { id: crypto.randomUUID(), sessionId: options.sessionId, ownerId: options.ownerId, provider: options.provider, cwd: options.cwd, process, status: "running", sequence: 0, events: [], bytes: 0, createdAt: new Date().toISOString(), listeners: new Set(), diagnostic: null };
       this.terminals.set(options.sessionId, entry);
       for (const [key, old] of this.terminals) {
         if (this.terminals.size <= MAX_RETAINED_TERMINALS) break;
@@ -73,7 +75,16 @@ export class NativeTerminalManager {
         while ((entry.bytes > MAX_REPLAY_BYTES || entry.events.length > 2048) && entry.events.length > 1) entry.bytes -= entry.events.shift()!.data?.length || 0;
         for (const listener of entry.listeners) { try { listener(next); } catch { entry.listeners.delete(listener); } }
       };
-      process.onData((data) => emit({ type: "data", data: data.slice(-MAX_REPLAY_BYTES) }));
+      let startupOutput = "";
+      const startupDeadline = Date.now() + 30_000;
+      process.onData((data) => {
+        emit({ type: "data", data: data.slice(-MAX_REPLAY_BYTES) });
+        if (!entry.diagnostic && Date.now() < startupDeadline) {
+          startupOutput = (startupOutput + data).slice(-16_384);
+          const diagnostic = nativeTerminalStartupDiagnostic(options.provider, startupOutput);
+          if (diagnostic) { entry.diagnostic = diagnostic; startupOutput = ""; emit({ type: "diagnostic", diagnostic }); }
+        } else startupOutput = "";
+      });
       process.onExit(({ exitCode }) => { if (entry.status === "exited") return; entry.status = "exited"; release(); emit({ type: "exit", exitCode }); entry.listeners.clear(); });
       if (this.stopping) this.stop(entry.sessionId, entry.ownerId, entry.id);
       return this.snapshot(options.sessionId, options.ownerId)!;

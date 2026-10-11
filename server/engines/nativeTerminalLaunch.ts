@@ -1,5 +1,27 @@
 import type { CodexConfigObject, CodexConfigValue } from "../mcpConfig.js";
 
+export function assertNativeTerminalExecutable(executable: string) {
+  if (/\.(?:cmd|bat)$/i.test(executable) || /(?:^|[\\/])cmd\.exe$/i.test(executable)) {
+    throw new Error("请使用官方可执行文件，原生终端不运行 cmd/bat 包装脚本");
+  }
+}
+
+export function claudeNativeSessionArgs(sessionId: string | null | undefined, forkSession: boolean) {
+  if (forkSession && !sessionId) throw new Error("尚无 Claude 原生会话，无法创建原生分支；请先完成一轮对话");
+  return sessionId ? ["--resume", sessionId, ...(forkSession ? ["--fork-session"] : [])] : [];
+}
+
+export type NativeTerminalDiagnostic = { code: string; message: string; action: string };
+
+/** Recognize CLI startup errors, not model-written claims about feature support. */
+export function nativeTerminalStartupDiagnostic(provider: string, output: string): NativeTerminalDiagnostic | null {
+  const text = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\s+/g, "");
+  if (provider === "claude" && /UnabletoconnecttoAnthropicservices/i.test(text) && /Failedtoconnecttoapi\.anthropic\.com:Status403/i.test(text)) {
+    return { code: "official-initialization-forbidden", message: "Claude 官方启动初始化返回 HTTP 403，尚未进入 Agent Teams 或其他交互功能。", action: "检查 api.anthropic.com 的网络、代理及服务可用区域；确认当前认证或网关支持官方交互 CLI，再重试。普通对话与工作台插件仍可独立使用。" };
+  }
+  return null;
+}
+
 // Command arguments are passed directly to the PTY, never through a shell.
 function toml(value: CodexConfigValue): string {
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
