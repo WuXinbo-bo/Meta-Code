@@ -3,13 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import type { ProviderCapabilityMode, ProviderCapabilityRestriction, ProviderCapabilitySnapshot, ProviderControlSnapshot } from "./types";
 
 const MODE_LABELS: Record<ProviderCapabilityMode, string> = {
-  native: "原生能力",
+  native: "原生适配",
   managed: "工作台托管",
   degraded: "能力受限"
 };
 
 const MODE_DESCRIPTIONS: Record<ProviderCapabilityMode, string> = {
-  native: "直接使用 Provider 的原生会话、工具和权限能力",
+  native: "使用官方运行时；具体功能仍受版本、账号与交互方式限制",
   managed: "由工作台统一管理会话或协作能力，Provider 能力仍按协商结果开放",
   degraded: "运行时或传输能力未满足要求，部分能力暂不可用"
 };
@@ -123,8 +123,9 @@ function capabilitySummary(snapshot: ProviderCapabilitySnapshot) {
     ["终端", Boolean(capabilities.tools?.shell)],
     ["联网", Boolean(capabilities.tools?.web)],
     ["MCP", Boolean(capabilities.tools?.mcp)],
-    ["委派", Boolean(capabilities.delegation?.worker || capabilities.delegation?.nativeSubagents)],
-    ["任务编排", Boolean(capabilities.workflow?.planner || capabilities.workflow?.worker)]
+    ["原生子 Agent", Boolean(capabilities.delegation?.nativeSubagents)],
+    ["协作插件", Boolean(capabilities.delegation?.worker)],
+    ["编排插件", Boolean(capabilities.workflow?.planner || capabilities.workflow?.worker)]
   ];
   return labels;
 }
@@ -136,10 +137,11 @@ export function CapabilityCompatibilityPanel({ snapshot, loading = false, error 
   if (!snapshot && loading) return <div className="capability-compat-panel capability-compat-loading"><LoaderCircle className="spin" size={13} />正在读取能力协商结果</div>;
   return <section className="capability-compat-panel" aria-label="Provider 能力兼容">
     <header>
-      <div><strong>能力兼容</strong><small>按当前运行时与传输协议协商</small></div>
+      <div><strong>能力兼容</strong><small>运行时声明与工作台适配能力</small></div>
       <CapabilityModeBadge snapshot={snapshot} loading={loading} />
     </header>
     {runtimeMessage(snapshot) && <p className="capability-compat-runtime">运行时 {runtimeMessage(snapshot)}</p>}
+    {snapshot?.mode === "native" && <p className="capability-compat-runtime">功能声明不代表已逐项实测。官方交互命令与审批可在任务菜单的「原生终端」使用；编排插件与 Provider 原生 Workflow 独立。</p>}
     {summary.length > 0 && <div className="capability-compat-grid">{summary.map(([label, available]) => <span className={available ? "available" : "unavailable"} key={label}>{available ? <CheckCircle2 size={11} /> : <CircleAlert size={11} />}{label}</span>)}</div>}
     {reasons.length > 0 && <ul className="capability-compat-restrictions">{reasons.slice(0, 4).map((reason) => <li key={reason}><CircleAlert size={11} />{reason}</li>)}</ul>}
     {error && !reasons.length && <p className="capability-compat-error">暂时无法刷新能力状态：{error}</p>}

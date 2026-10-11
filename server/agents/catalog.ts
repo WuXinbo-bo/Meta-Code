@@ -19,7 +19,7 @@ export const BUILTIN_AGENT_DESCRIPTORS: AgentProviderManifestV1[] = [
     branding: { icon: "claude", accent: "#d97757" },
     capabilities: {
       sessions: { create: true, resume: true, fork: false },
-      execution: { stream: true, cancel: true, steer: true },
+      execution: { stream: true, cancel: true, steer: true, interactiveTerminal: true },
       workspace: { read: true, write: true },
       tools: { shell: true, web: true, mcp: true },
       delegation: { worker: true, nativeSubagents: true },
@@ -58,7 +58,7 @@ export const BUILTIN_AGENT_DESCRIPTORS: AgentProviderManifestV1[] = [
     branding: { icon: "openai", accent: "#111111" },
     capabilities: {
       sessions: { create: true, resume: true, fork: true },
-      execution: { stream: true, cancel: true, steer: true },
+      execution: { stream: true, cancel: true, steer: true, interactiveTerminal: true },
       workspace: { read: true, write: true },
       tools: { shell: true, web: true, mcp: true },
       delegation: { worker: true, nativeSubagents: true },

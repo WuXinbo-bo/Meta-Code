@@ -2,7 +2,7 @@
 .workflow-agent-card .workflow-card-meta { flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .workflow-agent-card .workflow-card-meta span { max-width: none; color: var(--muted); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .workflow-agent-card .workflow-card-logs { margin-top: 9px; padding-top: 8px; }
-.workflow-agent-card .workflow-card-logs p { font-size: 10px; }
+.workflow-agent-card .workflow-card-logs p { font-size: 11px; }
 .workflow-agent-card .workflow-card-logs p:nth-child(n+2) { display: none; }
 .workflow-agent-card.failed .workflow-card-summary,
 .workflow-agent-card.blocked .workflow-card-summary { color: var(--text); }
@@ -11,7 +11,7 @@
 .workflow-inspector-tabs button { display: inline-flex; align-items: center; gap: 4px; min-height: 26px; padding: 0 8px; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text-tertiary); background: transparent; font-size: 11px; cursor: pointer; }
 .workflow-inspector-tabs button:hover { color: var(--mc-text); background: var(--mc-hover); }
 .workflow-inspector-tabs button[aria-selected="true"] { color: var(--mc-text); background: var(--mc-surface); box-shadow: 0 1px 3px color-mix(in srgb, var(--mc-shadow) 14%, transparent); }
-.workflow-inspector-tabs button span { min-width: 15px; padding: 1px 4px; border-radius: 999px; background: var(--mc-surface-muted); font-size: 10px; text-align: center; }
+.workflow-inspector-tabs button span { min-width: 15px; padding: 1px 4px; border-radius: 999px; background: var(--mc-surface-muted); font-size: 11px; text-align: center; }
 .workflow-inspector-panel { min-width: 0; }
 .workflow-inspector-panel.view-overview,
 .workflow-inspector-panel.view-result { display: grid; gap: 13px; }
@@ -37,7 +37,7 @@
 .workflow-inspector-check > summary span { margin-left: auto; color: var(--mc-text-tertiary); }
 .workflow-inspector-check code,
 .workflow-inspector-check pre { display: block; margin: 7px 0 0; padding: 6px; overflow: auto; border-radius: var(--mc-r-sm); color: var(--mc-text-tertiary); background: var(--mc-surface); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.workflow-inspector-check small { display: block; margin-top: 5px; color: var(--mc-text-tertiary); font-size: 10px; }
+.workflow-inspector-check small { display: block; margin-top: 5px; color: var(--mc-text-tertiary); font-size: 11px; }
 .workflow-inspector-panel .workflow-result-view { display: grid; gap: 13px; margin-top: 0; }
 .workflow-inspector-panel .workflow-result-view > section > h4 { display: flex; align-items: center; gap: 5px; margin: 0 0 7px; color: var(--mc-text-secondary); font-size: 11px; }
 .workflow-inspector-panel .workflow-result-view > section > h4 span { margin-left: auto; color: var(--mc-text-tertiary); font-weight: 400; }
@@ -59,7 +59,7 @@
 .workflow-inspector-panel .workflow-result-list button[title="复制路径"] { flex: 0 0 26px; height: 26px; place-items: center; }
 .workflow-inspector-panel .workflow-result-list strong { font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
 .workflow-inspector-panel .workflow-result-list small,
-.workflow-inspector-panel .workflow-result-list code { color: var(--mc-text-tertiary); font-size: 10px; overflow-wrap: anywhere; }
+.workflow-inspector-panel .workflow-result-list code { color: var(--mc-text-tertiary); font-size: 11px; overflow-wrap: anywhere; }
 .workflow-inspector-panel .workflow-result-list > div:has(> strong) { display: grid; gap: 3px; }
 .workflow-agent-inspector button:disabled { opacity: .45; cursor: default; }
 .workflow-agent-inspector .workflow-drawer-actions > button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--mc-r-sm); color: var(--mc-text-secondary); background: transparent; cursor: pointer; }

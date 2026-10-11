@@ -63,6 +63,11 @@ import { runClaude } from "./engines/claude/process.js";
 import { compactClaudeQuestionPayload, isClaudeQuestionTool } from "./engines/claude/questions.js";
 import { resolveClaudeCommand } from "./engines/claude/runtime.js";
 import { ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
+import { NativeTerminalManager } from "./engines/nativeTerminal.js";
+import { registerNativeTerminalRoutes } from "./engines/nativeTerminalRoutes.js";
+import { codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
+import { claudeTranscriptTerminalState } from "./engines/claude/transcriptLifecycle.js";
+import type { ClaudeInputOrigin } from "./engines/claude/backgroundTasks.js";
 import { codexActivityFromEvent, isCodexContextCompactionNotice, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
 import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
 import type { EngineName, EngineRuntimeStatus, NormalizedEngineEvent } from "./engines/types.js";
@@ -310,6 +315,7 @@ type ActiveRun = {
   agentMode?: "auto" | "all" | "off";
   skillPolicies?: SkillPolicies;
   executionMode?: ExecutionMode;
+  inputOrigin?: ClaudeInputOrigin;
   claudeProcess?: ClaudeSessionHandle;
   reviewedDelegatedTaskIds: Set<string>;
   delegatedReviewTaskIds: Set<string>;
@@ -1899,25 +1905,12 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   return env;
 }
 
+function codexProviderConfig(settings: Settings): CodexConfigObject {
+  return settings.baseUrl ? { model_provider: "modelx", model_providers: { modelx: { name: "ModelX API", base_url: openAiApiRoot(settings.baseUrl), env_key: "OPENAI_API_KEY", wire_api: "responses", supports_websockets: false, request_max_retries: 3, stream_max_retries: 5, stream_idle_timeout_ms: 300000 } } } : {};
+}
+
 function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string, snapshotOnly = false) {
-  const customProviderConfig = settings.baseUrl
-    ? {
-        model_provider: "modelx",
-        model_providers: {
-          modelx: {
-            name: "ModelX API",
-            base_url: openAiApiRoot(settings.baseUrl),
-            env_key: "OPENAI_API_KEY",
-            wire_api: "responses",
-            supports_websockets: false,
-            // A dropped upstream stream should be recovered by the Codex client.
-            request_max_retries: 3,
-            stream_max_retries: 5,
-            stream_idle_timeout_ms: 300000
-          }
-        }
-      }
-    : undefined;
+  const customProviderConfig = codexProviderConfig(settings);
 
   const workspaceMcp = snapshotOnly ? { config: {}, env: {}, skipped: [] } : workspace ? codexMcpConfigForWorkspace(workspace, selectedMcpNames, additionalMcpServers) : codexMcpConfig(additionalMcpServers);
   if (workspaceMcp.skipped.length) {
@@ -2674,21 +2667,36 @@ async function upsertNormalizedMessage(session: Session, event: NormalizedEngine
       ? {
           type: rawPayload.type, subtype: rawPayload.subtype, stop_reason: rawPayload.stop_reason,
           duration_ms: rawPayload.duration_ms, num_turns: rawPayload.num_turns, usage: rawPayload.usage,
+          origin: rawPayload.origin, queued_turn_count: rawPayload.queued_turn_count, result_index: rawPayload.result_index,
           modelUsage: rawPayload.modelUsage, is_error: rawPayload.is_error, workbench_compacted: true
         }
       : subagentToolEvent
         ? {
             type: "claude_native_subagent", provider: "claude", name: event.toolName,
             tool_use_id: rawPayload?.tool_use_id || rawPayload?.id,
-            input: rawPayload?.input, result: rawPayload?.content, workbench_compacted: true
+            agent_id: recordOf(rawPayload?.native_result)?.agentId,
+            input: rawPayload?.input || recordOf(event.detail)?.input,
+            nativeStatus: recordOf(rawPayload?.native_result)?.status,
+            result: rawPayload?.content, workbench_compacted: true
           }
       : ["tool.started", "tool.completed"].includes(event.type)
         ? { type: rawPayload?.type, name: rawPayload?.name, tool_use_id: rawPayload?.tool_use_id, workbench_compacted: true }
       : event.payload && JSON.stringify(event.payload).length > 64_000
         ? { type: rawPayload?.type, name: rawPayload?.name, tool_use_id: rawPayload?.tool_use_id, truncated: true, workbench_compacted: true }
         : event.payload;
-  const existing = messageBySourceId(session, sourceId);
+  const existing = messageBySourceId(session, sourceId)
+    || (subagentToolEvent ? session.messages.find((message) => {
+      const previous = recordOf(message.payload);
+      const toolId = rawPayload?.tool_use_id || rawPayload?.id;
+      const agentId = recordOf(rawPayload?.native_result)?.agentId;
+      return previous?.native === true && previous.provider === "claude"
+        && (Boolean(toolId && previous.tool_use_id === toolId) || Boolean(agentId && previous.agent_id === agentId));
+    }) : undefined);
   if (existing) {
+    // The transcript card owns native lifecycle. A late tool result must not
+    // replace it with a second launch card or discard its canonical identity.
+    if (subagentToolEvent && recordOf(existing.payload)?.native === true) return;
+
     if (existing.eventType === "user_question" && questionToolEvent && event.type === "tool.completed") {
       existing.role = "event";
       existing.eventPhase = "started";
@@ -3958,6 +3966,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
       handle: activeRun.claudeProcess,
       sessionId: session.engineSessionId,
       prompt: promptForClaudeSession(session, workspace, prompt, activeRun.skillPolicies, activeRun.delegatedReviewTaskIds.size === 0),
+      inputOrigin: activeRun.inputOrigin,
       sendPrompt: true,
       recoveryAttempts: 2,
       mode: "normal",
@@ -4105,6 +4114,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
           continue;
         }
         activeRun.delegatedReviewTaskIds = reviewTaskIds;
+        activeRun.inputOrigin = "auto-continuation";
         prompt = delegatedReviewPrompt(session, reviewTaskIds);
         await saveState();
         continue;
@@ -4127,6 +4137,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
       activeRun.claudeProcess = undefined;
     }
     prepareTurn(session, nextInput);
+    activeRun.inputOrigin = "human";
     appendMessage(session, {
       role: "event",
       text: nextInput.mode === "steer" ? "已应用引导消息" : "正在执行排队消息",
@@ -4170,7 +4181,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
   }
 }
 
-function launchSessionRun(session: Session, workspace: Workspace, prompt: string, skillPolicies?: SkillPolicies, skillNames?: string[], requestedExecutionMode?: ExecutionMode) {
+function launchSessionRun(session: Session, workspace: Workspace, prompt: string, skillPolicies?: SkillPolicies, skillNames?: string[], requestedExecutionMode?: ExecutionMode, inputOrigin: ClaudeInputOrigin = "auto-continuation") {
   dispatchAgentHook({ kind: "session", event: "session.start", providerId: session.engine, sessionId: session.id, payload: { executionMode: requestedExecutionMode || workspaceAgentConfig(workspace).executionMode } });
   const executionMode = resolveTurnExecutionMode(requestedExecutionMode, skillPolicies || {}, workspaceAgentConfig(workspace).executionMode);
   const recoveredTaskIds = new Set(pendingDelegatedTasks(session.id)
@@ -4194,6 +4205,7 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
     promise: Promise.resolve(),
     skillPolicies: normalizedPolicies,
     executionMode,
+    inputOrigin,
     skillNames: normalizeSkillNames(skillNames),
     releaseSkillProjection,
     reviewedDelegatedTaskIds: new Set(state.delegatedTasks
@@ -4263,6 +4275,10 @@ async function waitForActiveRunRelease(sessionId: string, activeRun: ActiveRun, 
 }
 
 async function terminateSessionForDeletion(session: Session) {
+  nativeTerminals.stop(session.id, session.ownerUserId);
+  const terminalDeadline = Date.now() + 5000;
+  while (nativeTerminals.get(session.id, session.ownerUserId)?.status === "running" && Date.now() < terminalDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  if (nativeTerminals.get(session.id, session.ownerUserId)?.status === "running") throw new Error("原生终端仍在结束，请稍后重试");
   const activeRun = activeRuns.get(session.id);
   abortDelegatedTasksForParent(session.id);
   if (activeRun && !activeRun.controller.signal.aborted) {
@@ -4747,7 +4763,9 @@ const claudeTranscriptReader = new IncrementalJsonl<ClaudeTranscriptState>(
     if (!state.toolUseId) state.toolUseId = String(record.parentToolUseID || record.parentToolUseId || "") || undefined;
     if (typeof record.timestamp === "string" && record.timestamp > state.updatedAt) state.updatedAt = record.timestamp;
     const message = recordOf(record.message);
-    if (record.type === "assistant" && message?.stop_reason === "end_turn") state.completed = true;
+    const terminalState = claudeTranscriptTerminalState(record);
+    if (terminalState === "completed") state.completed = true;
+    if (terminalState === "failed") state.failed = true;
     if (/error|failed/i.test(String(record.type || "")) && record.isSidechain === true) state.failed = true;
     if (!state.task && record.type === "user") state.task = typeof message?.content === "string" ? message.content : textContent(message?.content);
     const source = recordOf(message?.usage);
@@ -4808,7 +4826,7 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
       toolUseId: String(metadata.toolUseId || metadata.tool_use_id || metadata.parentToolUseId || transcript.toolUseId || "") || undefined,
       parentThreadId: parentSessionId,
       nickname: String(metadata.description || metadata.agentType || `Claude Agent ${agents.length + 1}`),
-      path: String(metadata.agentType || "Claude CLI · 原生 Agent"),
+      path: String(metadata.agentType || (file.includes(`${path.sep}workflows${path.sep}`) ? "Claude CLI · 原生 Workflow" : "Claude CLI · 原生 Agent")),
       status, updatedAt: transcript.updatedAt || fileStat.mtime.toISOString(),
       revision: Math.max(0, Math.floor(fileStat.mtimeMs)), usage: transcript.usage,
       logs: newestAgentLogs(logs), logCount: transcript.logCount, provider: "claude", task: transcript.task
@@ -5090,7 +5108,7 @@ async function listSessionAgentThreads(session: Session, agentId?: string): Prom
 async function reconcileActiveNativeAgentProjections() {
   const now = Date.now();
   const active = state.sessions.filter((session) => {
-    if (session.status === "running" || activeRuns.has(session.id)) return true;
+    if (nativeAgentProjectionRepairs.has(session.id) || session.status === "running" || activeRuns.has(session.id)) return true;
     // Give a just-finished native transcript a few reconciliation ticks so its
     // terminal status/logs are projected even after activeRuns is released.
     const finishedAt = Date.parse(session.runFinishedAt || "");
@@ -5102,6 +5120,7 @@ async function reconcileActiveNativeAgentProjections() {
         ? await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
         : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
       if (native.length) syncNativeAgentMessages(session, native);
+      nativeAgentProjectionRepairs.delete(session.id);
     } catch (error) {
       console.warn(`Native Agent projection reconcile failed for ${session.id}:`, error instanceof Error ? error.message : String(error));
     }
@@ -5141,8 +5160,16 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
     const existing = messageBySourceId(session, sourceId)
       || session.messages.find((message) => {
         const previous = recordOf(message.payload);
-        return message.eventType === "subagent" && nativeAgentMessageCanReuse(previous, agent.id, identity.providerId, identity.key);
+        return message.eventType === "subagent" && (nativeAgentMessageCanReuse(previous, agent.id, identity.providerId, identity.key)
+          || Boolean(previous?.type === "claude_native_subagent" && provider === "claude" && agent.toolUseId && previous.tool_use_id === agent.toolUseId));
       });
+    // Legacy streams can contain both the launch tool and transcript card.
+    const compactDuplicates = session.messages.filter((message) => {
+      const previous = recordOf(message.payload);
+      return message !== existing && previous?.type === "claude_native_subagent" && provider === "claude"
+        && (previous.agent_id === agent.id || Boolean(agent.toolUseId && previous.tool_use_id === agent.toolUseId));
+    });
+    if (compactDuplicates.length) { session.messages = session.messages.filter((message) => !compactDuplicates.includes(message)); changed = true; }
     if (existing) {
       const previous = recordOf(existing.payload);
       if (existing.text === text && existing.eventPhase === eventPhase && previous?.updatedAt === agent.updatedAt
@@ -5158,6 +5185,7 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
     changed = true;
   }
   if (!changed) return false;
+  sessionMessageIndexes.delete(session);
   session.updatedAt = new Date().toISOString();
   session.revision += 1;
   scheduleStateSave();
@@ -5224,6 +5252,7 @@ const codexLink = createCodexLinkRouter({
 const sessionNativeInventoryCache = new Map<string, { expiresAt: number; items: SessionInventoryItem[]; warnings: string[] }>();
 const sessionNativeInventoryLoads = new Map<string, Promise<{ items: SessionInventoryItem[]; warnings: string[] }>>();
 await ensureRuntime();
+const nativeAgentProjectionRepairs = new Set(state.sessions.filter((session) => Date.now() - Date.parse(session.updatedAt) < 24 * 60 * 60 * 1000 && session.messages.some((message) => recordOf(message.payload)?.native === true)).map((session) => session.id));
 await claimLegacyOwnership(auth.getOwnerUserId());
 routineScheduler = new RoutineScheduler({
   file: path.join(APP_PATHS.dataDir, "routines.json"),
@@ -5237,6 +5266,7 @@ await Promise.all([detectCodexRuntime(), getClaudeRuntime()]);
 let httpServer: { close: (callback?: () => void) => void } | null = null;
 let sessionTrashCleaner: NodeJS.Timeout | null = null;
 let nativeAgentProjectionReconciler: NodeJS.Timeout | null = null;
+const nativeTerminals = new NativeTerminalManager();
 let shuttingDown = false;
 
 async function shutdown(reason: string) {
@@ -5244,6 +5274,7 @@ async function shutdown(reason: string) {
   shuttingDown = true;
   queuePaused = true;
   routineScheduler?.stop();
+  nativeTerminals.stopAll();
   console.log(`Workbench shutdown requested: ${reason}`);
   const forceExitTimer = setTimeout(() => process.exit(1), 15_000);
   forceExitTimer.unref();
@@ -5593,6 +5624,52 @@ app.post("/api/auth/totp/enable", auth.requireAuth, auth.requireRoles("owner", "
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 app.use("/api", auth.requireAuth);
+registerNativeTerminalRoutes(app, {
+  manager: nativeTerminals,
+  authorize: (id, owner) => { const session = sessionById(id, owner); return Boolean(session && isNativeEnhancedProvider(session.engine)); },
+  prepare: async (id, owner, input) => {
+    const session = sessionById(id, owner)!;
+    if (activeRuns.has(id)) throw new Error("请先停止当前对话，再启动原生终端");
+    const workspace = await ensureSessionExecutionRoot(session);
+    const readiness = await providerReadiness(session.engine, owner, workspace);
+    if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "Agent 尚未准备好");
+    const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    let executable: string, args: string[];
+    if (session.engine === "claude") {
+      const runtime = await getClaudeRuntime();
+      const command = resolveClaudeCommand(runtime.path);
+      if (/\.cmd$/i.test(command.executable) || /(?:^|[\\/])cmd\.exe$/i.test(command.executable)) throw new Error("请使用官方 Claude 可执行文件，原生终端不运行 cmd 包装脚本");
+      executable = command.executable; args = [...command.args, "--permission-mode", state.settings.claude.permissionMode, "--teammate-mode", "in-process"];
+      if (session.engineSessionId) args.push("--resume", session.engineSessionId);
+      if (state.settings.claude.model) args.push("--model", state.settings.claude.model);
+      if (state.settings.claude.effort) args.push("--effort", state.settings.claude.effort);
+      args.push("--mcp-config", await workspaceMcpConfigPath(workspace), "--strict-mcp-config");
+      env.CLAUDE_CONFIG_DIR = nativeProviderHome("claude", owner);
+      env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+      if (state.settings.claude.baseUrl) env.ANTHROPIC_BASE_URL = state.settings.claude.baseUrl.replace(/\/+$/, "");
+      if (state.settings.claude.apiKey) env.ANTHROPIC_API_KEY = state.settings.claude.apiKey;
+      if (input.agentTeams === true) env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+      else delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+    } else {
+      const runtime = await detectCodexRuntime(); executable = runtime.path;
+      if (/\.(?:cmd|bat)$/i.test(executable)) throw new Error("请使用官方 Codex 可执行文件，原生终端不运行 cmd 包装脚本");
+      const mcp = codexMcpConfigForWorkspace(workspace);
+      const configured = terminalMcpEnvironment({ ...codexProviderConfig(state.settings), ...mcp.config, model_reasoning_effort: state.settings.reasoningEffort, web_search: state.settings.webSearch }, { ...envForCodex(state.settings, undefined, false, nativeProviderHome("codex", owner)), ...mcp.env });
+      Object.assign(env, configured.env);
+      args = [...codexTerminalConfigArgs(configured.config), "--no-alt-screen", "--no-daemon", "--sandbox", state.settings.sandboxMode, "--ask-for-approval", state.settings.approvalPolicy];
+      if (state.settings.model) args.push("--model", state.settings.model);
+      if (session.codexThreadId) args.push("resume", session.codexThreadId);
+    }
+    // The lease is acquired after asynchronous preparation. Normal conversation
+    // runs and workflows use the same coordinator, preventing concurrent writes.
+    if (activeRuns.has(id)) throw new Error("当前对话已开始运行，请先停止");
+    if (shuttingDown || sessionById(id, owner) !== session) throw new Error("工作台正在关闭或任务已删除");
+    const lease = workspaceExecutionCoordinator.tryAcquire({ root: workspace.root, ownerId: `native-terminal:${id}`, label: "原生终端", access: "write" });
+    if (!lease) throw new Error("此工作区仍有对话或编排在运行，请稍后启动");
+    return { sessionId: id, ownerId: owner, provider: session.engine, cwd: workspace.root, executable, args, env, cols: Number(input.cols), rows: Number(input.rows), release: () => lease.release() };
+  }
+});
+
 app.use("/api/workflows", (req, res, next) => {
   const readOnly = req.method === "GET" || req.method === "HEAD";
   const maintenanceOnly = req.method === "DELETE" || /\/(metadata|open-folder|cancel|pause)$/.test(req.path);
@@ -9579,7 +9656,7 @@ app.delete("/api/sessions/:id", async (req, res) => {
   let session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const terminate = req.query.terminate === "true" || req.query.terminate === "1";
-  const policy = taskDeletionPolicy("session", session.status, activeRuns.has(session.id));
+  const policy = taskDeletionPolicy("session", session.status, activeRuns.has(session.id) || nativeTerminals.get(session.id, req.authUser!.id)?.status === "running");
   if (policy.requiresTermination && !terminate) {
     return res.status(409).json({ error: `${policy.reason}，请使用“停止并删除”`, code: "TASK_TERMINATION_REQUIRED", deletionPolicy: policy });
   }
@@ -9865,7 +9942,7 @@ app.post("/api/sessions/:id/input/:inputId/promote", async (req, res) => {
     const skillPolicies = normalizeSkillPolicies(claimed.input.skillPolicies);
     const skillNames = normalizeSkillNames(claimed.input.skillNames);
     await saveState();
-    launchSessionRun(session, workspace, attachmentPrompt(claimed.input.text, claimed.input.attachments || []), skillPolicies, skillNames, resolveTurnExecutionMode(claimed.input.executionMode, skillPolicies, workspaceAgentConfig(workspace).executionMode));
+    launchSessionRun(session, workspace, attachmentPrompt(claimed.input.text, claimed.input.attachments || []), skillPolicies, skillNames, resolveTurnExecutionMode(claimed.input.executionMode, skillPolicies, workspaceAgentConfig(workspace).executionMode), "human");
     return res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
   } catch (error) {
     const status = error instanceof PendingInputActionError
@@ -9957,7 +10034,7 @@ app.post("/api/sessions/:id/overwrite", async (req, res) => {
   session.revision += 1;
   const modelPrompt = replayContextForOverwrite(session.messages, targetIndex, text, target.attachments);
   await saveState();
-  launchSessionRun(session, workspace, modelPrompt, targetPolicies, normalizeSkillNames(targetPayload?.skillNames), targetMode);
+  launchSessionRun(session, workspace, modelPrompt, targetPolicies, normalizeSkillNames(targetPayload?.skillNames), targetMode, "human");
   res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
 });
 
@@ -10051,7 +10128,7 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
     taskContextStore.unlink({ kind: "session", id: branch.id }, req.authUser!.id);
     throw error;
   }
-  if (editedText) launchSessionRun(branch, branchWorkspace, modelPrompt, branchPolicies, normalizeSkillNames(modePayload?.skillNames), branchMode);
+  if (editedText) launchSessionRun(branch, branchWorkspace, modelPrompt, branchPolicies, normalizeSkillNames(modePayload?.skillNames), branchMode, "human");
   res.status(201).json(sessionWithMessageWindow(branch, req.query.messageLimit));
 });
 
@@ -10064,6 +10141,7 @@ app.post("/api/sessions/:id/run", async (req, res) => {
     try { await waitForActiveRunRelease(session.id, releasingRun); }
     catch (error) { return res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
   }
+  if (nativeTerminals.get(session.id, req.authUser!.id)?.status === "running") return res.status(409).json({ error: "此任务正在使用原生终端，请先停止原生终端" });
   if (activeRuns.has(session.id)) return res.status(409).json({ error: "任务正在运行" });
   const admission = sessionRunAdmissionError(req.authUser!.id, req.authUser!.role);
   if (admission) return res.status(admission.status).json({ error: admission.error });
@@ -10129,7 +10207,7 @@ app.post("/api/sessions/:id/run", async (req, res) => {
   session.revision += 1;
   await saveState();
 
-  launchSessionRun(session, workspace, modelPrompt, skillPolicies, requestedSkillNames, executionMode);
+  launchSessionRun(session, workspace, modelPrompt, skillPolicies, requestedSkillNames, executionMode, internal ? "auto-continuation" : "human");
   res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
 });
 

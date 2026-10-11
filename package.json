@@ -173,13 +173,17 @@
     "test:workflow-runtime-policies": "node --import tsx scripts/test-workflow-runtime-policies.mjs",
     "test:workflow-handoff": "node --import tsx scripts/test-workflow-handoff.mjs",
     "test:workflow-conversation-source": "node --import tsx scripts/test-workflow-conversation-source.mjs",
-    "test:workflow-existing-fixtures": "node scripts/test-workflow-existing-fixtures.mjs"
+    "test:workflow-existing-fixtures": "node scripts/test-workflow-existing-fixtures.mjs",
+    "test:claude-background": "node --import tsx scripts/test-claude-background-lifecycle.mjs",
+    "test:native-terminal": "node --import tsx scripts/test-native-terminal.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex-sdk": "^0.144.1",
     "@tanstack/react-virtual": "^3.14.9",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "csv-parse": "^7.0.1",
@@ -191,6 +195,7 @@
     "lucide-react": "^0.468.0",
     "mammoth": "^1.12.2",
     "mermaid": "^11.17.2",
+    "node-pty": "^1.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

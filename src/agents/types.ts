@@ -27,7 +27,7 @@ export type AgentProviderDescriptor = {
   displayOrder: number;
   capabilities: {
     sessions: { create: boolean; resume: boolean; fork: boolean };
-    execution: { stream: boolean; cancel: boolean; steer: boolean };
+    execution: { stream: boolean; cancel: boolean; steer: boolean; interactiveTerminal?: boolean };
     workspace: { read: boolean; write: boolean };
     tools: { shell: boolean; web: boolean; mcp: boolean };
     delegation: { worker: boolean; nativeSubagents: boolean };

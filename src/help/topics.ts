@@ -99,7 +99,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     group: "能力",
     sections: [
       { title: "能力来源", body: "Claude 和 Codex 的官方线程、权限、工具与子 Agent 能力由各自原生适配器提供；Meta Code 的协作委派和任务编排是独立插件，使用共享 Provider 合约接入。" },
-      { title: "三种模式", body: "Native 表示直接使用 Provider 原生能力，Managed 表示由工作台负责委派、日志和编排，Degraded 表示运行时、版本或传输握手未满足要求。工作台会显示受限原因，不会静默把原生能力当作完整可用。" },
+      { title: "三种模式", body: "Native 表示使用官方运行时的原生适配（不是所有功能已实测），Managed 表示由工作台负责委派、日志和编排，Degraded 表示运行时、版本或传输握手未满足要求。工作台会显示受限原因，具体能力受版本、账号和交互方式限制。Agent Teams 和官方交互审批可在任务菜单的“原生终端”使用；Meta Code 编排插件与 Claude Dynamic Workflow 是独立能力。" },
       { title: "排查方式", body: "在 Agent 设置中查看能力快照、运行时探测、传输握手和限制项。先修复 CLI、连接或版本问题，再重新探测；临时降级状态不会覆盖官方 CLI 配置。" }
     ]
   },

@@ -155,6 +155,7 @@ import {
 } from "./settings/pagePreferences";
 import "highlight.js/styles/github.css";
 
+const NativeTerminalPanel = lazy(() => import("./components/NativeTerminalPanel"));
 const MarkdownBodyRenderer = lazy(() => import("./components/MarkdownBody"));
 const FilePreviewRenderer = lazy(() => import("./components/FilePreview"));
 const SessionManagementView = lazy(() => import("./session-management/SessionManagementView"));
@@ -2480,6 +2481,7 @@ export function App() {
   const closeFilePanel = () => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); };
   const [dialog, setDialog] = useState<"workspace" | "task-mode" | "agent" | "agent-import" | "agents" | null>(null);
   const [newTaskWorkspaceId, setNewTaskWorkspaceId] = useState("");
+  const [nativeTerminalTask, setNativeTerminalTask] = useState<{ id: string; title: string; provider: string } | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const guideInitializedRef = useRef(false);
   const [pendingNewTaskPrompt, setPendingNewTaskPrompt] = useState("");
@@ -3758,7 +3760,7 @@ export function App() {
     if (window.innerWidth <= 720 && source !== "scope") setSidebarOpen(false);
   };
 
-  const navigateToSession = async (id: string, source: SessionNavigationSource = "task"): Promise<boolean> => {
+  const navigateToSession = async (id: string, source: SessionNavigationSource = "task", refreshedSummary?: SessionSummary): Promise<boolean> => {
     const previousSelection = {
       session: activeSession,
       standaloneScope,
@@ -3779,7 +3781,7 @@ export function App() {
       return true;
     }
 
-    const summary = data?.sessions.find((item) => item.id === id);
+    const summary = refreshedSummary?.id === id ? refreshedSummary : data?.sessions.find((item) => item.id === id);
     if (!summary) {
       sessionCacheRef.current.delete(id);
       setNotice("任务不存在或已被移除");
@@ -4173,8 +4175,10 @@ export function App() {
 
   const continueTaskConversation = async (id: string) => {
     const selectionGeneration = taskSelectionGenerationRef.current;
-    await refreshNavigation(true);
-    if (selectionGeneration === taskSelectionGenerationRef.current) await selectSession(id);
+    const navigation = await refreshNavigation(true);
+    // React has not necessarily committed setData yet. Use this response's
+    // admitted summary when a mode switch has just created the conversation.
+    if (selectionGeneration === taskSelectionGenerationRef.current) await navigateToSession(id, "task", navigation.sessions.find((session) => session.id === id));
   };
   const startTaskOrchestration = async (taskContextId: string, goal: string) => {
     if (!activeSession || activeSession.scopeKind === "standalone") throw new Error("请先为任务指定项目工作区");
@@ -5393,6 +5397,7 @@ export function App() {
           {view === "chat" && !activeBrowserToolResource && <button ref={filePanelTriggerRef} type="button" className={`icon-button task-file-trigger ${inspectorOpen ? "active" : ""}`} title={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-label={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-expanded={inspectorVisible} aria-controls="task-file-panel" onClick={() => setInspectorOpen((value) => !value)}><FolderOpen size={17} /></button>}
           {view === "chat" && !navigationPending && displayedDeletionKind && <button type="button" className="icon-button task-delete-trigger" disabled={displayedDeletionBusy} title={displayedDeleteLabel} aria-label={displayedDeleteLabel} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button>}
           <ActionMenu className="task-more-menu" label="任务详情与更多操作">
+              {!navigationPending && displayedSession && data.providerControls.find((control) => control.providerId === displayedSession.engine)?.capabilities.execution.interactiveTerminal && <button type="button" onClick={() => setNativeTerminalTask({ id: displayedSession.id, title: displayedSession.title, provider: displayedSession.engine })}><TerminalSquare size={14} />原生终端</button>}
               {!navigationPending && displayedSession && <section className="task-usage-details"><header><Gauge size={14} /><strong>任务 Token</strong><span>{usageLabel}</span></header><dl><div><dt>全部线程</dt><dd>{displayedTokens.toLocaleString()}</dd></div><div><dt>主线程</dt><dd>{mainTokens.toLocaleString()}</dd></div><div><dt>子 Agent（{usageSummary.agentCount}）</dt><dd>{agentTokens.toLocaleString()}</dd></div><div><dt>输入／输出</dt><dd>{usageSummary.total.input_tokens.toLocaleString()} / {usageSummary.total.output_tokens.toLocaleString()}</dd></div><div><dt>缓存输入</dt><dd>{usageSummary.total.cached_input_tokens.toLocaleString()}</dd></div><div><dt>推理输出</dt><dd>{usageSummary.total.reasoning_output_tokens.toLocaleString()}</dd></div></dl></section>}
               <div className="mobile-provider-summary"><ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} /></div>
           </ActionMenu>
@@ -5845,6 +5850,8 @@ export function App() {
           </div>
         )}
       </main>
+
+      {nativeTerminalTask && <Suspense fallback={<div className="preview-state"><LoaderCircle className="spin" size={18} />正在加载原生终端</div>}><NativeTerminalPanel key={nativeTerminalTask.id} sessionId={nativeTerminalTask.id} title={nativeTerminalTask.title} provider={nativeTerminalTask.provider} request={api} onClose={() => setNativeTerminalTask(null)} /></Suspense>}
 
       {inspectorPinned && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); }} />}
         <aside id="task-file-panel" className={`inspector ${navigationPending ? "navigation-pending" : ""}`} hidden={!inspectorVisible} inert={!inspectorVisible || undefined} aria-label="任务文件" aria-busy={navigationPending} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFilePanel(); } }}>
