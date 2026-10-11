@@ -77,12 +77,27 @@ export function standaloneSearchResponse(response: Record<string, any>) {
   return { encrypted_output: null, results: null, output: "[Meta Code legacy gateway search compatibility: actual hosted web_search_preview; not the full official standalone search backend. Private reference IDs and specialized commands are unavailable. Use direct URLs for follow-up.]\n" + text.map((item: any) => item.text).join("\n") + "\nSources:\n" + urls.join("\n") };
 }
 
+/** Preserve official search references and opaque state when the gateway has
+ * upgraded. A successful HTTP status with a generic API envelope is not this
+ * protocol and must not be reported as native retrieval success. */
+export function isNativeSearchResponse(value: any): value is Record<string, unknown> {
+  return Boolean(value && typeof value.output === "string" && Object.hasOwn(value, "encrypted_output") && Object.hasOwn(value, "results")
+    && (value.encrypted_output === null || typeof value.encrypted_output === "string")
+    && (value.results === null || typeof value.results === "object"));
+}
+
+export function nativeSearchRoots(root: string, preferred?: string) {
+  // Some compatible gateways expose model requests under /v1 but standalone
+  // search beside it. Stay on the configured origin and preserve path prefixes.
+  return [...new Set([preferred, root, ...(root.endsWith("/v1") ? [root.slice(0, -3)] : [])].filter((value): value is string => Boolean(value)))];
+}
+
 /** Lives on the existing workbench port. Only registered connections and
  * per-process bearer tokens can use it; no public proxy or credential files.
  * Responses (including search events/citations) pass through unchanged.
  */
 export class CodexSearchCompatibility {
-  private connections = new Map<string, { root: string; apiKey: string; token: string; id: string }>();
+  private connections = new Map<string, { root: string; nativeSearchRoot?: string; apiKey: string; token: string; id: string }>();
   constructor(private port: number) {}
 
   connection(root: string, apiKey: string) {
@@ -113,15 +128,40 @@ export class CodexSearchCompatibility {
       next();
     });
     app.post(root + "/alpha/search", express.json({ limit: "1mb" }), async (req, res) => {
-      let body: Record<string, unknown>;
-      try { body = standaloneSearchRequest(req.body || {}); }
-      catch (error) { return void res.status(400).json({ error: { message: error instanceof Error ? error.message : "搜索请求无效" } }); }
+      if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return void res.status(400).json({ error: { message: "搜索请求必须为 JSON 对象" } });
       const entry = res.locals.connection;
       const abort = new AbortController();
+      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(180_000)]);
       const close = () => { if (!res.writableFinished) abort.abort(); };
       res.once("close", close);
       try {
-        const upstream = await fetch(entry.root + "/responses", { method: "POST", redirect: "error", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(180_000)]), headers: { Authorization: "Bearer " + entry.apiKey, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const headers = { Authorization: "Bearer " + entry.apiKey, "Content-Type": "application/json" };
+        for (const nativeRoot of nativeSearchRoots(entry.root, entry.nativeSearchRoot)) {
+          const native = await fetch(nativeRoot + "/alpha/search", { method: "POST", redirect: "error", signal, headers, body: JSON.stringify(req.body) });
+          if (native.ok) {
+            const result = await native.json().catch(() => null);
+            if (isNativeSearchResponse(result)) {
+              entry.nativeSearchRoot = nativeRoot;
+              res.setHeader("Cache-Control", "no-store");
+              return void res.json(result);
+            }
+            // A number of gateways wrap a missing route in HTTP 200/code 500.
+            // Other business errors must not be bypassed through another path.
+            const missingRoute = /No static resource .*alpha\/search|Cannot POST .*alpha\/search/i.test(String(result?.msg || result?.error?.message || ""));
+            if (!missingRoute && (result?.error || typeof result?.code === "number" && result.code !== 0)) return void res.status(502).json({ error: { message: "原生搜索网关返回协议外错误，请检查网关服务" } });
+          } else {
+            await native.body?.cancel();
+            // Auth, quota, invalid requests and temporary server failures are
+            // real native errors. Never bypass them through another model call.
+            if (![404, 405, 501].includes(native.status)) return void res.status(native.status).json({ error: { message: `原生搜索网关返回 HTTP ${native.status}` } });
+          }
+        }
+        // Explicit legacy opt-in allows fallback only for its supported subset;
+        // unsupported filters/references remain errors instead of being dropped.
+        let body: Record<string, unknown>;
+        try { body = standaloneSearchRequest(req.body); }
+        catch (error) { return void res.status(400).json({ error: { message: error instanceof Error ? error.message : "搜索请求无效" } }); }
+        const upstream = await fetch(entry.root + "/responses", { method: "POST", redirect: "error", signal, headers, body: JSON.stringify(body) });
         if (!upstream.ok) return void res.status(upstream.status).json({ error: { message: `搜索网关返回 HTTP ${upstream.status}` } });
         const response = await upstream.json();
         res.setHeader("Cache-Control", "no-store");
