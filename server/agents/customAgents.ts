@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fsp from "node:fs/promises";
+import { load as loadYaml, JSON_SCHEMA } from "js-yaml";
 
 export type CustomAgentProvider = "claude" | "codex";
 export type CustomAgentScope = "user" | "project";
@@ -177,21 +178,14 @@ export function parseCodexAgentToml(source: string): ParsedRecord {
   return result;
 }
 
-/** Parse Claude's markdown front matter without evaluating YAML or code. */
+/** Parse official nested YAML front matter as data, without executable tags. */
 export function parseClaudeAgentMarkdown(source: string): { metadata: ParsedRecord; instructions: string } {
   const normalized = source.replace(/^\uFEFF/, "");
   const match = normalized.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
   if (!match) return { metadata: Object.create(null), instructions: normalized.trim() };
-  const metadata: ParsedRecord = Object.create(null);
-  for (const rawLine of match[1].split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const separator = findUnquoted(line, ":");
-    if (separator <= 0) throw new Error(`Markdown front matter 键无效：${rawLine}`);
-    const key = line.slice(0, separator).trim();
-    if (!/^[A-Za-z0-9_.-]+$/.test(key)) throw new Error(`Markdown front matter 键无效：${key}`);
-    metadata[key] = parseScalar(line.slice(separator + 1));
-  }
+  const parsed: unknown = loadYaml(match[1], { schema: JSON_SCHEMA });
+  if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed))) throw new Error("Agent front matter 必须为对象");
+  const metadata = Object.assign(Object.create(null), parsed || {}) as ParsedRecord;
   return { metadata, instructions: normalized.slice(match[0].length).trim() };
 }
 
@@ -219,21 +213,39 @@ function contained(root: string, target: string) {
 async function readScope(options: { root: string; directory?: string; scope: CustomAgentScope; provider: CustomAgentProvider; format: CustomAgentSourceFormat; maxFileBytes: number; maxAgents: number }, diagnostics: CustomAgentDiagnostic[]) {
   const directory = options.directory || path.resolve(options.root, `.${options.provider}`, "agents");
   const result: CustomAgentDefinition[] = [];
-  let entries;
-  try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") diagnostics.push({ sourcePath: directory, code: "read-failed", message: error instanceof Error ? error.message : String(error), scope: options.scope, provider: options.provider });
-    return result;
-  }
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (entry.isSymbolicLink()) {
-      diagnostics.push({ sourcePath: path.resolve(directory, entry.name), code: "unsafe-path", message: "不读取符号链接 Agent 文件", scope: options.scope, provider: options.provider });
-      continue;
+  const candidates: string[] = [];
+  let remainingEntries = 4096;
+  // Claude discovers definitions in subfolders. Keep the same layout visible
+  // to the selector without following links or traversing unbounded trees.
+  const collect = async (current: string, depth: number): Promise<void> => {
+    let entries;
+    try { entries = await fsp.readdir(current, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") diagnostics.push({ sourcePath: current, code: "read-failed", message: error instanceof Error ? error.message : String(error), scope: options.scope, provider: options.provider });
+      return;
     }
-    if (!entry.isFile()) continue;
-    const extension = path.extname(entry.name).toLowerCase();
-    if ((options.format === "markdown" && ![".md", ".markdown"].includes(extension)) || (options.format === "toml" && extension !== ".toml")) continue;
-    const sourcePath = path.resolve(directory, entry.name);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (--remainingEntries < 0) break;
+      const sourcePath = path.resolve(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        diagnostics.push({ sourcePath, code: "unsafe-path", message: "不读取符号链接 Agent 文件或目录", scope: options.scope, provider: options.provider });
+        continue;
+      }
+      if (entry.isDirectory() && options.provider === "claude") {
+        if (depth < 16) await collect(sourcePath, depth + 1);
+        else diagnostics.push({ sourcePath, code: "read-failed", message: "Agent 子目录超过 16 层发现限制", scope: options.scope, provider: options.provider });
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const extension = path.extname(entry.name).toLowerCase();
+      if ((options.format === "markdown" && ![".md", ".markdown"].includes(extension)) || (options.format === "toml" && extension !== ".toml")) continue;
+      candidates.push(sourcePath);
+    }
+  };
+  await collect(directory, 0);
+  if (remainingEntries < 0) diagnostics.push({ sourcePath: directory, code: "read-failed", message: "Agent 目录超过 4096 项发现限制", scope: options.scope, provider: options.provider });
+  for (const sourcePath of candidates) {
+    const extension = path.extname(sourcePath).toLowerCase();
     if (!contained(directory, sourcePath)) { diagnostics.push({ sourcePath, code: "unsafe-path", message: "Agent 文件路径越界", scope: options.scope, provider: options.provider }); continue; }
     let stat;
     try { stat = await fsp.stat(sourcePath); } catch { continue; }
@@ -241,7 +253,7 @@ async function readScope(options: { root: string; directory?: string; scope: Cus
     let source;
     try { source = await fsp.readFile(sourcePath, "utf8"); } catch (error) { diagnostics.push({ sourcePath, code: "read-failed", message: error instanceof Error ? error.message : String(error), scope: options.scope, provider: options.provider }); continue; }
     try {
-      const fallback = path.basename(entry.name, extension);
+      const fallback = path.basename(sourcePath, extension);
       const parsed = options.format === "markdown"
         ? parseClaudeAgentMarkdown(source)
         : (() => {

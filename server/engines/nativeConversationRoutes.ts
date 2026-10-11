@@ -6,7 +6,7 @@ export function registerNativeConversationRoutes(app: Express, host: {
   broker: NativeInteractionBroker;
   session: (id: string, owner: string) => Session | undefined;
   busy: (id: string) => boolean;
-  agents: (id: string, owner: string) => Promise<{ name: string; displayName: string; description?: string }[]>;
+  agents: (id: string, owner: string) => Promise<{ name: string; displayName: string; description?: string; requiresProjectTrust?: boolean }[]>;
   save: (id: string, owner: string, options: NativeConversationOptions) => Promise<void>;
   fork: (id: string, owner: string) => Promise<unknown>;
 }) {

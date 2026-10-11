@@ -3999,7 +3999,10 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
         baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
         configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: native.mode === "plan" ? "plan" : native.approvals === "ask" ? "default" : state.settings.claude.permissionMode,
         forkSourceId: session.nativeForkSourceId,
-        ...(selected ? { agent: selected.name, agents: { [selected.name]: { description: selected.description || selected.displayName, prompt: selected.instructions, ...(selected.model ? { model: selected.model } : {}), ...(selected.tools.length ? { tools: selected.tools } : {}) } } } : {}),
+        // Let the official CLI load the original definition, including hooks,
+        // memory, skill preloads and disallowed tools. A reduced --agents object
+        // would override the file and silently remove those native capabilities.
+        ...(selected ? { agent: selected.name } : {}),
         ...(!delegationEnabled ? { onPermission: async (prompt: Parameters<NativeInteractionBroker["request"]>[3], signal: AbortSignal) => {
           const answer = await nativeInteractions.request(session.id, session.ownerUserId, "claude", prompt, signal);
           if (prompt.title === "批准计划并继续执行" && answer.decision === "accept" && session.nativeOptions?.mode === "plan") { session.nativeOptions.mode = "execute"; await saveState(); }
@@ -5700,7 +5703,9 @@ registerNativeConversationRoutes(app, {
   agents: async (id, owner) => {
     const session = sessionById(id, owner)!; const workspace = executionWorkspaceForSession(session, owner);
     if (!workspace) throw new Error("工作区不存在");
-    return (await nativeCustomAgents(session, workspace)).agents.filter(a => a.provider === session.engine).map(({ name, displayName, description }) => ({ name, displayName, description }));
+    return (await nativeCustomAgents(session, workspace)).agents.filter(a => a.provider === session.engine).map(({ name, displayName, description, scope, provider, metadata }) => ({ name, displayName, description,
+      requiresProjectTrust: provider === "claude" && scope === "project" && Boolean(metadata.hooks || metadata.mcpServers)
+    }));
   },
   save: async (id, owner, options) => {
     const session = sessionById(id, owner)!;

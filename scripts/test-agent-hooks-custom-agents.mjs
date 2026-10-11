@@ -24,6 +24,11 @@ const claude = parseClaudeAgentMarkdown("---\nname: reviewer\ndescription: Revie
 assert.equal(claude.metadata.name, "reviewer");
 assert.deepEqual(claude.metadata.tools, ["Read", "Grep"]);
 assert.equal(claude.instructions, "Review the diff.");
+const nested = parseClaudeAgentMarkdown('---\nname: hooked\ndescription: |\n  Review with native hooks\ndisallowedTools: [Write]\nhooks:\n  PreToolUse:\n    - matcher: Read\n      hooks:\n        - type: command\n          command: node hook.mjs\n---\nReview only.');
+assert.match(nested.metadata.description, /native hooks/);
+assert.deepEqual(nested.metadata.disallowedTools, ['Write']);
+assert.equal(nested.metadata.hooks.PreToolUse[0].hooks[0].command, 'node hook.mjs');
+assert.throws(() => parseClaudeAgentMarkdown('---\nname: !!js/function "function () {}"\n---\nUnsafe'), /unknown tag/);
 const codex = parseCodexAgentToml('name = "builder"\ndescription = "Build it"\ntools = ["shell", "read"]\ninstructions = """\nImplement safely.\n"""');
 assert.equal(codex.name, "builder");
 assert.deepEqual(codex.tools, ["shell", "read"]);
@@ -39,10 +44,20 @@ await fsp.writeFile(path.join(userHome, ".claude", "agents", "reviewer.md"), "--
 await fsp.writeFile(path.join(projectRoot, ".claude", "agents", "reviewer.md"), "---\nname: reviewer\ndescription: Project version\n---\nProject instructions");
 await fsp.writeFile(path.join(projectRoot, ".codex", "agents", "builder.toml"), 'name = "builder"\ninstructions = "Build the project"\ntools = ["shell"]');
 await fsp.writeFile(path.join(projectRoot, ".codex", "agents", "broken.toml"), "name =\n");
+await fsp.mkdir(path.join(projectRoot, ".claude", "agents", "quality"));
+await fsp.writeFile(path.join(projectRoot, ".claude", "agents", "quality", "hooked.md"), '---\nname: hooked\ndescription: Native nested definition\nhooks:\n  PreToolUse:\n    - matcher: Read\n      hooks:\n        - type: command\n          command: node hook.mjs\n---\nRead only.');
 const loaded = await loadCustomAgents({ projectRoot, userHome });
-assert.equal(loaded.agents.length, 2);
+assert.equal(loaded.agents.length, 3);
 assert.equal(loaded.agents.find((item) => item.id === "reviewer")?.scope, "project");
 assert.equal(loaded.agents.find((item) => item.id === "builder")?.provider, "codex");
 assert.equal(loaded.diagnostics.length, 1);
+assert.equal(loaded.agents.find((item) => item.id === "hooked")?.metadata.hooks.PreToolUse[0].hooks[0].command, 'node hook.mjs');
+// A nested link must not import definitions from outside the agent directory.
+try {
+  await fsp.symlink(path.join(userHome, '.claude', 'agents'), path.join(projectRoot, '.claude', 'agents', 'external'), 'junction');
+  const withLink = await loadCustomAgents({ projectRoot, userHome });
+  assert.equal(withLink.agents.length, 3);
+  assert.ok(withLink.diagnostics.some((d) => d.code === 'unsafe-path'));
+} catch (error) { if (error.code !== 'EPERM') throw error; }
 await fsp.rm(root, { recursive: true, force: true });
 console.log("Agent hooks and custom Agent configuration tests passed");

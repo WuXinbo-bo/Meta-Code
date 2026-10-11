@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { NativeInteractionBroker, normalizeNativeOptions, codexNativeDecision } from '../server/engines/nativeInteraction.ts';
-import { CodexNativeSession } from '../server/engines/codex/appServerSession.ts';
+import { CodexNativeSession, appServerItem } from '../server/engines/codex/appServerSession.ts';
 import { ClaudeSessionHandle, buildClaudeSessionArgs } from '../server/engines/claude/session.ts';
 const events=[];const broker=new NativeInteractionBroker((...args)=>events.push(args));
 const controller=new AbortController();
@@ -19,6 +19,8 @@ controller.abort(new Error('stopped'));await assert.rejects(cancelled,/stopped/)
 assert.throws(()=>normalizeNativeOptions({mode:'execute',approvals:'never',customAgent:null}));
 assert.throws(()=>normalizeNativeOptions({mode:'execute',approvals:'ask',customAgent:'../../secret'}));
 assert.deepEqual(codexNativeDecision('item/permissions/requestApproval',{permissions:{network:{enabled:true}}},{decision:'decline'}),{permissions:{},scope:'turn'});
+assert.equal(appServerItem({type:'fileChange',changes:[{path:'a.js',kind:{type:'add'},diff:'+ok'}]}).changes[0].kind,'add');
+assert.equal(appServerItem({type:'collabAgentToolCall',receiverThreadIds:['child'],agentsStates:{child:{status:'completed'}}}).receiver_thread_ids[0],'child');
 assert.throws(()=>codexNativeDecision('item/commandExecution/requestApproval',{availableDecisions:['cancel']},{decision:'accept'}));
 assert.deepEqual(codexNativeDecision('item/commandExecution/requestApproval',{availableDecisions:['accept','cancel']},{decision:'decline'}),{decision:'cancel'});
 const fixture=path.resolve('scripts/fixtures/fake-native-controls.mjs');
@@ -33,6 +35,8 @@ const handle=new ClaudeSessionHandle({executable:process.execPath,executableArgs
 try{handle.send('test');const result=await handle.nextTurn();assert.equal(result.failed,false,'waiting for a human must not trigger inactivity timeout');assert.ok(claudeEvents.some(e=>e.text==='Declined write; read only'))}finally{handle.close()}
 const forkArgs=buildClaudeSessionArgs({permissionMode:'default',forkSourceId:'source',agents:{reviewer:{prompt:'Review'}},agent:'reviewer'},'branch');
 assert.ok(forkArgs.includes('--fork-session'));assert.equal(forkArgs[forkArgs.indexOf('--resume')+1],'source');assert.equal(forkArgs[forkArgs.indexOf('--session-id')+1],'branch');
+const originalAgentArgs=buildClaudeSessionArgs({permissionMode:'default',agent:'hook-reviewer'},'original-agent');
+assert.equal(originalAgentArgs[originalAgentArgs.indexOf('--agent')+1],'hook-reviewer');assert.ok(!originalAgentArgs.includes('--agents'),'original definitions must retain their official hooks and advanced fields');
 console.log('Native approval ownership, cancellation, real subprocess denial/questions, final events, human wait and official fork arguments passed');
 
 // HTTP boundaries: owner isolation, lazy fork, and an execution starting while

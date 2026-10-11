@@ -4,7 +4,7 @@ import "./NativeConversationControls.css";
 
 type Options = { mode: "execute" | "plan"; approvals: "inherit" | "ask"; customAgent: string | null };
 type Prompt = { id: string; kind: "approval" | "question"; title: string; detail: string; canAccept?: boolean; questions?: { id: string; header?: string; question: string; options?: { label: string; description?: string }[]; multiSelect?: boolean; secret?: boolean }[] };
-type Snapshot = { options: Options; agents: { name: string; displayName: string; description?: string }[]; canFork: boolean; busy: boolean };
+type Snapshot = { options: Options; agents: { name: string; displayName: string; description?: string; requiresProjectTrust?: boolean }[]; canFork: boolean; busy: boolean };
 type Request = <T>(url: string, init?: RequestInit) => Promise<T>;
 export function NativeConversationControls({ sessionId, provider, running, collaborative, request, onFork, onChanged }: {
   sessionId: string; provider: string; running: boolean; collaborative: boolean; request: Request; onFork: (session: any) => void; onChanged: () => void;
@@ -54,6 +54,7 @@ export function NativeConversationControls({ sessionId, provider, running, colla
         <label>工具审批<select aria-label="当前任务工具审批" value={snapshot?.options.approvals || "inherit"} onChange={e => void save({ approvals: e.target.value as Options["approvals"] })}><option value="inherit">沿用已有权限</option><option value="ask">需要时询问我</option></select></label>
         <label>{provider === "codex" ? "原生子 Agent" : "原生会话 Agent"}<select aria-label="选择原生自定义 Agent" value={snapshot?.options.customAgent || ""} onChange={e => void save({ customAgent: e.target.value || null })}><option value="">默认</option>{snapshot?.agents.map(agent => <option key={agent.name} value={agent.name}>{agent.displayName}</option>)}</select></label>
         {snapshot?.options.customAgent && <small>{snapshot.agents.find(a => a.name === snapshot.options.customAgent)?.description}</small>}
+        {snapshot?.agents.find(a => a.name === snapshot.options.customAgent)?.requiresProjectTrust && <small>项目 Hook / MCP 沿用 Claude 官方目录信任。首次使用请从任务菜单进入原生 CLI 终端确认。</small>}
       </fieldset>
       {!snapshot?.agents.length && <small>读取当前项目与已选原生配置中的 Agent 定义</small>}
       <button type="button" className="native-fork-action" disabled={busy || running || collaborative || !snapshot?.canFork} onClick={() => void fork()}><GitBranch size={14} />从当前完整历史创建原生分支</button>
