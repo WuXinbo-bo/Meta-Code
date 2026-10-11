@@ -99,7 +99,7 @@ import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./compone
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
 import { fileScopeRoot } from "./files/fileScopeRoot";
 import { handoffWorkflowId, linkedWorkflowId } from "./tasks/linkedWorkflow";
-import { isWorkflowHandoffMessage, workflowHandoffKey, workflowHandoffSourceId, workflowHandoffSourceKind } from "./tasks/workflowHandoff";
+import { groupAdjacentWorkflowHandoffs, isWorkflowHandoffMessage, workflowHandoffSourceId, workflowHandoffSourceKind } from "./tasks/workflowHandoff";
 import { ACTIVE_SIDEBAR_TASK_STATUSES, groupSidebarTasks, sidebarTaskIsPinned, sidebarTaskIsSelected, sidebarTaskPinnedRecords, type SidebarTaskGroup } from "./tasks/sidebarTaskGroups";
 import { workspaceRelativePath } from "./markdown/localFileLinks";
 import { fileKind, isPreviewFileKind, type PreviewFile, type WorkspaceFileNode } from "./files/fileTypes";
@@ -284,6 +284,7 @@ type SessionSummary = {
   deletionPolicy?: TaskDeletionPolicy;
 };
 type WorkflowSummary = {
+  activePlanVersion?: number;
   taskContextId?: string | null;
   executionTarget?: "workspace" | "isolated" | "worktree";
   executionRoot?: string;
@@ -335,6 +336,7 @@ type DraftAttachment = {
   uploaded?: Attachment & { sessionId: string };
 };
 type Message = {
+  handoffHistory?: Message[];
   id: string;
   sourceId?: string;
   role: "user" | "assistant" | "event" | "error";
@@ -468,6 +470,7 @@ type Bootstrap = {
     requires?: Record<string, string>;
     enabled: boolean;
     health: "healthy" | "disabled" | "degraded";
+    diagnostics?: { message: string; checkedAt: string | null; activeRequests: number; busy: boolean };
   }>;
   mcpServers: McpServer[];
   agentProviders: AgentProviderDescriptor[];
@@ -1328,6 +1331,7 @@ function sameSidebarTaskRow(previous: SidebarTaskRowProps, next: SidebarTaskRowP
     || left.task.updatedAt !== right.task.updatedAt
     || left.task.pinned !== right.task.pinned
     || sidebarTaskIsPinned(left) !== sidebarTaskIsPinned(right)
+    || left.group?.title !== right.group?.title
     || left.group?.mixedFolders !== right.group?.mixedFolders
     || left.group?.records.length !== right.group?.records.length
     || left.task.archivedAt !== right.task.archivedAt
@@ -1378,7 +1382,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   >
     <button className="session-select" onClick={() => onSelect(item)}>
       <ProviderIcon provider={item.kind === "workflow" ? item.task.plannerEngine : item.task.engine} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={15} />
-      <span><strong>{sidebarTaskIsPinned(item) && <Pin size={11} />}{item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
+      <span><strong>{sidebarTaskIsPinned(item) && <Pin size={11} />}{item.group?.title || item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
     </button>
     <IconButton label="管理任务" onClick={() => onOpenContextMenu(item.task.id, 210, Math.min(window.innerHeight - 330, 130))}><MoreHorizontal size={15} /></IconButton>
   </div>;
@@ -5092,18 +5096,7 @@ export function App() {
     [activeMessages, locallyHiddenMessageCount, messageRenderLimit]
   );
   const displayMessages = useMemo(() => {
-    // A workflow handoff can be delivered once by the task-context route and
-    // once again during the realtime reconciliation. Keep the newest copy so
-    // the conversation shows one durable card instead of repeated transcripts.
-    const seenHandoffs = new Set<string>();
-    const deduped = [...visibleMessages].reverse().filter((message) => {
-      if (!isWorkflowHandoffMessage(message)) return true;
-      const key = workflowHandoffKey(message);
-      if (seenHandoffs.has(key)) return false;
-      seenHandoffs.add(key);
-      return true;
-    }).reverse();
-    return groupMessages(deduped);
+    return groupMessages(groupAdjacentWorkflowHandoffs(visibleMessages));
   }, [visibleMessages]);
   const agentDrawerMessage = useMemo(
     () => activeSession?.messages.find((message) => message.id === agentDrawerMessageId && message.role === "event") || null,
@@ -5368,7 +5361,7 @@ export function App() {
           </div>
           </div>
           <div className="topbar-pages">
-          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && <TaskModeBar sessionId={displayedSession?.id} workflowId={displayedWorkflowId || undefined} engine={displayedSession?.engine || data.workflows.find((item) => item.id === displayedWorkflowId)?.plannerEngine || fallbackEngine} defaultGoal={displayedSession ? [...displayedSession.messages].reverse().find((message) => message.role === "user")?.text || displayedSession.title : ""} enabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)} onConversation={(id) => void continueTaskConversation(id).catch((error) => setNotice(error.message))} onWorkflow={selectWorkflow} onCreateWorkflow={startTaskOrchestration} onError={setNotice} />}
+          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && <TaskModeBar workflowSummaries={data.workflows} sessionId={displayedSession?.id} workflowId={displayedWorkflowId || undefined} engine={displayedSession?.engine || data.workflows.find((item) => item.id === displayedWorkflowId)?.plannerEngine || fallbackEngine} defaultGoal={displayedSession ? [...displayedSession.messages].reverse().find((message) => message.role === "user")?.text || displayedSession.title : ""} enabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)} onConversation={(id) => void continueTaskConversation(id).catch((error) => setNotice(error.message))} onWorkflow={selectWorkflow} onCreateWorkflow={startTaskOrchestration} onError={setNotice} />}
         {workspaceBrowserVisible && <WorkspaceBrowserTabs
           tabs={workspaceBrowser.tabs}
           conversationProviders={browserConversationProviders}
@@ -5453,9 +5446,9 @@ export function App() {
           </section>
         )}
 
-          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench key={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || `draft:${activeWorkspaceId}`} workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
+          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench enabled={data.plugins.some((plugin) => plugin.enabled && plugin.capabilities.includes("workflow.execution"))} onOpenPluginSettings={openPluginSettings} key={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || `draft:${activeWorkspaceId}`} workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
-            {displayedSession && activeConversationWorkflowId && <CompactWorkflowProgress workflowId={activeConversationWorkflowId} onOpen={() => selectWorkflow(activeConversationWorkflowId)} onContinueConversation={() => composerRef.current?.focus()} />}
+            {displayedSession && activeConversationWorkflowId && <CompactWorkflowProgress enabled={data.plugins.some((plugin) => plugin.enabled && plugin.capabilities.includes("workflow.maintenance"))} onOpenPluginSettings={openPluginSettings} workflowId={activeConversationWorkflowId} onOpen={() => selectWorkflow(activeConversationWorkflowId)} onContinueConversation={() => composerRef.current?.focus()} />}
             <SubagentActivityRail key={activeSession?.id || "draft"} messages={activeMessages} providerControls={data.providerControls} onOpenAgent={setAgentDrawerMessageId} />
             <div
               className="messages"
@@ -5552,6 +5545,7 @@ export function App() {
                         return <HandoffCard
                           key={message.id}
                           text={message.text}
+                          history={message.handoffHistory}
                           sourceKind={sourceKind}
                           dataMessageId={message.id}
                           workflowId={sourceWorkflowId || undefined}

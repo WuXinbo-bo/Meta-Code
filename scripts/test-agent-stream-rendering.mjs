@@ -53,6 +53,7 @@ assert.equal(historicalTurn.activeDurationMs, 0);
 
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
 const fileTree = await readFile(new URL("../src/components/WorkspaceFileTree.tsx", import.meta.url), "utf8");
+const workflowDrawer = await readFile(new URL("../src/workflow/WorkflowAgentDrawer.tsx", import.meta.url), "utf8");
 const workflow = await readFile(new URL("../src/workflow/WorkflowWorkbench.tsx", import.meta.url), "utf8");
 const conversation = await readFile(new URL("../src/components/AgentConversation.tsx", import.meta.url), "utf8");
 const timeline = await readFile(new URL("../src/components/ActivityTimeline.tsx", import.meta.url), "utf8");
@@ -142,7 +143,8 @@ assert.match(app, /<WorkspaceFileTree/);
 assert.match(fileTree, /className="tree-row-main"/);
 assert.doesNotMatch(fileTree, /tree-row-actions"><span role="button"/);
 assert.match(app, /aria-label="编辑 AGENTS\.md"/);
-assert.match(workflow, /<AgentConversation/);
+assert.match(workflow, /<WorkflowAgentDrawer/);
+assert.match(workflowDrawer, /<AgentConversation/);
 assert.match(conversation, /<ActivityTimeline/);
 assert.match(conversation, /showProvider/);
 assert.doesNotMatch(timeline, /<AgentTurnSummary/);
@@ -179,7 +181,7 @@ assert.match(app, /useAgentOutputFollow\(/);
 assert.match(app, /agentDetailMatchesSummary/);
 assert.match(app, /logs=\{conversationLogs\}/);
 assert.match(app, /provider=\$\{encodeURIComponent\(provider\)\}/);
-assert.match(workflow, /useAgentOutputFollow\(/);
+assert.match(workflowDrawer, /useAgentOutputFollow\(/);
 assert.doesNotMatch(app, /\?\.text\.length/);
 
 console.log("Unified agent stream normalization and renderer ownership OK");

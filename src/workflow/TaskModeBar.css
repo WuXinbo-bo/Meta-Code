@@ -76,3 +76,12 @@
   .topbar-pages:has(.task-mode-bar) > .workspace-browser-tabs { display: none; }
   .task-mode-create { left: auto; right: 0; }
 }
+
+.task-mode-bar select { flex: 1 1 auto; width: 0; max-width: 154px; text-overflow: ellipsis; cursor: pointer; }
+.task-mode-bar-error span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mc-text-tertiary); }
+.task-transition-card.is-collapsed .task-workflow-progress { margin-bottom: 10px; border: 0; background: transparent; padding-top: 0; padding-bottom: 0; }
+.task-workflow-loading { display: flex; align-items: center; gap: 7px; padding: 10px 12px; font-size: 11px; color: var(--mc-text-tertiary); }
+.task-workflow-loading button, .task-workflow-feedback button { margin-left: auto; border: 0; border-radius: 5px; padding: 3px 6px; color: var(--mc-text-secondary); background: var(--mc-hover); font: inherit; cursor: pointer; }
+.task-workflow-feedback { padding: 0 12px; }
+.task-workflow-input { padding: 6px 12px 0; }
+.task-workflow-answer { margin: 6px 12px; }

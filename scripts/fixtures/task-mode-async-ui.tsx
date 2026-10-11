@@ -8,7 +8,11 @@ import "/src/design/shell.css";
 import "/src/design/conversation.css";
 import "/src/design/features.css";
 
-const mode = new URLSearchParams(location.search).get("mode") || "bar";
+const params = new URLSearchParams(location.search);
+const mode = params.get("mode") || "bar";
+const manual = params.has("manual");
+let failLookup = params.has("failure");
+let redrawFixture = () => {};
 const calls: Array<{ path: string; body: unknown }> = [];
 const conversations: string[] = [];
 const errors: string[] = [];
@@ -22,9 +26,11 @@ window.fetch = async (input, options = {}) => {
   const path = url.pathname;
   const body = options.body ? JSON.parse(String(options.body)) : null;
   calls.push({ path, body });
+  queueMicrotask(() => redrawFixture());
   if (options.method === "POST") return new Promise<Response>((resolve) => pending.set(path, (value, status) => resolve(response(value, status))));
   if (path === "/api/workflow-definitions") return response({ items: [{ id: "async-definition", revision: 1, name: "Review definition", description: "Review existing project", parameters: [] }] });
   if (path === "/api/task-contexts/lookup") {
+    if (failLookup) { failLookup = false; return response({ error: "Fixture lookup unavailable" }, 503); }
     const source = url.searchParams.get("sessionId") || url.searchParams.get("workflowId") || "";
     const id = source.split("-").at(-1) || "a";
     return response({ id: `context-${id}`, title: `Task ${id.toUpperCase()}`, executions: [{ kind: "session", id: `session-${id}` }, { kind: "workflow", id: `async-${id}` }] });
@@ -44,6 +50,8 @@ window.fetch = async (input, options = {}) => {
 } };
 
 function Fixture() {
+  const [, redraw] = useState(0);
+  redrawFixture = () => redraw((value) => value + 1);
   const [task, setTask] = useState("a");
   const [engine, setEngine] = useState("codex");
   const [visible, setVisible] = useState(true);
@@ -56,6 +64,10 @@ function Fixture() {
       if (!result.ok) throw new Error((await result.json()).error);
     }} onError={(message) => { errors.push(message); setNotice(message); }} />)}
     {notice && <output role="status">{notice}</output>}
+    {manual && <section aria-label="Manual response controls" style={{ marginTop: 24 }}>
+      {[...pending.keys()].map((path) => <div key={path}><code>{path}</code><button onClick={() => { (window as any).__taskAsync.resolve(path, path.endsWith("/conversation") ? { id: "session-a" } : path.endsWith("/plan") ? { workflow: workflow("a"), queuedUntilCheckpoint: true } : { ok: true }); redrawFixture(); }}>Resolve {path}</button><button onClick={() => { (window as any).__taskAsync.resolve(path, { error: "Old A error" }, 409); redrawFixture(); }}>Reject {path}</button></div>)}
+      <output aria-label="Conversation callbacks">{conversations.length}</output>
+    </section>}
   </main>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

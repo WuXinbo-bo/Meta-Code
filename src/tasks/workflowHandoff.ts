@@ -58,9 +58,29 @@ export function readWorkflowHandoff(text: string) {
   return {
     title: sections.goal[0] || title || "编排已将任务上下文交接给当前对话。",
     completed: /^编排已完成[：:]/u.test(heading),
-    summary: sections.result.join("\n"),
+    summary: [...new Set(sections.result)].join("\n"),
     files: [...new Set(sections.files)],
     decisions: sections.decisions,
     unresolved: sections.unresolved
   };
+}
+
+/** Only adjacent, explicitly sourced updates from the same approved plan share one visual card. */
+export function groupAdjacentWorkflowHandoffs<T extends HandoffMessage & { id: string }>(messages: T[]): Array<T & { handoffHistory?: T[] }> {
+  const groupKey = (message: T) => {
+    if (!isWorkflowHandoffMessage(message) || workflowHandoffSourceKind(message) !== "workflow") return "";
+    const source = workflowHandoffSourceId(message);
+    const payload = handoffPayload(message);
+    const version = typeof payload?.planVersion === "number" ? payload.planVersion : /^workflow-result:[^:]+:([^:]+):/u.exec(message.sourceId || "")?.[1];
+    return source && version !== undefined ? JSON.stringify([source, version]) : "";
+  };
+  const result: Array<T & { handoffHistory?: T[] }> = [];
+  for (const message of messages) {
+    const previous = result.at(-1);
+    const key = groupKey(message);
+    if (previous && key && groupKey(previous) === key) {
+      result[result.length - 1] = { ...message, handoffHistory: [...(previous.handoffHistory || [previous]), message] };
+    } else result.push(message);
+  }
+  return result;
 }

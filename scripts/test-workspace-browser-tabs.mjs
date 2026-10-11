@@ -234,3 +234,9 @@ adjacentFallback = reconcileWorkspaceBrowserTabs(adjacentFallback, {
 assert.equal(adjacentFallback.activeTabId, workspaceBrowserResourceKey(conversation("c")), "invalidating an active tab should select its nearest right neighbor");
 
 console.log("workspace browser tab tests passed");
+
+const stableTitle = groupSidebarTasks([{ ...priorChat, task: { ...priorChat.task, title: "User project task", status: "running" } }, { ...latestWorkflow, task: { ...latestWorkflow.task, title: "Plan title" } }])[0];
+assert.equal(stableTitle.group.title, "User project task", "A deliberately concise conversation title stays stable across mode switches");
+const businessTitle = groupSidebarTasks([{ ...priorChat, task: { ...priorChat.task, title: "Long user requirements ".repeat(20) } }, { ...latestWorkflow, task: { ...latestWorkflow.task, title: "Plan title" } }])[0];
+assert.equal(businessTitle.group.title, "Plan title", "Long generated prompt titles yield to the concise business plan title");
+assert.equal(businessTitle.group.records[0].task.title, "Long user requirements ".repeat(20), "Presentation never renames persisted task records");

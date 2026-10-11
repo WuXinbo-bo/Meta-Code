@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { isWorkflowHandoffMessage, readWorkflowHandoff, workflowHandoffKey, workflowHandoffSourceId, workflowHandoffSourceKind } from "../src/tasks/workflowHandoff.ts";
+import { groupAdjacentWorkflowHandoffs, isWorkflowHandoffMessage, readWorkflowHandoff, workflowHandoffKey, workflowHandoffSourceId, workflowHandoffSourceKind } from "../src/tasks/workflowHandoff.ts";
 import { handoffWorkflowId } from "../src/tasks/linkedWorkflow.ts";
 import { renderTaskHandoff } from "../server/tasks/context.ts";
 
@@ -37,3 +37,14 @@ assert.equal(handoffWorkflowId("removed", session, workflows), "", "Removed sour
 assert.equal(handoffWorkflowId("", session, workflows), "", "Ambiguous legacy sources do not guess");
 assert.equal(handoffWorkflowId("", session, [workflows[0]]), "old", "Single-round legacy histories retain navigation");
 console.log("workflow handoff: published/legacy/context parsing, summary fields, role boundary, source-specific navigation, root isolation and deduplication passed");
+
+const progress = { ...result, id: "progress", text: "编排进度交接：支付接口维护\n已完成 1 项", payload: { workflowId: "old", planVersion: 1 } };
+const completion = { ...result, id: "completion", payload: { workflowId: "old", planVersion: 1 } };
+const adjacent = groupAdjacentWorkflowHandoffs([progress, completion]);
+assert.equal(adjacent.length, 1);
+assert.equal(adjacent[0].id, "completion");
+assert.deepEqual(adjacent[0].handoffHistory.map((item) => item.id), ["progress", "completion"], "Original progress and final evidence remain inspectable");
+assert.equal(groupAdjacentWorkflowHandoffs([progress, { id: "reply", role: "user", text: "继续" }, completion]).length, 3, "Handoffs on opposite sides of a conversation are separate events");
+assert.equal(groupAdjacentWorkflowHandoffs([progress, { ...completion, payload: { workflowId: "old", planVersion: 2 } }]).length, 2);
+assert.equal(groupAdjacentWorkflowHandoffs([{ ...progress, payload: {}, sourceId: undefined }, { ...completion, payload: {}, sourceId: undefined }]).length, 2, "Legacy source-free handoffs are not guessed together");
+assert.equal(readWorkflowHandoff("编排已完成：维护\n完成修复\n完成修复").summary, "完成修复");
