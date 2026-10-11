@@ -95,7 +95,7 @@ Codex 连接验证的旧 30 秒超时也会阻挡实际可用账号：本轮真�
 - `npm run test:ci`：136 项完整离线测试通过，包含构建、原有 Provider / 编排 / 插件边界及新增后台生命周期、原生终端、搜索兼容、原生会话连续性测试。
 - 新后台 fixture 实际启动子进程，覆盖中间 result、后台通知、最终 result、子工具隔离、用户来源和结构化终态。
 - 新终端测试覆盖 owner 隔离、缺失请求 body、替换实例 SSE、回放截断、容量与关闭期间启动；并实际运行已安装 PTY 执行 Node。
-- 最终 `npm run typecheck`、`npm run build` 与相关边界复测需通过后提交。变更为 shared，Windows main 应 cherry-pick 后独立检查；Windows 实机运行另行记录。
+- 最终 `npm run typecheck`、`npm run build` 与相关边界复测通过。修复提交 `mac版: 4276049` 已同步为 `main: 2874cd9`；main 独立类型检查、构建及 135 项离线测试全部通过（mac版 136 项，多一项 macOS 启动器检查）。两分支检查均在当前 Mac 完成，不等同于 Windows ConPTY 实机测试。
 - 提交前扫描 110 个源文件和本地实测文件，与现有凭据库比对，配置中的凭据匹配数为 0。真实任务数据、日志、终端回放和截图保留在用户测试目录，不进入仓库。
 
 ## 官方参考与后续验收门槛
