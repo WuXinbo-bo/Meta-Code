@@ -8,6 +8,7 @@ import { registerProcessTree, terminateProcessTree } from "../../processTree.js"
 import { WorkbenchTimeoutError } from "../../orchestration/timeouts.js";
 import { ClaudeTransportError, claudeApiRetryExhaustsProcess, classifyClaudeFailure, CLAUDE_DEFAULT_RETRY_POLICY, type ClaudeRetryPolicy, type ClaudeRuntimeMode } from "./transport.js";
 import { ClaudeBackgroundTasks, claudeUserInput, type ClaudeInputOrigin } from "./backgroundTasks.js";
+import type { NativeDecision, NativePrompt } from "../nativeInteraction.js";
 
 type Options = {
   credentialKind?: "api-key" | "auth-token";
@@ -28,6 +29,10 @@ type Options = {
   snapshotOnly?: boolean;
   additionalDirectories?: string[];
   includeSystemStatus?: boolean;
+  agent?: string;
+  agents?: Record<string, unknown>;
+  forkSourceId?: string;
+  onPermission?: (prompt: Omit<NativePrompt, "id" | "sessionId" | "provider" | "createdAt">, signal: AbortSignal) => Promise<NativeDecision>;
   permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
   signal: AbortSignal; onEvent: (event: NormalizedEngineEvent) => Promise<void> | void;
   ownerId?: string;
@@ -65,7 +70,7 @@ export const CLAUDE_NATIVE_AGENT_TOOLS = ["Task", "Agent", "Workflow"] as const;
 export const CLAUDE_MAIN_DISALLOWED_TOOLS = CLAUDE_NATIVE_AGENT_TOOLS;
 export const CLAUDE_PLANNER_DISALLOWED_TOOLS = [...CLAUDE_NATIVE_AGENT_TOOLS, "Write", "Edit", "NotebookEdit", "Bash"] as const;
 
-export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "disallowNativeAgents" | "disallowedTools" | "allowedTools" | "additionalDirectories" | "tools" | "snapshotOnly">, sessionId: string) {
+export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "disallowNativeAgents" | "disallowedTools" | "allowedTools" | "additionalDirectories" | "tools" | "snapshotOnly" | "agent" | "agents" | "forkSourceId" | "onPermission">, sessionId: string) {
   const args = [
     ...(options.executableArgs || []),
     "-p",
@@ -89,8 +94,12 @@ export function buildClaudeSessionArgs(options: Pick<Options, "executableArgs" |
   for (const directory of [...new Set(options.additionalDirectories || [])]) args.push("--add-dir", directory);
   if (options.model) args.push("--model", options.model);
   if (options.effort) args.push("--effort", options.effort);
+  if (options.onPermission) args.push("--permission-prompt-tool", "stdio");
+  if (options.agent) args.push("--agent", options.agent);
+  if (options.agents) args.push("--agents", JSON.stringify(options.agents));
   if (options.mcpConfigPath) args.push("--mcp-config", options.mcpConfigPath, "--strict-mcp-config");
-  if (options.sessionId) args.push("--resume", options.sessionId);
+  if (options.forkSourceId) args.push("--resume", options.forkSourceId, "--fork-session", "--session-id", sessionId);
+  else if (options.sessionId) args.push("--resume", options.sessionId);
   else args.push("--session-id", sessionId);
   return args;
 }
@@ -129,6 +138,7 @@ export class ClaudeSessionHandle {
   private turnInFlight = false;
   private sessionId: string;
   private readonly backgroundTasks = new ClaudeBackgroundTasks();
+  private readonly permissionRequests = new Map<string, AbortController>();
 
   constructor(private readonly options: Options) {
     this.sessionId = options.sessionId || crypto.randomUUID();
@@ -175,11 +185,13 @@ export class ClaudeSessionHandle {
     if (this.outputTimer) clearTimeout(this.outputTimer);
     this.child.stdin.end();
     terminateProcessTree(this.child);
+    for (const request of this.permissionRequests.values()) request.abort();
   }
 
   private armTimeout(_activity?: string) {
     if (!this.turnInFlight) return;
     if (this.outputTimer) clearTimeout(this.outputTimer);
+    if (this.permissionRequests.size) { this.outputTimer = undefined; return; }
     if (!this.options.outputTimeoutMs || this.options.outputTimeoutMs <= 0) {
       this.outputTimer = undefined;
       return;
@@ -202,6 +214,7 @@ export class ClaudeSessionHandle {
     this.closedError = error;
     this.turnInFlight = false;
     if (this.outputTimer) clearTimeout(this.outputTimer);
+    for (const request of this.permissionRequests.values()) request.abort();
     this.waiters.splice(0).forEach((waiter) => waiter.reject(error));
   }
 
@@ -212,6 +225,9 @@ export class ClaudeSessionHandle {
     for await (const line of lines) {
       if (!line.trim()) continue; this.armTimeout();
       let item: any; try { item = JSON.parse(line); } catch { continue; }
+      if (item.type === "control_request") { void this.handlePermission(item); continue; }
+      if (item.type === "control_cancel_request") { this.permissionRequests.get(String(item.request_id))?.abort(); continue; }
+      if (item.type === "control_response") continue;
       if (item.session_id) this.sessionId = String(item.session_id);
       // Child messages share this stream on recent CLI versions. Their tools
       // and replies belong to the child transcript, not the main-turn counters.
@@ -292,6 +308,28 @@ export class ClaudeSessionHandle {
         await this.options.onEvent({ type: "status", rawType, sourceId: String(item.uuid || `unknown:${rawType}`), text: `Claude 返回未识别事件：${rawType}`, category: "unknown", phase: "started", detail: item });
       }
     }
+  }
+
+  private async handlePermission(item: any) {
+    const id = String(item.request_id || ""); const request = item.request || {};
+    if (!id || this.permissionRequests.has(id)) return;
+    const pending = new AbortController(); this.permissionRequests.set(id, pending); this.armTimeout();
+    try {
+      if (request.subtype !== "can_use_tool") {
+        this.child.stdin.write(JSON.stringify({ type: "control_response", response: { subtype: "error", request_id: id, error: "Unsupported native control request" } }) + "\n"); return;
+      }
+      const question = request.tool_name === "AskUserQuestion";
+      const prompt: Omit<NativePrompt, "id" | "sessionId" | "provider" | "createdAt"> = question
+        ? { kind: "question", title: "Claude 需要你的决定", detail: "回答将直接返回当前原生工具调用", questions: (request.input?.questions || []).map((q: any, index: number) => ({ id: String(index), header: q.header, question: q.question, multiSelect: q.multiSelect, options: q.options })) }
+        : { kind: "approval", title: request.tool_name === "ExitPlanMode" ? "批准计划并继续执行" : `批准 ${request.tool_name || "工具"}`, detail: [request.decision_reason, JSON.stringify(request.input || {}, null, 2)].filter(Boolean).join("\n").slice(0, 24_000) };
+      const answer = this.options.onPermission ? await this.options.onPermission(prompt, AbortSignal.any([this.options.signal, pending.signal])) : { decision: "decline" as const };
+      if (pending.signal.aborted || this.closed) return;
+      const allowed = question || answer.decision === "accept";
+      const input = question ? { ...request.input, answers: Object.fromEntries((request.input.questions || []).map((q: any, index: number) => [q.question, answer.answers?.[String(index)]?.join(", ") || ""])) } : request.input || {};
+      this.child.stdin.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: id, response: allowed ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "用户拒绝了此次原生操作" } } }) + "\n");
+    } catch {
+      if (!pending.signal.aborted && !this.closed) this.child.stdin.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: id, response: { behavior: "deny", message: "原生审批已取消" } } }) + "\n");
+    } finally { this.permissionRequests.delete(id); this.armTimeout(); }
   }
 }
 

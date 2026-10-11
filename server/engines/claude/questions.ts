@@ -39,6 +39,7 @@ export function compactClaudeQuestionPayload(payload: unknown) {
     id: source?.id,
     tool_use_id: source?.tool_use_id,
     questions,
-    workbench_compacted: true
+    workbench_compacted: true,
+    ...(source?.native_controlled ? { native_controlled: true } : {})
   };
 }

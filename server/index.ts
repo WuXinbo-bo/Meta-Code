@@ -5,6 +5,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CodexSearchCompatibility } from "./engines/codex/searchCompatibility.js";
 import { canResumeNativeSession } from "./runtime/sessionCompatibility.js";
+import { CodexNativeSession } from "./engines/codex/appServerSession.js";
+import { NativeInteractionBroker, DEFAULT_NATIVE_OPTIONS } from "./engines/nativeInteraction.js";
+import { prepareNativeFork } from "./engines/nativeFork.js";
+import { registerNativeConversationRoutes } from "./engines/nativeConversationRoutes.js";
 import { Codex, type ThreadEvent, type ThreadOptions, type Usage } from "@openai/codex-sdk";
 import compression from "compression";
 import { parse as parseCsv } from "csv-parse/sync";
@@ -328,6 +332,15 @@ type ActiveRun = {
 };
 
 const activeRuns = new Map<string, ActiveRun>();
+const nativeInteractions = new NativeInteractionBroker((id, owner, prompt, status) => {
+  const session = sessionById(id, owner);
+  if (!session) return;
+  // Answers (especially secret questions) are returned only to the CLI.
+  const existing = session.messages.find(message => message.sourceId === `native-request:${prompt.id}`);
+  if (existing) { existing.text = `${prompt.title} · ${status === "resolved" ? "已处理" : "已取消"}`; existing.activityPhase = "completed"; }
+  else appendMessage(session, { role: "event", text: `${prompt.title} · 等待你的决定`, sourceId: `native-request:${prompt.id}`, eventType: "native.request", activityCategory: "status", activityPhase: "running" });
+  publishSessionChanged(session); scheduleStateSave();
+});
 const sessionCreationMutationLocks = new Map<string, Promise<void>>();
 
 function dispatchAgentHook(input: { kind: "session" | "tool" | "permission" | "subagent" | "compact"; event: string; providerId?: string; sessionId?: string; taskId?: string; payload?: unknown }) {
@@ -1946,6 +1959,29 @@ function buildCodex(settings: Settings, parentSession?: Session, disableNativeAg
     ...(Object.keys(codexConfig).length ? { config: codexConfig } : {}),
     env: { ...envForCodex(settings, parentSession, disableNativeAgents, codexHomeOverride || CODEX_HOME), ...workspaceMcp.env }
   });
+}
+
+async function nativeCustomAgents(session: Session, workspace: Workspace) {
+  const codexHome = codexLinkRepository.findBySession(session.ownerUserId, session.id)?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId);
+  return loadCustomAgents({ projectRoot: workspace.root, userHome: os.homedir(), providerHomes: { codex: codexHome, claude: nativeProviderHome("claude", session.ownerUserId) } });
+}
+
+async function codexNativeLaunch(session: Session, workspace: Workspace, activeRun?: ActiveRun) {
+  const runtime = await detectCodexRuntime();
+  if (!runtime.available) throw new Error("Codex CLI 不可用");
+  const home = codexLinkRepository.findBySession(session.ownerUserId, session.id)?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId);
+  const mcp = codexMcpConfigForWorkspace(workspace, undefined, activeRun?.taskHistoryServers || []);
+  const native = session.nativeOptions || DEFAULT_NATIVE_OPTIONS;
+  const selected = native.customAgent ? (await nativeCustomAgents(session, workspace)).agents.find(a => a.provider === "codex" && a.name === native.customAgent) : undefined;
+  if (native.customAgent && !selected) throw new Error("所选原生 Agent 已不存在，请重新选择");
+  const configured = terminalMcpEnvironment({ ...codexProviderConfig(state.settings), ...mcp.config, model_reasoning_effort: state.settings.reasoningEffort, web_search: state.settings.webSearch,
+    ...(selected ? { agents: { [selected.name]: { description: selected.description || selected.displayName, config_file: selected.sourcePath } } } : {}) }, { ...envForCodex(state.settings, undefined, false, home), ...mcp.env });
+  const approvalPolicy = native.approvals === "ask" ? "untrusted" : state.settings.approvalPolicy;
+  const sandbox = native.mode === "plan" ? "read-only" : state.settings.sandboxMode;
+  return { executable: runtime.path, home, cwd: workspace.root, env: configured.env, args: codexTerminalConfigArgs(configured.config),
+    thread: { cwd: workspace.root, model: state.settings.model, approvalPolicy, sandbox, developerInstructions: selected ? `For the user's task, invoke the native subagent type ${selected.name} using its official agent definition. Keep the main agent responsible for the final result. Do not imitate the subagent's output.` : "" },
+    turn: { cwd: workspace.root, model: state.settings.model, effort: state.settings.reasoningEffort, collaborationMode: { mode: native.mode === "plan" ? "plan" : "default", settings: { model: state.settings.model, reasoning_effort: state.settings.reasoningEffort, developer_instructions: null } } },
+    onRequest: (prompt: Parameters<NativeInteractionBroker["request"]>[3], signal: AbortSignal) => nativeInteractions.request(session.id, session.ownerUserId, "codex", prompt, signal) };
 }
 
 function threadOptions(workspace: Workspace, settings: Settings): ThreadOptions {
@@ -3830,9 +3866,10 @@ async function runCodexTurn(session: Session, workspace: Workspace, prompt: stri
     if (binding?.accessMode === "resume") linkedRun = await codexLink.prepareLinkedRun(binding);
     const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, activeRun.taskHistoryServers || [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
     const options = mainCodexThreadOptions(session, workspace, state.settings, activeRun.skillPolicies);
+    const nativeLaunch = !delegationEnabled && (session.nativeOptions || state.settings.approvalPolicy !== "never") ? await codexNativeLaunch(session, workspace, activeRun) : null;
     const fileBaseline = await createActivityTurnFileBaseline(workspace.root);
     const terminalState = await runCodexSessionTurn({
-      createThread: (threadId) => threadId ? codex.resumeThread(threadId, options) : codex.startThread(options),
+      createThread: (threadId) => nativeLaunch ? new CodexNativeSession(nativeLaunch, threadId) : threadId ? codex.resumeThread(threadId, options) : codex.startThread(options),
       threadId: session.codexThreadId,
       prompt: promptForCodexSession(session, workspace, prompt, activeRun.skillPolicies, activeRun.delegatedReviewTaskIds.size === 0),
       signal: controller.signal,
@@ -3952,12 +3989,22 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
       const mcpConfigPath = await workspaceMcpConfigPath(workspace, undefined, activeRun.taskHistoryServers);
       const delegationEnabled = isWorkbenchDelegationEnabled(session, activeRun.skillPolicies);
       const capabilities = orchestrationCapabilities("claude", delegationEnabled);
+      const native = delegationEnabled ? DEFAULT_NATIVE_OPTIONS : session.nativeOptions || DEFAULT_NATIVE_OPTIONS;
+      const selected = native.customAgent ? (await nativeCustomAgents(session, workspace)).agents.find(a => a.provider === "claude" && a.name === native.customAgent) : undefined;
+      if (native.customAgent && !selected) throw new Error("所选原生 Agent 已不存在，请重新选择");
       return new ClaudeSessionHandle({
         executable: command.executable, executableArgs: command.args, cwd: workspace.root,
         sessionId, model: state.settings.claude.model,
         effort: state.settings.claude.effort,
         baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
-        configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: state.settings.claude.permissionMode,
+        configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: native.mode === "plan" ? "plan" : native.approvals === "ask" ? "default" : state.settings.claude.permissionMode,
+        forkSourceId: session.nativeForkSourceId,
+        ...(selected ? { agent: selected.name, agents: { [selected.name]: { description: selected.description || selected.displayName, prompt: selected.instructions, ...(selected.model ? { model: selected.model } : {}), ...(selected.tools.length ? { tools: selected.tools } : {}) } } } : {}),
+        ...(!delegationEnabled ? { onPermission: async (prompt: Parameters<NativeInteractionBroker["request"]>[3], signal: AbortSignal) => {
+          const answer = await nativeInteractions.request(session.id, session.ownerUserId, "claude", prompt, signal);
+          if (prompt.title === "批准计划并继续执行" && answer.decision === "accept" && session.nativeOptions?.mode === "plan") { session.nativeOptions.mode = "execute"; await saveState(); }
+          return answer;
+        } } : {}),
         bridgeUrl: delegationEnabled ? CODEX_BRIDGE_URL : undefined,
         bridgeToken: delegationEnabled ? CODEX_BRIDGE_TOKEN : undefined,
         claudeWorkerBridgeUrl: delegationEnabled ? CLAUDE_WORKER_BRIDGE_URL : undefined,
@@ -3969,7 +4016,8 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
         ownerId: session.id,
         signal: activeRun.controller.signal,
         onEvent: async (event) => {
-          if (event.sessionId) session.engineSessionId = event.sessionId;
+          if (event.sessionId) { session.engineSessionId = event.sessionId; if (event.type === "session.started") delete session.nativeForkSourceId; }
+          if (!delegationEnabled && isClaudeQuestionTool(event.toolName)) { event.payload = { ...recordOf(event.payload), native_controlled: true }; }
           if (event.type === "error") session.lastError = event.text;
           if (event.usage) session.usage = addUsage(session.usage || emptyUsage(), event.usage);
           await upsertNormalizedMessage(session, event, workspace);
@@ -4273,6 +4321,7 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
         try { activeRun.claudeProcess?.close(); terminateTrackedProcessTrees(session.id); activeRun.releaseSkillProjection?.(); }
         finally {
           executionLease?.release();
+          nativeInteractions.cancel(session.id, session.ownerUserId);
           workspaceTreeIndex.invalidate(workspace.root);
           if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
           dispatchAgentHook({ kind: "session", event: "session.finish", providerId: session.engine, sessionId: session.id, payload: { status: session.status } });
@@ -5644,6 +5693,42 @@ app.post("/api/auth/totp/enable", auth.requireAuth, auth.requireRoles("owner", "
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 app.use("/api", auth.requireAuth);
+registerNativeConversationRoutes(app, {
+  broker: nativeInteractions,
+  session: sessionById,
+  busy: id => activeRuns.has(id) || nativeTerminals.snapshot(id, state.sessions.find(s => s.id === id)?.ownerUserId || "")?.status === "running",
+  agents: async (id, owner) => {
+    const session = sessionById(id, owner)!; const workspace = executionWorkspaceForSession(session, owner);
+    if (!workspace) throw new Error("工作区不存在");
+    return (await nativeCustomAgents(session, workspace)).agents.filter(a => a.provider === session.engine).map(({ name, displayName, description }) => ({ name, displayName, description }));
+  },
+  save: async (id, owner, options) => {
+    const session = sessionById(id, owner)!;
+    session.nativeOptions = options; session.updatedAt = new Date().toISOString(); session.revision += 1;
+    await saveState(); publishSessionChanged(session);
+  },
+  fork: async (id, owner) => {
+    const source = sessionById(id, owner)!;
+    if (!source.engineSessionId || source.nativeForkSourceId) throw new Error("请先完成一轮原生会话，再创建原生分支");
+    const workspace = await ensureSessionExecutionRoot(source);
+    const { branch, branchWorkspace } = await prepareNativeFork(source, workspace, {
+      title: nextBranchTitle(source), ensureRoot: ensureSessionExecutionRoot, codexLaunch: codexNativeLaunch
+    });
+    // Recheck after native I/O: a run could have started while forking.
+    if (activeRuns.has(source.id) || nativeTerminals.get(id, owner)?.status === "running" || sessionById(id, owner) !== source) throw new Error("源任务状态已变化，请结束执行后重新创建分支");
+    const context = taskContextStore.ensure({ kind: "session", id: source.id, executionRoot: workspace.root }, owner, source.workspaceId, source.title);
+    branch.taskContextId = context.id;
+    taskContextStore.link(context.id, { kind: "session", id: branch.id, executionRoot: branchWorkspace.root }, owner, source.workspaceId);
+    appendMessage(branch, { role: "event", eventType: "native.fork", text: source.engine === "claude" ? "已创建原生分支任务，首次发送时由 Claude 官方 CLI 分叉完整历史" : "已通过 Codex 官方协议创建独立原生历史分支" });
+    const sourceBinding = codexLinkRepository.findBySession(owner, source.id);
+    const branchBinding = source.engine === "codex" && sourceBinding?.accessMode === "resume" && branch.codexThreadId
+      ? codexLinkRepository.bind({ ...sourceBinding, sessionId: branch.id, threadId: branch.codexThreadId, threadName: branch.title, threadPreview: branch.title, previousThreadId: null }) : null;
+    state.sessions.unshift(branch);
+    try { await saveState(); } catch (error) { state.sessions = state.sessions.filter(s => s.id !== branch.id); taskContextStore.unlink({ kind: "session", id: branch.id }, owner); if (branchBinding) codexLinkRepository.unbind(owner, branchBinding.id); throw error; }
+    eventHub.publish("sessions.changed", { sessionId: branch.id, action: "created" }, [owner]);
+    return sessionWithMessageWindow(branch, 80);
+  }
+});
 registerNativeTerminalRoutes(app, {
   manager: nativeTerminals,
   authorize: (id, owner) => { const session = sessionById(id, owner); return Boolean(session && isNativeEnhancedProvider(session.engine)); },

@@ -1,12 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import type { CodexLinkThread, CodexLinkThreadRead } from "./types.js";
+import { registerProcessTree, terminateProcessTree } from "../processTree.js";
 
-type JsonObject = Record<string, unknown>;
+export type JsonObject = Record<string, unknown>;
 export type CodexAppServerInbound =
   | { kind: "response"; id: number; result?: unknown; error?: unknown }
   | { kind: "notification"; method: string; params: JsonObject }
-  | { kind: "request"; id: number; method: string; params: JsonObject }
+  | { kind: "request"; id: number | string; method: string; params: JsonObject }
   | { kind: "invalid" };
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -21,7 +23,7 @@ function objectOf(value: unknown): JsonObject {
 export function classifyAppServerMessage(value: unknown): CodexAppServerInbound {
   const message = objectOf(value);
   const method = typeof message.method === "string" ? message.method : "";
-  if (typeof message.id === "number" && method) return { kind: "request", id: message.id, method, params: objectOf(message.params) };
+  if ((typeof message.id === "number" || typeof message.id === "string") && method) return { kind: "request", id: message.id, method, params: objectOf(message.params) };
   if (method) return { kind: "notification", method, params: objectOf(message.params) };
   if (typeof message.id === "number") return { kind: "response", id: message.id, result: message.result, error: message.error };
   return { kind: "invalid" };
@@ -80,11 +82,13 @@ export class CodexAppServerClient {
   private requestId = 0;
   private pending = new Map<number, PendingRequest>();
   private initialization: Promise<void> | null = null;
+  private readonly processOwnerId = `codex-app-server:${randomUUID()}`;
 
   constructor(
     private readonly executable: string,
     private readonly codexHome: string,
-    private readonly onNotification?: (notification: { method: string; params: JsonObject; requestId?: number }) => void
+    private readonly onNotification?: (notification: { method: string; params: JsonObject; requestId?: number | string }) => void,
+    private readonly launch?: { args?: string[]; env?: NodeJS.ProcessEnv; cwd?: string; experimental?: boolean; onClose?: (error: Error) => void }
   ) {}
 
   async listThreads(cwd: string, cursor?: string | null, archived = false) {
@@ -182,11 +186,14 @@ export class CodexAppServerClient {
     const process = this.process;
     this.process = null;
     this.initialization = null;
-    if (process && !process.killed) process.kill();
+    // The app-server can launch helper processes of its own.  Spawn it as a
+    // detached process group and terminate the group so macOS/Linux do not
+    // leave those helpers behind when the linked client is recreated.
+    if (process && process.exitCode === null) terminateProcessTree(process);
     this.rejectPending(new Error("Codex App Server 已关闭"));
   }
 
-  private async request(method: string, params: JsonObject, timeoutMs = 20_000): Promise<unknown> {
+  async request(method: string, params: JsonObject, timeoutMs = 20_000): Promise<unknown> {
     await this.ensureInitialized();
     return this.sendRequest(method, params, timeoutMs);
   }
@@ -201,28 +208,39 @@ export class CodexAppServerClient {
   }
 
   private async start() {
-    const child = spawn(this.executable, ["app-server"], {
-      cwd: this.codexHome,
-      env: { ...process.env, CODEX_HOME: this.codexHome },
+    const child = spawn(this.executable, [...(this.launch?.args || []), "app-server"], {
+      cwd: this.launch?.cwd || this.codexHome,
+      env: { ...(this.launch?.env || process.env), CODEX_HOME: this.codexHome },
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== "win32"
     });
     this.process = child;
+    registerProcessTree(this.processOwnerId, child);
     const lines = readline.createInterface({ input: child.stdout });
     lines.on("line", (line) => this.receive(line));
     child.stderr.resume();
     child.once("exit", (code, signal) => {
       if (this.process === child) this.process = null;
       this.initialization = null;
-      this.rejectPending(new Error(`Codex App Server 已退出 (${code ?? signal ?? "unknown"})`));
+      const error = new Error(`Codex App Server 已退出 (${code ?? signal ?? "unknown"})`);
+      this.rejectPending(error);
+      this.launch?.onClose?.(error);
     });
-    child.once("error", (error) => this.rejectPending(error));
+    child.once("error", (error) => {
+      if (this.process === child) this.process = null;
+      this.initialization = null;
+      this.rejectPending(error);
+      this.launch?.onClose?.(error);
+      terminateProcessTree(child);
+    });
     await this.sendRequest("initialize", {
       clientInfo: {
         name: "meta_code_workbench",
         title: "Meta Code Workbench",
         version: "0.1.3"
-      }
+      },
+      ...(this.launch?.experimental ? { capabilities: { experimentalApi: true } } : {})
     }, 15_000);
     this.sendNotification("initialized", {});
   }
@@ -248,6 +266,9 @@ export class CodexAppServerClient {
   private sendNotification(method: string, params: JsonObject) {
     this.write({ method, params });
   }
+
+  respond(id: number | string, result: unknown) { this.write({ id, result }); }
+  rejectRequest(id: number | string, message: string) { this.write({ id, error: { code: -32601, message } }); }
 
   private write(message: JsonObject) {
     if (!this.process?.stdin.writable) throw new Error("Codex App Server 尚未连接");

@@ -145,6 +145,7 @@ import { GitWorkbench } from "./git/GitWorkbench";
 import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
 import type { AgentProviderDescriptor } from "./agents/types";
+import { NativeConversationControls } from "./chat/NativeConversationControls";
 import { normalizeAgentDisplayStatus, selectAgentDisplaySnapshot } from "./agents/agentDisplayState";
 import type { ProviderControlSnapshot } from "./providers/types";
 import { providerMainAgentUnavailableReason } from "./providers/display";
@@ -2099,8 +2100,11 @@ function EventMessage({
     : "";
   const agent = subagentInfo(message);
   if (message.eventType === "subagent_wait" || asRecord(message.payload)?.type === "subagent_wait") return null;
-  if (message.eventType === "user_question" && claudeQuestions(message).length) {
+  if (message.eventType === "user_question" && claudeQuestions(message).length && !asRecord(message.payload)?.native_controlled) {
     return <ClaudeQuestionCard message={message} onSubmit={onAnswerQuestion} />;
+  }
+  if (message.eventType === "user_question" && asRecord(message.payload)?.native_controlled) {
+    return <div className="event-row"><button onClick={() => setOpen(v => !v)} aria-expanded={open}><MessagesSquare size={15} /><span><b>原生问题</b>{claudeQuestions(message).map(q => q.header || q.question).join(" · ")}</span>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>{open && <div className="event-detail-panel">{claudeQuestions(message).map((q, i) => <p key={i}>{q.question}</p>)}</div>}</div>;
   }
   if (agent.isSubagent) {
     // Parent engine is not a reliable child identity. Only use it for legacy
@@ -5722,6 +5726,7 @@ export function App() {
                   <button type="button" className="attachment-button composer-control-button icon-only" onClick={() => attachmentInputRef.current?.click()} disabled={!activeFileScopeId || uploadingAttachments || submittingInput || navigationPending} title="添加附件"><Paperclip size={15} /></button>
                   <ComposerPreferenceSelect label="项目权限" value={data.settings.sandboxMode} icon={<ShieldCheck size={14} />} options={[{ value: "danger-full-access", label: "完全访问" }, { value: "workspace-write", label: "仅工作区" }, { value: "read-only", label: "只读" }]} onChange={(sandboxMode) => updateExecutionSetting({ sandboxMode })} />
                   <ComposerPreferenceSelect label="联网模式" value={data.settings.webSearch} icon={<Globe2 size={14} />} options={[{ value: "live", label: "实时联网" }, { value: "cached", label: "缓存搜索" }, { value: "disabled", label: "关闭联网" }]} onChange={(webSearch) => updateExecutionSetting({ webSearch })} />
+                  {activeSession && ["codex", "claude"].includes(activeSession.engine) && <NativeConversationControls key={activeSession.id} sessionId={activeSession.id} provider={activeSession.engine} running={running} collaborative={currentExecutionMode === "collaborative"} request={api} onChanged={() => void refresh()} onFork={(branch: Session) => { setData(current => current ? { ...current, sessions: [branch, ...current.sessions.filter(s => s.id !== branch.id)] } : current); rememberSession(branch.scopeKind === "standalone" ? "__standalone__" : branch.workspaceId, branch.id); commitSessionSelection(branch, "task"); setNotice("已创建原生历史分支", "success"); }} />}
                   <CapabilityProfileControl
                     open={skillQuickConfigOpen}
                     activeProfileId={activeCapabilityProfileId}
