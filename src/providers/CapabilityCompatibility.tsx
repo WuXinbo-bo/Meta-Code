@@ -121,7 +121,7 @@ function capabilitySummary(snapshot: ProviderCapabilitySnapshot) {
     ["读取工作区", Boolean(capabilities.workspace?.read)],
     ["写入工作区", Boolean(capabilities.workspace?.write)],
     ["终端", Boolean(capabilities.tools?.shell)],
-    ["联网", Boolean(capabilities.tools?.web)],
+    [snapshot.featureDiagnostics?.some((item) => item.id === "native.web-search" && item.status === "unverified") ? "联网（待实测）" : "联网", Boolean(capabilities.tools?.web) && !snapshot.featureDiagnostics?.some((item) => item.id === "native.web-search")],
     ["MCP", Boolean(capabilities.tools?.mcp)],
     ["原生子 Agent", Boolean(capabilities.delegation?.nativeSubagents)],
     ["协作插件", Boolean(capabilities.delegation?.worker)],
@@ -143,6 +143,7 @@ export function CapabilityCompatibilityPanel({ snapshot, loading = false, error 
     {runtimeMessage(snapshot) && <p className="capability-compat-runtime">运行时 {runtimeMessage(snapshot)}</p>}
     {snapshot?.mode === "native" && <p className="capability-compat-runtime">功能声明不代表已逐项实测。官方交互命令与审批可在任务菜单的「原生终端」使用；编排插件与 Provider 原生 Workflow 独立。</p>}
     {summary.length > 0 && <div className="capability-compat-grid">{summary.map(([label, available]) => <span className={available ? "available" : "unavailable"} key={label}>{available ? <CheckCircle2 size={11} /> : <CircleAlert size={11} />}{label}</span>)}</div>}
+    {Boolean(snapshot?.featureDiagnostics?.length) && <details className="capability-compat-runtime"><summary>原生功能验证与修复建议</summary><ul>{snapshot?.featureDiagnostics?.map((item) => <li key={item.id}><strong>{item.label} · {item.status === "unverified" ? "待实测" : item.status === "disabled" ? "已关闭" : "不可用"}</strong><p>{item.message} {item.action}</p></li>)}</ul></details>}
     {reasons.length > 0 && <ul className="capability-compat-restrictions">{reasons.slice(0, 4).map((reason) => <li key={reason}><CircleAlert size={11} />{reason}</li>)}</ul>}
     {error && !reasons.length && <p className="capability-compat-error">暂时无法刷新能力状态：{error}</p>}
   </section>;

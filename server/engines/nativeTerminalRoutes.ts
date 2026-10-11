@@ -5,10 +5,11 @@ export function registerNativeTerminalRoutes(app: Express, host: {
   manager: NativeTerminalManager;
   authorize: (sessionId: string, ownerId: string) => boolean;
   prepare: (sessionId: string, ownerId: string, input: Record<string, unknown>) => Promise<NativeTerminalOptions>;
+  context?: (sessionId: string, ownerId: string) => { canFork: boolean };
 }) {
   const root = "/api/sessions/:id/native-terminal";
   app.use(root, (req, res, next) => host.authorize(String(req.params.id), req.authUser!.id) ? next() : res.status(404).json({ error: "任务不存在或不支持原生终端" }));
-  app.get(root, (req, res) => res.json({ terminal: host.manager.snapshot(String(req.params.id), req.authUser!.id, Number(req.query.after) || 0) }));
+  app.get(root, (req, res) => res.json({ terminal: host.manager.snapshot(String(req.params.id), req.authUser!.id, Number(req.query.after) || 0), context: host.context?.(String(req.params.id), req.authUser!.id) || { canFork: false } }));
   app.post(root, async (req, res) => {
     try {
       const current = host.manager.snapshot(String(req.params.id), req.authUser!.id);

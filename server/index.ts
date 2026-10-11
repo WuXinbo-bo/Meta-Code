@@ -35,6 +35,7 @@ import { compactStoredActivityDetails } from "./activity/redaction.js";
 import type { CanonicalActivityRecord } from "./activity/types.js";
 import { BUILTIN_AGENT_DESCRIPTORS } from "./agents/catalog.js";
 import { createAgentCapabilitySnapshot } from "./agents/capabilityProbe.js";
+import { nativeFeatureDiagnostics } from "./agents/nativeFeatureDiagnostics.js";
 import { loadCustomAgents } from "./agents/customAgents.js";
 import { HookRegistry } from "./agents/hooks.js";
 import { RoutineScheduler, type AgentRoutine, type UpdateRoutineInput } from "./agents/routines.js";
@@ -65,7 +66,7 @@ import { resolveClaudeCommand } from "./engines/claude/runtime.js";
 import { ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
 import { NativeTerminalManager } from "./engines/nativeTerminal.js";
 import { registerNativeTerminalRoutes } from "./engines/nativeTerminalRoutes.js";
-import { codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
+import { assertNativeTerminalExecutable, claudeNativeSessionArgs, codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
 import { claudeTranscriptTerminalState } from "./engines/claude/transcriptLifecycle.js";
 import type { ClaudeInputOrigin } from "./engines/claude/backgroundTasks.js";
 import { codexActivityFromEvent, isCodexContextCompactionNotice, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
@@ -5627,6 +5628,7 @@ app.use("/api", auth.requireAuth);
 registerNativeTerminalRoutes(app, {
   manager: nativeTerminals,
   authorize: (id, owner) => { const session = sessionById(id, owner); return Boolean(session && isNativeEnhancedProvider(session.engine)); },
+  context: (id, owner) => { const session = sessionById(id, owner)!; return { canFork: session.engine === "claude" && Boolean(session.engineSessionId) }; },
   prepare: async (id, owner, input) => {
     const session = sessionById(id, owner)!;
     if (activeRuns.has(id)) throw new Error("请先停止当前对话，再启动原生终端");
@@ -5638,9 +5640,9 @@ registerNativeTerminalRoutes(app, {
     if (session.engine === "claude") {
       const runtime = await getClaudeRuntime();
       const command = resolveClaudeCommand(runtime.path);
-      if (/\.cmd$/i.test(command.executable) || /(?:^|[\\/])cmd\.exe$/i.test(command.executable)) throw new Error("请使用官方 Claude 可执行文件，原生终端不运行 cmd 包装脚本");
-      executable = command.executable; args = [...command.args, "--permission-mode", state.settings.claude.permissionMode, "--teammate-mode", "in-process"];
-      if (session.engineSessionId) args.push("--resume", session.engineSessionId);
+      assertNativeTerminalExecutable(command.executable);
+      executable = command.executable; args = [...command.args, "--permission-mode", state.settings.claude.permissionMode, ...claudeNativeSessionArgs(session.engineSessionId, input.forkSession === true)];
+      if (input.agentTeams === true) args.push("--teammate-mode", "in-process");
       if (state.settings.claude.model) args.push("--model", state.settings.claude.model);
       if (state.settings.claude.effort) args.push("--effort", state.settings.claude.effort);
       args.push("--mcp-config", await workspaceMcpConfigPath(workspace), "--strict-mcp-config");
@@ -5652,7 +5654,7 @@ registerNativeTerminalRoutes(app, {
       else delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
     } else {
       const runtime = await detectCodexRuntime(); executable = runtime.path;
-      if (/\.(?:cmd|bat)$/i.test(executable)) throw new Error("请使用官方 Codex 可执行文件，原生终端不运行 cmd 包装脚本");
+      assertNativeTerminalExecutable(executable);
       const mcp = codexMcpConfigForWorkspace(workspace);
       const configured = terminalMcpEnvironment({ ...codexProviderConfig(state.settings), ...mcp.config, model_reasoning_effort: state.settings.reasoningEffort, web_search: state.settings.webSearch }, { ...envForCodex(state.settings, undefined, false, nativeProviderHome("codex", owner)), ...mcp.env });
       Object.assign(env, configured.env);
@@ -7122,7 +7124,8 @@ app.get("/api/agent-providers/:providerId/capabilities", async (req, res) => {
     if (snapshot.requestedMode === "native") agentAdapterRegistry.setCapabilitySnapshot(snapshot);
     res.json({
       descriptor,
-      ...snapshot
+      ...snapshot,
+      featureDiagnostics: nativeFeatureDiagnostics({ providerId, available: runtime?.available ?? true, baseUrl: providerId === "codex" ? state.settings.baseUrl : state.settings.claude.baseUrl, webSearch: state.settings.webSearch })
     });
   } catch (error) { res.status(404).json({ error: error instanceof Error ? error.message : String(error) }); }
 });

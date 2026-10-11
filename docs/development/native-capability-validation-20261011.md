@@ -4,7 +4,7 @@
 
 核心原生执行、子 Agent、会话恢复、Skill、项目指令、MCP、Hooks 和运行控制已有真实验证。Claude 原生 Dynamic Workflow 也已完成后台通知、自动唤醒及成果交付。Meta Code 的协作插件和编排插件另行回归通过。
 
-**不能据此宣称所有官方功能完整可用。** 当前 Codex 会话没有暴露联网搜索工具；Claude Agent Teams 的官方交互初始化请求返回 403。实验性能力、官方服务、版本和兼容接口限制需要逐项验证，manifest 声明不等于实测结果。工作台的原生适配、Provider 原生 Workflow、Meta 编排插件和 Agent Teams 是不同能力。
+**不能据此宣称所有官方功能完整可用。** 当前 Codex 会话没有暴露联网搜索工具；Claude 官方交互 CLI 在启动初始化阶段返回 403，尚未进入 Agent Teams 创建阶段。实验性能力、官方服务、版本和兼容接口限制需要逐项验证，manifest 声明不等于实测结果。工作台的原生适配、Provider 原生 Workflow、Meta 编排插件和 Agent Teams 是不同能力。
 
 ## 测试方法与证据
 
@@ -40,11 +40,22 @@
 | 停止 → 继续对话 | 通过 | 通过 | stopped 终态，原延迟文件不存在，后续 RESUME-OK 成功 |
 | 官方交互 CLI 入口 | 通过 | 入口可启动，官方初始化受限 | 使用 PTY 与官方可执行文件；同一工作台认证、账号、模型、MCP、执行目录和互斥锁 |
 | 官方终端关闭 / 回放 / 停止 | 通过 | 退出记录可读 | 关闭视图保留进程；重开同一实例回放，停止释放执行锁；不将终端对话冒充工作台普通时间线 |
-| Claude Agent Teams | 不适用 | **阻断 / 未通过** | 仅官方交互 CLI、in-process 与实验开关；初次官方初始化访问 `api.anthropic.com` 返回 403，未进入创建团队阶段 |
-| 原生 fork / review | 官方终端通过 | 本轮未验证 | Codex `/fork` 选择当前 Git 目录，官方显示 Fork created；`/review` 对测试仓库真实完成，确认注释修改不影响行为。工作台“从回复创建分支”仍是上下文重建，两者不混淆 |
+| Claude Agent Teams | 不适用 | **启动阻断 / 未通过** | 仅官方交互 CLI、in-process 与实验开关；CLI 启动访问 `api.anthropic.com` 返回 403，尚未进入团队创建阶段。不能将其直接归因于 Teams 权限 |
+| 原生 fork / review | 官方终端通过 | Claude fork 已接入、待官方服务可用后实测 | Codex `/fork` 选择当前 Git 目录，官方显示 Fork created；`/review` 对测试仓库真实完成。Claude 原生终端现在使用官方 `--resume <id> --fork-session`，工作台“从回复创建分支”仍是上下文重建，两者不混淆 |
 | 所有斜杠命令 | 未逐一验证 | 未逐一验证 | 终端提供官方命令入口不等于每条命令已验证；登录、官方远程服务和实验功能仍受外部条件约束 |
 | 交互权限审批、计划模式全部转换 | 本轮未完整验证 | 本轮未完整验证 | 当前测试沿用已配置权限。未通过放宽保护或伪造 onboarding 达成验收 |
 | Windows 原生 ConPTY / 打包执行 | 本机无法真实执行 | 本机无法真实执行 | 共享源码同步与边界检查另行执行，不把 Mac PTY 测试当作 Windows 实机结果 |
+
+## 本轮诊断修复（2026-10-11）
+
+1. **能力声明不再等同于端点实测。** 新增原生功能诊断接口数据，Codex 联网搜索在自定义兼容端点显示为“待实测”，并给出端点、模型、运行时三者的检查建议；Claude Agent Teams 显示为“启动初始化待验证”。能力面板不再把 manifest 的 `tools.web=true` 当成当前端点已提供搜索工具。
+2. **官方启动错误可定位。** 原生终端捕获 Claude 官方启动输出中的 `api.anthropic.com: Status 403`，显示“官方初始化阻断”，并提示网络、代理、服务区域和认证检查；不会伪造 Teams 成功状态，也不会把普通插件会话判为不可用。
+3. **Claude 原生 fork 使用官方协议。** 原生终端对已有 Claude 会话提供 `--resume <id> --fork-session` 选项；没有会话时拒绝创建空分支。该选项复用官方 CLI，会话 ID 与工作台任务保持隔离。
+4. **Windows ConPTY 验证门槛前移。** 原生终端边界测试增加 `.cmd/.bat` 拒绝、官方 `.exe` 接受、输入、缩放、退出和租约释放；Windows CI 使用 Node 24，Windows 实机仍需安装包级验收。
+
+本轮可见工作台复测：基础 Claude 任务在关闭 Teams 开关、只使用原生 fork 的情况下，官方 CLI 仍在 `api.anthropic.com` 启动初始化上返回 403；终端诊断正确显示 `official-initialization-forbidden`。这支持“通用交互启动阻断”的判断，不是 Teams 独有故障。基础任务与业务文件没有改动，终端回放留在指定测试目录的 `reports/claude-native-fork-fix-retest.json`。
+
+Mac `npm run typecheck`、`npm run build`、134 项离线回归通过，新增 PTY 测试实际完成输入、缩放和退出；Windows ConPTY 本机无法执行，不能因此标为通过。新能力诊断已在当前工作台接口及 Provider 设置 UI 检查，两个特色插件 health 为 healthy。
 
 ## 发现与修复
 
@@ -76,6 +87,8 @@
 
 ## 官方参考与后续验收门槛
 
+- [Codex 配置基础（官方 OpenAI Docs）](https://developers.openai.com/codex/config-advanced/)
+- [Codex 配置参考（官方 OpenAI Docs）](https://developers.openai.com/codex/config-reference/)
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 - [Codex Subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [Codex Hooks](https://learn.chatgpt.com/docs/hooks)
@@ -83,4 +96,4 @@
 - [Claude Dynamic Workflows](https://code.claude.com/docs/en/workflows)
 - [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/typescript)
 
-下一轮完整验收需要：可完成官方 Claude 初始化的环境验证 Agent Teams 创建/通信/结束；能暴露 Codex 搜索工具的 Provider/模型组合验证真实搜索；Claude 原生 fork、完整计划 / 权限审批、长期后台能力与 Windows ConPTY 实机测试。当前无法消除的外部限制保持受限结论，不能靠伪造状态或降低权限要求标记成功。
+下一轮完整验收需要：可完成官方 Claude 初始化的环境验证 Agent Teams 创建/通信/结束；能暴露 Codex 搜索工具的 Provider/模型组合验证真实搜索；在官方服务可用时验证 Claude 原生 fork、完整计划 / 权限审批、长期后台能力与 Windows ConPTY 实机测试。当前无法消除的外部限制保持受限结论，不能靠伪造状态或降低权限要求标记成功。

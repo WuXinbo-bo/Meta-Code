@@ -42,6 +42,7 @@ export type ProviderCapabilitySnapshot = {
   degradedReasons?: string[];
   modes?: Partial<Record<ProviderCapabilityMode, ProviderCapabilityModeState>>;
   capturedAt?: string;
+  featureDiagnostics?: Array<{ id: string; label: string; status: "unverified" | "disabled" | "unavailable"; message: string; action: string }>;
 };
 
 export type ProviderControlOperations = {
