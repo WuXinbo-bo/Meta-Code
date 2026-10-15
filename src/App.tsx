@@ -1,3 +1,4 @@
+import { PluginSettings } from "./settings/PluginSettings";
 import { Component, Suspense, lazy, memo, startTransition, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { runtimeInstallationAction, type InstallationRuntime } from "./runtimeInstallation";
@@ -45,6 +46,7 @@ import {
   Pin,
   Plug,
   Plus,
+  Puzzle,
   RefreshCw,
   Save,
   Search,
@@ -66,13 +68,15 @@ import {
 import { ProductLogo } from "./branding/ProductLogo";
 import { ProviderIcon } from "./branding/ProviderIcon";
 import { ConnectedProviderShowcase } from "./branding/ConnectedProviderShowcase";
-import { ThemeToggle } from "./branding/ThemeToggle";
 import { WorkflowWorkbench } from "./workflow/WorkflowWorkbench";
+import { HandoffCard, TaskModeBar, CompactWorkflowProgress } from "./workflow/TaskModeBar";
 import { AgentConversation, useAgentOutputFollow } from "./components/AgentConversation";
+import { AgentWorkProgress } from "./components/AgentWorkProgress";
 import { AgentDrawer, AgentTaskDescription } from "./components/AgentDrawer";
+import { AgentTaskTooltip } from "./components/AgentTaskTooltip";
 import { RecoverableSectionBoundary } from "./components/RecoverableSectionBoundary";
 import { AssistantReply } from "./components/AssistantReply";
-import { agentStreamVersion, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
+import { agentStreamVersion, isEmptyAssistantMessage, normalizeAgentStreamLog, type SharedAgentLog } from "./components/activityModel";
 import type { CodexLinkBinding } from "./codex-link/model";
 import { RequestCoordinator } from "./requestCoordinator";
 import { WorkspaceResourceCache } from "./workspaceResourceCache";
@@ -89,7 +93,15 @@ import {
 } from "./sessionCreation";
 import type { MarkdownBodyProps } from "./components/MarkdownBody";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
+import { TaskLaunchControls } from "./components/TaskLaunchControls";
+import { ActionMenu } from "./components/ActionMenu";
+import { WorkspaceFileSearch, type WorkspaceFileSearchResponse } from "./components/WorkspaceFileSearch";
 import { workspaceFilePathEquals, workspaceFilePathIdentity } from "./files/filePathIdentity";
+import { fileScopeRoot } from "./files/fileScopeRoot";
+import { handoffWorkflowId, linkedWorkflowId } from "./tasks/linkedWorkflow";
+import { groupAdjacentWorkflowHandoffs, isWorkflowHandoffMessage, workflowHandoffSourceId, workflowHandoffSourceKind } from "./tasks/workflowHandoff";
+import { ACTIVE_SIDEBAR_TASK_STATUSES, groupSidebarTasks, sidebarTaskIsPinned, sidebarTaskIsSelected, sidebarTaskPinnedRecords, type SidebarTaskGroup } from "./tasks/sidebarTaskGroups";
+import { workspaceRelativePath } from "./markdown/localFileLinks";
 import { fileKind, isPreviewFileKind, type PreviewFile, type WorkspaceFileNode } from "./files/fileTypes";
 import {
   WorkspaceBrowserTabs,
@@ -121,6 +133,7 @@ import { DataSettings } from "./settings/DataSettings";
 import { HelpCenter } from "./help/HelpCenter";
 import { HelpButton } from "./help/HelpProvider";
 import { CURRENT_GUIDE_VERSION, FirstRunGuide } from "./onboarding/FirstRunGuide";
+import { TASK_TEMPLATES, type TaskTemplateId } from "./onboarding/taskTemplates";
 import { formatRuntimeProgressDuration, runtimeProgressElapsedMs } from "./runtimeProgress";
 import { CapabilityProfileControl } from "./chat/CapabilityProfileControl";
 import { ComposerRuntimeControl } from "./chat/ComposerRuntimeControl";
@@ -132,6 +145,8 @@ import { GitWorkbench } from "./git/GitWorkbench";
 import { workspaceNameFromPath } from "./workspaces/dropValidation";
 import type { ExecutionMode, ModelOption, PendingTurn, ProviderSessionConfiguration } from "./chat/types";
 import type { AgentProviderDescriptor } from "./agents/types";
+import { NativeConversationControls } from "./chat/NativeConversationControls";
+import { normalizeAgentDisplayStatus, selectAgentDisplaySnapshot } from "./agents/agentDisplayState";
 import type { ProviderControlSnapshot } from "./providers/types";
 import { providerMainAgentUnavailableReason } from "./providers/display";
 import {
@@ -141,6 +156,7 @@ import {
 } from "./settings/pagePreferences";
 import "highlight.js/styles/github.css";
 
+const NativeTerminalPanel = lazy(() => import("./components/NativeTerminalPanel"));
 const MarkdownBodyRenderer = lazy(() => import("./components/MarkdownBody"));
 const FilePreviewRenderer = lazy(() => import("./components/FilePreview"));
 const SessionManagementView = lazy(() => import("./session-management/SessionManagementView"));
@@ -157,7 +173,6 @@ const MESSAGE_HISTORY_CHUNK = 20;
 const MESSAGE_VIRTUALIZE_THRESHOLD = 40;
 
 type SettingsData = {
-  defaultEngine: EngineName;
   baseUrl: string;
   apiKeyConfigured: boolean;
   model: string;
@@ -197,7 +212,6 @@ function settingsFormData(settings: SettingsData): SettingsFormData {
 
 function settingsSavePayload(form: SettingsFormData) {
   return {
-    defaultEngine: form.defaultEngine,
     baseUrl: form.baseUrl,
     apiKey: form.apiKey,
     clearApiKey: form.clearApiKey,
@@ -239,6 +253,8 @@ type TaskDeletionPolicy = {
   reason: string | null;
 };
 type SessionSummary = {
+  taskContextId?: string | null;
+  executionRoot?: string;
   id: string;
   title: string;
   scopeKind: "workspace" | "standalone";
@@ -270,6 +286,11 @@ type SessionSummary = {
   deletionPolicy?: TaskDeletionPolicy;
 };
 type WorkflowSummary = {
+  activePlanVersion?: number;
+  taskContextId?: string | null;
+  executionTarget?: "workspace" | "isolated" | "worktree";
+  executionRoot?: string;
+  workspaceRoot?: string;
   id: string;
   title: string;
   workspaceId: string;
@@ -317,7 +338,9 @@ type DraftAttachment = {
   uploaded?: Attachment & { sessionId: string };
 };
 type Message = {
+  handoffHistory?: Message[];
   id: string;
+  sourceId?: string;
   role: "user" | "assistant" | "event" | "error";
   text: string;
   createdAt: string;
@@ -343,7 +366,8 @@ type Session = SessionSummary & {
 type MessageWindow = { start: number; end: number; total: number; hasMore: boolean };
 type MessagePage = { messages: Message[]; window: MessageWindow };
 type ActivityMessageGroup = { id: string; role: "activity-group"; messages: Message[] };
-type SidebarTaskItem = { kind: "chat"; task: SessionSummary } | { kind: "workflow"; task: WorkflowSummary };
+type SidebarTaskRecord = { kind: "chat"; task: SessionSummary } | { kind: "workflow"; task: WorkflowSummary };
+type SidebarTaskItem = SidebarTaskRecord & { group?: SidebarTaskGroup<SidebarTaskRecord> };
 type NoticeTone = "error" | "success" | "info" | "warning";
 type Notice = { message: string; tone: NoticeTone };
 type TreeNode = WorkspaceFileNode;
@@ -438,6 +462,18 @@ type Bootstrap = {
   skillFolders: SkillFolder[];
   skillOrganizations: SkillOrganization[];
   capabilityProfiles: CapabilityProfile[];
+  plugins: Array<{
+    id: string;
+    version: string;
+    apiVersion: number;
+    displayName: string;
+    description: string;
+    capabilities: string[];
+    requires?: Record<string, string>;
+    enabled: boolean;
+    health: "healthy" | "disabled" | "degraded";
+    diagnostics?: { message: string; checkedAt: string | null; activeRequests: number; busy: boolean };
+  }>;
   mcpServers: McpServer[];
   agentProviders: AgentProviderDescriptor[];
   providerControls: ProviderControlSnapshot[];
@@ -478,6 +514,7 @@ function normalizeBootstrap(value: Bootstrap): Bootstrap {
   return {
     ...value,
     skills: value.skills.map(normalizeSkillProfile),
+    plugins: value.plugins || [],
     agentProviders: value.agentProviders || [],
     providerControls: value.providerControls || [],
     runtime: {
@@ -495,11 +532,12 @@ const AGENT_SELECTION_KEY_PREFIX = "modelx.agentSelection";
 // Layout defaults are versioned so an old, user-resized v2 layout cannot
 // silently override the current proportions after a visual redesign.
 const LAYOUT_WIDTHS_KEY = "modelx.workspaceLayoutWidths.v3";
-const DEFAULT_LAYOUT_WIDTHS = { sidebar: 360, inspector: 320 } as const;
+const INSPECTOR_OPEN_KEY = "modelx.taskFilePanelOpen.v1";
+const DEFAULT_LAYOUT_WIDTHS = { sidebar: 260, inspector: 320 } as const;
 const LAYOUT_MIN_WIDTH = 260;
 const LAYOUT_MAX_WIDTH = 480;
 const SESSION_CACHE_FRESH_MS = 15_000;
-const ACTIVE_TASK_STATUSES = new Set(["running", "paused", "queued", "integrating"]);
+const ACTIVE_TASK_STATUSES = ACTIVE_SIDEBAR_TASK_STATUSES;
 type LayoutWidths = { sidebar: number; inspector: number };
 type ResizingPane = keyof LayoutWidths;
 type SidebarSection = "tasks" | "workspaces";
@@ -518,7 +556,7 @@ function readLayoutWidths(): LayoutWidths {
 }
 const BUILTIN_DELEGATION_SKILL_NAME = "claude-codex-planner";
 const BUILTIN_SKILL_MANAGER_NAME = "metacode-manager";
-const PINNED_BUILTIN_SKILL_ORDER = [BUILTIN_SKILL_MANAGER_NAME, BUILTIN_DELEGATION_SKILL_NAME] as const;
+const PINNED_BUILTIN_SKILL_ORDER = [BUILTIN_SKILL_MANAGER_NAME] as const;
 
 function normalizeSkillProfile(skill: AgentProfile): AgentProfile {
   return skill.name === BUILTIN_SKILL_MANAGER_NAME ? { ...skill, title: "Meta Code 管家" } : skill;
@@ -705,6 +743,7 @@ type SubagentInfo = {
   isSubagent: boolean;
   action: string;
   agentIds: string[];
+  identityKey?: string;
   nickname?: string;
   agentType?: string;
   provider?: string;
@@ -721,6 +760,7 @@ type AgentLog = {
   category?: string;
   phase?: "started" | "running" | "completed" | "failed";
   detail?: unknown;
+  provider?: string;
   activity?: SharedAgentLog["activity"];
 };
 type AgentThread = {
@@ -733,6 +773,16 @@ type AgentThread = {
   usage: Usage;
   logs: AgentLog[];
   provider?: string;
+  /** Canonical identity is assigned by the server when the run is created. */
+  identityKey?: string;
+  identity?: {
+    key: string;
+    agentId?: string;
+    providerId?: string;
+    sourceKind?: "native" | "bridge" | "acp" | string;
+    parentSessionId?: string;
+    identityVersion?: number;
+  };
   mode?: "analysis" | "review" | "implementation";
   task?: string;
   logCount?: number;
@@ -827,15 +877,21 @@ function subagentInfo(message: Message): SubagentInfo {
   const server = String(payload?.server || "").toLowerCase();
   const type = String(payload?.type || message.eventType || "").toLowerCase();
   const actionIsAgent = SUBAGENT_ACTIONS.has(action);
-  const isSubagent =
+  // A parent waiting barrier is lifecycle bookkeeping, not another Agent.
+  const isWaitBarrier = message.eventType === "subagent_wait" || type === "subagent_wait";
+  const isSubagent = !isWaitBarrier && (
     actionIsAgent ||
     server.includes("agent") ||
     type.includes("subagent") ||
     type.includes("collab") ||
     message.eventType === "agent_tool_call" ||
-    message.eventType === "subagent";
+    message.eventType === "subagent");
 
   const directAgentId = typeof payload?.agent_id === "string" ? payload.agent_id : typeof payload?.agentId === "string" ? payload.agentId : "";
+  const payloadIdentity = asRecord(payload?.identity);
+  const identityKey = typeof payload?.identityKey === "string" && payload.identityKey.trim()
+    ? payload.identityKey.trim()
+    : typeof payloadIdentity?.key === "string" && payloadIdentity.key.trim() ? payloadIdentity.key.trim() : firstDeepString(message.payload, ["identityKey"]);
   const idValues = [directAgentId, ...collectDeepValues(message.payload, new Set([
     "agent_id",
     "agentId",
@@ -873,10 +929,11 @@ function subagentInfo(message: Message): SubagentInfo {
     agentType,
     ...collectDeepValues(message.payload, new Set(["provider", "engine", "model", "runtime", "backend", "agent_type", "agentType", "agent_name", "agentName"]))
   ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
-  const directProvider = [payload?.provider, payload?.engine, payload?.runtime]
+  const directProvider = [payloadIdentity?.providerId, payload?.providerId, payload?.provider, payload?.engine, payload?.runtime]
     .find((value): value is string => typeof value === "string" && /^[a-z][a-z0-9._-]{0,63}$/i.test(value.trim()))
     ?.trim().toLowerCase();
-  const provider = directProvider || (/claude|anthropic|opus|sonnet|haiku/.test(providerSignals)
+  const sourceProvider = isSubagent ? message.sourceId?.match(/^([a-z][a-z0-9._-]{0,63})-worker:/i)?.[1]?.toLowerCase() : undefined;
+  const provider = directProvider || sourceProvider || (/claude|anthropic|opus|sonnet|haiku/.test(providerSignals)
     ? "claude"
     : /codex|openai|gpt(?:-|\b)|o[1-9](?:-|\b)/.test(providerSignals)
       ? "codex"
@@ -886,6 +943,7 @@ function subagentInfo(message: Message): SubagentInfo {
     isSubagent,
     action,
     agentIds,
+    identityKey,
     nickname,
     agentType,
     provider,
@@ -933,9 +991,27 @@ function agentModeLabel(mode?: AgentThread["mode"]) {
 
 function agentThreadsSnapshot(agents: AgentThread[]) {
   return agents.map((agent) => {
-    const latest = agent.logs[0];
-    return [agent.id, agent.status, agent.revision || 0, agent.updatedAt, agent.logCount ?? agent.logs.length, latest?.id || "", String(latest?.text || "").length].join(":");
+    const first = agent.logs[0];
+    const latest = agent.logs.at(-1) || first;
+    return [agent.identityKey || agent.identity?.key || agent.id, agent.status, agent.revision || 0, agent.updatedAt, agent.logCount ?? agent.logs.length, first?.id || "", latest?.id || "", String(first?.text || "").length, String(latest?.text || "").length].join(":");
   }).join("|");
+}
+
+function agentSelectionKey(agent: AgentThread) {
+  return agent.identityKey || agent.identity?.key || agent.id;
+}
+
+function agentDetailMatchesSummary(detail: AgentThread | null | undefined, summary: AgentThread | null | undefined) {
+  if (!detail || !summary || detail.id !== summary.id) return false;
+  const detailKey = detail.identityKey || detail.identity?.key;
+  const summaryKey = summary.identityKey || summary.identity?.key;
+  if (detailKey && summaryKey && detailKey === summaryKey) return true;
+  // Native and bridge projections can briefly publish different canonical
+  // keys for the same invocation. The provider-qualified id is still safe to
+  // reuse, while an id-only match could mix Claude and Codex transcripts.
+  const detailProvider = (detail.provider || detail.identity?.providerId || "").trim().toLowerCase();
+  const summaryProvider = (summary.provider || summary.identity?.providerId || "").trim().toLowerCase();
+  return Boolean(detailProvider && summaryProvider && detailProvider === summaryProvider);
 }
 
 function normalizeAgentThreads(value: unknown): AgentThread[] {
@@ -948,14 +1024,26 @@ function normalizeAgentThreads(value: unknown): AgentThread[] {
     const status: AgentThread["status"] = ["running", "completed", "failed", "interrupted"].includes(statusValue) ? statusValue as AgentThread["status"] : "interrupted";
     const providerValue = String(source.provider || "");
     const provider: AgentThread["provider"] = /^[a-z][a-z0-9._-]{0,63}$/.test(providerValue) ? providerValue : undefined;
+    const rawIdentity = asRecord(source.identity);
+    const identityKey = typeof source.identityKey === "string" && source.identityKey.trim()
+      ? source.identityKey.trim()
+      : typeof rawIdentity?.key === "string" && rawIdentity.key.trim() ? rawIdentity.key.trim() : undefined;
+    const identity = identityKey ? {
+      key: identityKey,
+      agentId: typeof rawIdentity?.agentId === "string" ? rawIdentity.agentId : undefined,
+      providerId: typeof rawIdentity?.providerId === "string" ? rawIdentity.providerId : undefined,
+      sourceKind: typeof rawIdentity?.sourceKind === "string" ? rawIdentity.sourceKind : undefined,
+      parentSessionId: typeof rawIdentity?.parentSessionId === "string" ? rawIdentity.parentSessionId : undefined,
+      identityVersion: typeof rawIdentity?.identityVersion === "number" ? rawIdentity.identityVersion : undefined
+    } : undefined;
     const modeValue = String(source.mode || "");
     const mode = ["analysis", "review", "implementation"].includes(modeValue) ? modeValue as AgentThread["mode"] : undefined;
     const logs = (Array.isArray(source.logs) ? source.logs : []).map((log, index) => normalizeAgentStreamLog(log, index));
     return [{
-      id: String(source.id || `legacy-agent-${threadIndex}`), parentThreadId: String(source.parentThreadId || ""), nickname: String(source.nickname || `子 Agent ${threadIndex + 1}`), path: String(source.path || ""), status,
+      id: String(source.id || identity?.agentId || `legacy-agent-${threadIndex}`), parentThreadId: String(source.parentThreadId || identity?.parentSessionId || ""), nickname: String(source.nickname || `子 Agent ${threadIndex + 1}`), path: String(source.path || ""), status,
       updatedAt: typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt)) ? source.updatedAt : logs.at(-1)?.createdAt || new Date(0).toISOString(),
       usage: { input_tokens: Number(usage?.input_tokens) || 0, cached_input_tokens: Number(usage?.cached_input_tokens) || 0, output_tokens: Number(usage?.output_tokens) || 0, reasoning_output_tokens: Number(usage?.reasoning_output_tokens) || 0 },
-      logs, provider, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length,
+      logs, provider: provider || identity?.providerId, identityKey, identity, mode, task: typeof source.task === "string" ? source.task : "", logCount: Number(source.logCount) || logs.length,
       revision: Math.max(0, Number(source.revision) || 0)
     }];
   }).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -1003,6 +1091,7 @@ function visibleConversationMessages(messages: Message[], sessionStatus?: Sessio
   const result: Message[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (isEmptyAssistantMessage(message)) continue;
     const subtype = claudeStatusSubtype(message);
     if (subtype === "thinking_tokens" || subtype === "status") continue;
     if (subtype === "api_retry") {
@@ -1106,7 +1195,10 @@ function eventActivityLog(message: Message): AgentLog {
     : eventType === "tool_call" || eventType === "skill_call" ? "tool"
     : "status");
   const phase = failed ? "failed" : message.activityPhase || (message.eventPhase === "completed" ? "completed" : message.eventPhase === "updated" ? "running" : "started");
-  return { id: message.id, createdAt: message.createdAt, kind, title, text, category, phase, detail: message.activityDetail ?? message.payload, activity: message.activity };
+  const payload = asRecord(message.payload);
+  const provider = message.activity?.provider
+    || (typeof payload?.provider === "string" ? payload.provider : undefined);
+  return { id: message.id, createdAt: message.createdAt, kind, title, text, category, phase, detail: message.activityDetail ?? message.payload, provider, activity: message.activity };
 }
 
 function activityGroupStatus(messages: Message[]) {
@@ -1118,13 +1210,26 @@ function activityGroupStatus(messages: Message[]) {
 }
 
 function ActivityMessageGroupView({ group, engine, providerLabel, providerControl, workspaceId }: { group: ActivityMessageGroup; engine: EngineName; providerLabel: string; providerControl?: ProviderControlSnapshot; workspaceId?: string }) {
-  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} /></div>;
+  return <div className="event-row activity-message-group"><AgentConversation logs={group.messages.map(eventActivityLog)} status={activityGroupStatus(group.messages)} provider={engine} providerLabel={providerLabel} providerIcon={providerControl?.identity.icon} providerAccent={providerControl?.identity.accent} workspaceId={workspaceId} showProvider={false} showFilters={false} showProgress={false} /></div>;
 }
 
 type ApiRequestInit = RequestInit & { timeoutMs?: number };
 
+type ConditionalApiEntry = { etag: string; data: unknown; touchedAt: number };
+const conditionalApiCache = new Map<string, ConditionalApiEntry>();
+const CONDITIONAL_CACHE_LIMIT = 64;
+
+function conditionalCacheKey(url: string, method: string) {
+  return method === "GET" && /^\/api\/sessions\/[^/]+\/agents(?:\/|$)/.test(url) ? url : "";
+}
+
 const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
   const { timeoutMs = 60_000, signal: parentSignal, ...request } = options || {};
+  const method = (request.method || "GET").toUpperCase();
+  const conditionalKey = conditionalCacheKey(url, method);
+  const cachedConditional = conditionalKey ? conditionalApiCache.get(conditionalKey) : undefined;
+  const requestHeaders = new Headers(request.headers || {});
+  if (cachedConditional && !requestHeaders.has("If-None-Match")) requestHeaders.set("If-None-Match", cachedConditional.etag);
   const controller = new AbortController();
   let timedOut = false;
   let timer: number | undefined;
@@ -1142,10 +1247,14 @@ const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
   try {
     const response = await fetch(url, {
       ...request,
-      cache: request.cache ?? ((request.method || "GET").toUpperCase() === "GET" ? "no-store" : undefined),
+      cache: request.cache ?? (method === "GET" ? "no-store" : undefined),
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...request.headers }
+      headers: { "Content-Type": "application/json", ...Object.fromEntries(requestHeaders.entries()) }
     });
+    if (response.status === 304 && cachedConditional) {
+      cachedConditional.touchedAt = Date.now();
+      return cachedConditional.data as T;
+    }
     const contentType = response.headers.get("content-type") || "";
     let body = "";
     let data: any = null;
@@ -1160,6 +1269,17 @@ const api = async <T,>(url: string, options?: ApiRequestInit): Promise<T> => {
         ? `服务端处理请求失败（HTTP ${response.status}）`
         : body.slice(0, 500) || `请求失败（HTTP ${response.status}）`;
       throw new Error(data?.error || fallback);
+    }
+    if (conditionalKey && response.ok) {
+      const etag = response.headers.get("etag");
+      if (etag && data !== null) {
+        conditionalApiCache.set(conditionalKey, { etag, data, touchedAt: Date.now() });
+        while (conditionalApiCache.size > CONDITIONAL_CACHE_LIMIT) {
+          const oldest = [...conditionalApiCache.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0]?.[0];
+          if (!oldest) break;
+          conditionalApiCache.delete(oldest);
+        }
+      }
     }
     return data as T;
   } catch (error) {
@@ -1195,6 +1315,7 @@ type SidebarTaskRowProps = {
   delegationEnabled: boolean;
   providerControl?: ProviderControlSnapshot;
   relativeTimeNow: number;
+  locationLabel: string;
   onSelect: (item: SidebarTaskItem) => void;
   onPrefetch: (id: string) => void;
   onCancelPrefetch: () => void;
@@ -1211,7 +1332,12 @@ function sameSidebarTaskRow(previous: SidebarTaskRowProps, next: SidebarTaskRowP
     || left.task.status !== right.task.status
     || left.task.updatedAt !== right.task.updatedAt
     || left.task.pinned !== right.task.pinned
+    || sidebarTaskIsPinned(left) !== sidebarTaskIsPinned(right)
+    || left.group?.title !== right.group?.title
+    || left.group?.mixedFolders !== right.group?.mixedFolders
+    || left.group?.records.length !== right.group?.records.length
     || left.task.archivedAt !== right.task.archivedAt
+    || previous.locationLabel !== next.locationLabel
     || previous.active !== next.active
     || previous.delegationEnabled !== next.delegationEnabled
     || previous.providerControl?.identity.icon !== next.providerControl?.identity.icon
@@ -1233,6 +1359,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   delegationEnabled,
   providerControl,
   relativeTimeNow,
+  locationLabel,
   onSelect,
   onPrefetch,
   onCancelPrefetch,
@@ -1248,7 +1375,8 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
     );
   };
   return <div
-    className={`session-row ${active ? "active" : ""} ${item.task.pinned ? "pinned" : ""} ${item.task.archivedAt ? "archived" : ""}`}
+    className={`session-row ${active ? "active" : ""} ${sidebarTaskIsPinned(item) ? "pinned" : ""} ${item.task.archivedAt ? "archived" : ""}`}
+    title={item.group?.mixedFolders ? "关联记录位于不同文件夹；此处显示当前记录的位置，移动操作仅调整当前记录" : undefined}
     onMouseEnter={() => { if (item.kind === "chat") onPrefetch(item.task.id); }}
     onMouseLeave={onCancelPrefetch}
     onFocusCapture={() => { if (item.kind === "chat") onPrefetch(item.task.id); }}
@@ -1256,7 +1384,7 @@ const SidebarTaskRow = memo(function SidebarTaskRow({
   >
     <button className="session-select" onClick={() => onSelect(item)}>
       <ProviderIcon provider={item.kind === "workflow" ? item.task.plannerEngine : item.task.engine} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={15} />
-      <span><strong>{item.task.pinned && <Pin size={11} />}{item.task.title}</strong><small>{item.kind === "workflow" ? `编排 · ${workflowStatusLabel(item.task.status)}` : `${delegationEnabled ? "协作" : "原生"} · ${sessionStatusLabel(item.task.status)}`} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
+      <span><strong>{sidebarTaskIsPinned(item) && <Pin size={11} />}{item.group?.title || item.task.title}</strong><small><span className="task-location-label">{locationLabel}</span>{ACTIVE_TASK_STATUSES.has(item.task.status) || item.task.status === "failed" ? ` · ${item.kind === "workflow" ? workflowStatusLabel(item.task.status) : sessionStatusLabel(item.task.status)}` : ""} · {relativeTime(item.task.updatedAt, relativeTimeNow)}</small></span>
     </button>
     <IconButton label="管理任务" onClick={() => onOpenContextMenu(item.task.id, 210, Math.min(window.innerHeight - 330, 130))}><MoreHorizontal size={15} /></IconButton>
   </div>;
@@ -1280,6 +1408,9 @@ const SidebarTaskList = memo(function SidebarTaskList({
   activeWorkflowId,
   delegationEnabled,
   providerControls,
+  workspaceNames,
+  projects,
+  renderProjectMenu,
   onSelect,
   onPrefetch,
   onCancelPrefetch,
@@ -1305,15 +1436,21 @@ const SidebarTaskList = memo(function SidebarTaskList({
   activeWorkflowId: string;
   delegationEnabled: boolean;
   providerControls: ProviderControlSnapshot[];
+  workspaceNames: Record<string, string>;
+  projects: Workspace[];
+  renderProjectMenu: (workspace: Workspace) => ReactNode;
   onSelect: (item: SidebarTaskItem) => void;
   onPrefetch: (id: string) => void;
   onCancelPrefetch: () => void;
   onOpenTaskContextMenu: (id: string, x: number, y: number) => void;
   onOpenAreaContextMenu: (x: number, y: number) => void;
-  onOpenFolderContextMenu: (id: string, x: number, y: number) => void;
-  onCreateFolder: () => void;
+  onOpenFolderContextMenu: (id: string, x: number, y: number, workspaceId: string) => void;
+  onCreateFolder: (workspaceId?: string) => void;
 }) {
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
+  const [projectLimits, setProjectLimits] = useState<Record<string, number>>({});
+  const [recentLimit, setRecentLimit] = useState(20);
   const [archiveState, setArchiveState] = useState({ scopeKey, open: false });
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
   const archiveOpen = archiveState.scopeKey === scopeKey && archiveState.open;
@@ -1329,12 +1466,13 @@ const SidebarTaskList = memo(function SidebarTaskList({
   }, [archivedTasks.length, scopeKey]);
 
   const renderTask = (item: SidebarTaskItem) => <SidebarTaskRow
-    key={`${item.kind}:${item.task.id}`}
+    key={item.group?.key || `${item.kind}:${item.task.id}`}
     item={item}
-    active={item.kind === "chat" ? activeChatId === item.task.id : activeWorkflowId === item.task.id}
+    active={sidebarTaskIsSelected(item, activeChatId, activeWorkflowId)}
     delegationEnabled={delegationEnabled}
     providerControl={providerControls.find((control) => control.providerId === (item.kind === "workflow" ? item.task.plannerEngine : item.task.engine))}
     relativeTimeNow={relativeTimeNow}
+    locationLabel={item.kind === "chat" && item.task.scopeKind === "standalone" ? "临时对话" : workspaceNames[item.task.workspaceId] || "工作区"}
     onSelect={onSelect}
     onPrefetch={onPrefetch}
     onCancelPrefetch={onCancelPrefetch}
@@ -1354,31 +1492,31 @@ const SidebarTaskList = memo(function SidebarTaskList({
     </> : <>
       {activeTaskShortcuts.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>进行中</span><small>{activeTaskShortcuts.length}</small></div><div className="session-group">{activeTaskShortcuts.map(renderTask)}</div></section>}
       {pinnedTaskShortcuts.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedTaskShortcuts.length}</small></div><div className="session-group">{pinnedTaskShortcuts.map(renderTask)}</div></section>}
-      {recentUnfiledTasks.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>最近</span><small>{recentUnfiledTasks.length}</small></div><div className="session-group">{recentUnfiledTasks.map(renderTask)}</div></section>}
-      {!standaloneActive && taskFolders.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>文件夹</span><button type="button" aria-label="新建任务文件夹" onClick={onCreateFolder}><Plus size={13} /></button></div>{taskFolders.map((folder) => {
-        const folderTasks = folderTaskItems.get(folder.id) || [];
-        const open = !collapsedFolderIds.has(folder.id);
-        return <details className="task-folder-group" key={folder.id} open={open} onToggle={(event) => {
-          const nextOpen = event.currentTarget.open;
-          setCollapsedFolderIds((current) => {
-            if (nextOpen === !current.has(folder.id)) return current;
-            const next = new Set(current);
-            if (nextOpen) next.delete(folder.id); else next.add(folder.id);
-            return next;
-          });
-        }}><summary onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onOpenFolderContextMenu(
-            folder.id,
-            Math.max(8, Math.min(event.clientX, window.innerWidth - 210)),
-            Math.max(8, Math.min(event.clientY, window.innerHeight - 120))
-          );
-        }}><Folder size={13} /><span>{folder.name}</span><small>{folderTasks.length}</small></summary>{open && <div>{folderTasks.map(renderTask)}</div>}</details>;
+      {projects.length > 0 && <section className="sidebar-task-section sidebar-projects"><div className="sidebar-section-heading"><span>项目</span></div>{projects.map((project) => {
+        const open = !collapsedProjectIds.has(project.id);
+        const projectTasks = visibleTaskItems.filter((item) => item.task.workspaceId === project.id && !(item.kind === "chat" && item.task.scopeKind === "standalone") && !sidebarTaskIsPinned(item) && !ACTIVE_TASK_STATUSES.has(item.task.status));
+        const limit = projectLimits[project.id] || 12;
+        const folders = project.taskFolders || [];
+        const knownFolders = new Set(folders.map((folder) => folder.id));
+        const unfiled = projectTasks.filter((item) => !item.task.folderId || !knownFolders.has(item.task.folderId));
+        return <section className="sidebar-project" key={project.id}>
+          <div className="sidebar-project-heading"><button type="button" aria-label={`展开项目：${project.name}`} aria-expanded={open} title={project.root} onClick={() => setCollapsedProjectIds((current) => { const next = new Set(current); if (open) next.add(project.id); else next.delete(project.id); return next; })}><ChevronRight className={open ? "is-expanded" : ""} size={12} /><Folder size={14} /><span>{project.name}</span>{project.pinned && <Pin size={11} />}</button>{renderProjectMenu(project)}</div>
+          {open && <div className="sidebar-project-tasks">
+            {unfiled.slice(0, limit).map(renderTask)}
+            {unfiled.length > limit && <button type="button" className="sidebar-show-more" onClick={() => setProjectLimits((current) => ({ ...current, [project.id]: limit + 20 }))}><ChevronDown size={12} />更多任务</button>}
+            {folders.map((folder) => {
+              const key = `${project.id}:${folder.id}`;
+              const folderOpen = !collapsedFolderIds.has(key);
+              const folderTasks = projectTasks.filter((item) => item.task.folderId === folder.id);
+              return <details className="task-folder-group" key={key} open={folderOpen} onToggle={(event) => { const nextOpen = event.currentTarget.open; setCollapsedFolderIds((current) => { if (nextOpen === !current.has(key)) return current; const next = new Set(current); if (nextOpen) next.delete(key); else next.add(key); return next; }); }}><summary onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onOpenFolderContextMenu(folder.id, Math.max(8, Math.min(event.clientX, window.innerWidth - 210)), Math.max(8, Math.min(event.clientY, window.innerHeight - 120)), project.id); }}><Folder size={12} /><span>{folder.name}</span></summary>{folderOpen && folderTasks.map(renderTask)}</details>;
+            })}
+            {!projectTasks.length && <span className="sidebar-project-empty">暂无其他任务</span>}
+          </div>}
+        </section>;
       })}</section>}
+      {(() => { const recent = recentUnfiledTasks.filter((item) => item.kind === "chat" && item.task.scopeKind === "standalone" || !projects.some((project) => project.id === item.task.workspaceId)); return recent.length > 0 && <section className="sidebar-task-section"><div className="sidebar-section-heading"><span>最近对话</span></div><div className="session-group">{recent.slice(0, recentLimit).map(renderTask)}</div>{recent.length > recentLimit && <button type="button" className="sidebar-show-more" onClick={() => setRecentLimit((current) => current + 20)}><ChevronDown size={12} />更多对话</button>}</section>; })()}
       {taskCount === 0 && <div className="sidebar-empty-state"><MessagesSquare size={20} /><strong>还没有任务</strong><small>创建任务后会显示在这里</small></div>}
       {archivedTasks.length > 0 && <details className="archived-session-list" open={archiveOpen} onToggle={(event) => setArchiveState({ scopeKey, open: event.currentTarget.open })}><summary><Archive size={12} />已归档 · {archivedTasks.length}<ChevronRight size={12} /></summary>{archiveOpen && <div>{archivedTasks.map(renderTask)}</div>}</details>}
-      {!standaloneActive && <button type="button" className="session-area-empty" onClick={onCreateFolder}><Plus size={13} />新建任务文件夹</button>}
     </>}
   </div>;
 });
@@ -1486,7 +1624,7 @@ function SubagentDrawer({
   onClose: () => void;
 }) {
   const info = subagentInfo(message);
-  const [agentThreads, setAgentThreads] = useState<AgentThread[] | null>(null);
+  const [agentThreads, setAgentThreads] = useState<AgentThread[] | null>(() => agentThreadSummaryCache.get(sessionId) || null);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedAgentDetail, setSelectedAgentDetail] = useState<AgentThread | null>(null);
   const [agentDetailLoading, setAgentDetailLoading] = useState(false);
@@ -1494,6 +1632,22 @@ function SubagentDrawer({
   const [agentListError, setAgentListError] = useState("");
   const agentLoadedRef = useRef(false);
   const agentSnapshotRef = useRef("");
+  const sessionRunningRef = useRef(sessionRunning);
+  const providerLockRef = useRef(new Map<string, string>());
+  const hasNonEmptySummaryRef = useRef(Boolean(agentThreadSummaryCache.get(sessionId)?.length));
+  const agentOrderRef = useRef<string[]>([]);
+  sessionRunningRef.current = sessionRunning;
+
+  const agentMatchesInfo = useCallback((agent: AgentThread, ids: string[], provider?: string, identityKey?: string) => {
+    const normalizedProvider = provider?.trim().toLowerCase();
+    if (normalizedProvider && agent.provider && agent.provider.toLowerCase() !== normalizedProvider) return false;
+    if (identityKey && identityKey !== agent.identityKey && identityKey !== agent.identity?.key) return false;
+    if (!ids.length) return Boolean(identityKey);
+    return ids.includes(agent.id)
+      || ids.includes(agent.identityKey || "")
+      || ids.includes(agent.identity?.agentId || "");
+  }, []);
+
   useEffect(() => {
     let stopped = false;
     let emptyRetries = 0;
@@ -1535,15 +1689,31 @@ function SubagentDrawer({
           quietPolls = 0;
           agentSnapshotRef.current = snapshot;
           agentLoadedRef.current = true;
-          agentThreadSummaryCache.set(sessionId, agents);
+          if (agents.length > 0) {
+            hasNonEmptySummaryRef.current = true;
+            agentThreadSummaryCache.set(sessionId, agents);
+          }
+          // A partially written transcript can briefly produce an empty
+          // snapshot. Keep the last usable list instead of flashing to the
+          // parent-message fallback.
+          if (!agents.length && hasNonEmptySummaryRef.current) {
+            quietPolls += 1;
+            if (sessionRunningRef.current || emptyRetries < 3) nextDelay = 1_000;
+            return;
+          }
           startTransition(() => {
             setAgentThreads(agents);
-            const preferredId = info.agentIds.find((id) => agents.some((agent) => agent.id === id)) || agents[0]?.id || "";
-            setSelectedAgentId((current) => agents.some((agent) => agent.id === current) ? current : preferredId);
+            const preferred = agents.find((agent) => agentMatchesInfo(agent, info.agentIds, info.provider, info.identityKey));
+            // A drawer opened from a message must never silently jump to an
+            // unrelated first Agent when the server is still reconciling IDs.
+            const preferredId = preferred ? agentSelectionKey(preferred) : agents.length === 1 ? agentSelectionKey(agents[0]) : "";
+            setSelectedAgentId((current) => agents.some((agent) => agentSelectionKey(agent) === current)
+              ? current
+              : preferredId);
           });
         } else quietPolls += 1;
         const hasRunningAgent = agents.some((agent) => agent.status === "running");
-        if (sessionRunning || hasRunningAgent || emptyRetries < 3) nextDelay = emptyRetries < 3 ? 1_000 : Math.min(5_000, 1_000 + quietPolls * 500);
+        if (sessionRunningRef.current || hasRunningAgent || emptyRetries < 3) nextDelay = emptyRetries < 3 ? 1_000 : Math.min(5_000, 1_000 + quietPolls * 500);
       } catch (error) {
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
@@ -1569,8 +1739,9 @@ function SubagentDrawer({
     const onAgentsChanged = (detail: Record<string, unknown>) => {
       const changedSessionId = String(detail.sessionId || "");
       if (changedSessionId === sessionId) {
-        if (timer) window.clearTimeout(timer);
-        requestLoad();
+        // Coalesce the burst of events emitted while a transcript is being
+        // appended. The next poll still verifies the complete snapshot.
+        schedule(120);
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -1584,15 +1755,31 @@ function SubagentDrawer({
       unsubscribeAgents();
       unsubscribeReconcile();
     };
-  }, [sessionId, sessionRunning, info.agentIds.join("|")]);
-  const orderedAgentThreads = useMemo(() => normalizeAgentThreads(agentThreads || []), [agentThreads]);
+  }, [sessionId, info.agentIds.join("|"), agentMatchesInfo]);
+  const orderedAgentThreads = useMemo(() => {
+    const normalized = normalizeAgentThreads(agentThreads || []);
+    const byKey = new Map(normalized.map((agent) => [agent.identityKey || agent.identity?.key || agent.id, agent]));
+    const nextOrder = agentOrderRef.current.filter((key) => byKey.has(key));
+    for (const agent of normalized) {
+      const key = agent.identityKey || agent.identity?.key || agent.id;
+      if (!nextOrder.includes(key)) nextOrder.push(key);
+    }
+    agentOrderRef.current = nextOrder;
+    return nextOrder.flatMap((key) => {
+      const agent = byKey.get(key);
+      return agent ? [agent] : [];
+    });
+  }, [agentThreads]);
   useEffect(() => {
     if (!orderedAgentThreads.length) return;
-    setSelectedAgentId((current) => orderedAgentThreads.some((agent) => agent.id === current)
+    setSelectedAgentId((current) => orderedAgentThreads.some((agent) => agentSelectionKey(agent) === current)
       ? current
-      : info.agentIds.find((id) => orderedAgentThreads.some((agent) => agent.id === id)) || orderedAgentThreads[0].id);
-  }, [orderedAgentThreads, info.agentIds.join("|")]);
-  const selectedAgentSummary = orderedAgentThreads.find((agent) => agent.id === selectedAgentId);
+      : (() => {
+        const preferred = orderedAgentThreads.find((agent) => agentMatchesInfo(agent, info.agentIds, info.provider, info.identityKey));
+        return preferred ? agentSelectionKey(preferred) : orderedAgentThreads.length === 1 ? agentSelectionKey(orderedAgentThreads[0]) : "";
+      })());
+  }, [orderedAgentThreads, info.agentIds.join("|"), info.identityKey, info.provider, agentMatchesInfo]);
+  const selectedAgentSummary = orderedAgentThreads.find((agent) => agentSelectionKey(agent) === selectedAgentId);
   useEffect(() => {
     if (!selectedAgentSummary) {
       setSelectedAgentDetail(null);
@@ -1600,9 +1787,9 @@ function SubagentDrawer({
       return;
     }
     const agentId = selectedAgentSummary.id;
-    const cacheKey = `${sessionId}:${agentId}`;
+    const identityKey = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key || agentId;
+    const cacheKey = `${sessionId}:${identityKey}`;
     const cached = agentThreadDetailCache.get(cacheKey);
-    setSelectedAgentDetail(cached || null);
     setAgentDetailError("");
     setAgentDetailLoading(!cached);
     let stopped = false;
@@ -1611,6 +1798,8 @@ function SubagentDrawer({
     let failures = 0;
     let timer: number | undefined;
     let controller: AbortController | undefined;
+    let lastAppliedSnapshot = cached ? agentThreadsSnapshot([cached]) : "";
+    setSelectedAgentDetail((current) => cached || (agentDetailMatchesSummary(current, selectedAgentSummary) ? current : null));
     const schedule = (delay: number) => {
       if (stopped) return;
       if (timer) window.clearTimeout(timer);
@@ -1633,19 +1822,46 @@ function SubagentDrawer({
         return;
       }
       loading = true;
-      setAgentDetailLoading(true);
+      // Polling an already hydrated Agent is a background refresh; keep the
+      // timeline interactive instead of toggling its loading state every tick.
+      if (!agentThreadDetailCache.has(cacheKey)) setAgentDetailLoading(true);
       controller = new AbortController();
       let nextDelay: number | null = null;
       try {
-        const value = await api<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`, { signal: controller.signal });
+        const detailUrl = `/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`;
+        const identityQuery = selectedAgentSummary.identityKey || selectedAgentSummary.identity?.key
+          ? `?identityKey=${encodeURIComponent(identityKey)}` : "";
+        let value: unknown;
+        try {
+          value = await api<unknown>(`${detailUrl}${identityQuery}`, { signal: controller.signal });
+        } catch (error) {
+          // If reconciliation rotated the canonical identity between the
+          // summary and detail request, retry by provider and keep the cached
+          // transcript visible while the server converges.
+          const provider = selectedAgentSummary.provider || selectedAgentSummary.identity?.providerId;
+          if (!identityQuery || !provider || !(error instanceof Error) || !/身份不存在|identity/i.test(error.message)) throw error;
+          value = await api<unknown>(`${detailUrl}?provider=${encodeURIComponent(provider)}`, { signal: controller.signal });
+        }
         const agent = normalizeAgentThreads([value])[0];
         if (stopped) return;
         if (!agent || agent.id !== agentId) throw new Error("子 Agent 详情不匹配");
         failures = 0;
-        agentThreadDetailCache.set(cacheKey, agent);
-        setSelectedAgentDetail(agent);
+        const previous = agentThreadDetailCache.get(cacheKey);
+        // A transient empty detail response must not erase useful summary
+        // logs. Keep the latest non-empty snapshot until the server advances
+        // its revision.
+        const merged = previous && agent.logs.length === 0 && previous.logs.length > 0
+          && (agent.revision || 0) <= (previous.revision || 0)
+          ? { ...agent, logs: previous.logs, logCount: Math.max(agent.logCount || 0, previous.logCount || 0) }
+          : agent;
+        const snapshot = agentThreadsSnapshot([merged]);
+        agentThreadDetailCache.set(cacheKey, merged);
+        if (snapshot !== lastAppliedSnapshot) {
+          lastAppliedSnapshot = snapshot;
+          setSelectedAgentDetail(merged);
+        }
         setAgentDetailError("");
-        if (sessionRunning || agent.status === "running") nextDelay = 1_000;
+        if (sessionRunningRef.current || agent.status === "running") nextDelay = 1_000;
       } catch (error) {
         if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
         failures += 1;
@@ -1662,13 +1878,13 @@ function SubagentDrawer({
       }
     };
     const onAgentsChanged = (detail: Record<string, unknown>) => {
-      if (agentChangeTargets(detail, sessionId, agentId)) requestLoad();
+      if (agentChangeTargets(detail, sessionId, agentId, identityKey)) schedule(120);
     };
     const onVisibilityChange = () => { if (!document.hidden) requestLoad(); };
     requestLoad();
     document.addEventListener("visibilitychange", onVisibilityChange);
     const unsubscribeAgents = realtimeCoordinator.subscribe("agents.changed", onAgentsChanged);
-    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => requestLoad());
+    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => schedule(120));
     return () => {
       stopped = true;
       controller?.abort();
@@ -1677,11 +1893,18 @@ function SubagentDrawer({
       unsubscribeAgents();
       unsubscribeReconcile();
     };
-  }, [sessionId, selectedAgentSummary?.id, sessionRunning]);
+  }, [sessionId, selectedAgentSummary?.id, selectedAgentSummary?.identityKey, selectedAgentSummary?.identity?.key, selectedAgentSummary?.provider]);
   // A tab switch renders before its detail effect runs; never show the previous Agent's logs.
-  const currentAgentDetail = selectedAgentDetail?.id === selectedAgentSummary?.id ? selectedAgentDetail : null;
-  const selectedAgent = currentAgentDetail || selectedAgentSummary;
-  const selectedAgentLogs = useMemo(() => (currentAgentDetail?.logs || []).map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => left.createdAt.localeCompare(right.createdAt)), [currentAgentDetail?.logs]);
+  const detailForSelection = selectedAgentDetail;
+  const currentAgentDetail = agentDetailMatchesSummary(detailForSelection, selectedAgentSummary) ? detailForSelection : null;
+  const selectedAgent = selectAgentDisplaySnapshot(currentAgentDetail, selectedAgentSummary);
+  const selectedAgentLogs = useMemo(() => {
+    // Summary responses intentionally omit logs. Keep a cached detail stream
+    // available while its status snapshot is being refreshed, but let the
+    // freshest snapshot decide the header state.
+    const source = currentAgentDetail?.logs?.length ? currentAgentDetail.logs : selectedAgentSummary?.logs || [];
+    return source.map((log, index) => normalizeAgentStreamLog(log, index)).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  }, [currentAgentDetail?.logs, selectedAgentSummary?.logs]);
   const related = useMemo(() => messages.filter((candidate) => {
     const candidateInfo = subagentInfo(candidate);
     if (!candidateInfo.isSubagent) return false;
@@ -1693,30 +1916,40 @@ function SubagentDrawer({
     [related, message]
   );
   const title = selectedAgent?.nickname || info.nickname || info.agentType || "子 Agent";
-  const drawerStatus = selectedAgent?.status || info.status;
-  const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, selectedAgent ? selectedAgentLogs.length : logs.length);
-  const drawerProvider = selectedAgent?.provider || info.provider;
+  const drawerStatus = normalizeAgentDisplayStatus(selectedAgent?.status || info.status);
+  const drawerDetailPending = Boolean(selectedAgentSummary && !currentAgentDetail && agentDetailLoading);
+  const conversationLogs = selectedAgent && selectedAgentLogs.length ? selectedAgentLogs : logs.map(eventActivityLog);
+  const drawerLogCount = Math.max(selectedAgentSummary?.logCount ?? 0, selectedAgent?.logCount ?? 0, conversationLogs.length);
+  const selectedIdentityKey = selectedAgent?.identityKey || selectedAgent?.identity?.key || selectedAgent?.id || selectedAgentId;
+  const candidateProvider = selectedAgent?.identity?.providerId || selectedAgent?.provider || selectedAgentSummary?.identity?.providerId || selectedAgentSummary?.provider;
+  const lockedProvider = providerLockRef.current.get(selectedIdentityKey);
+  if (candidateProvider && !lockedProvider) providerLockRef.current.set(selectedIdentityKey, candidateProvider);
+  // Do not render a speculative parent/provider inference while a message
+  // points at a specific Agent. That is what caused Claude → Codex icon flash.
+  const drawerProvider = lockedProvider || candidateProvider || (info.agentIds.length ? undefined : info.provider);
   const drawerProviderControl = providerControls.find((control) => control.providerId === drawerProvider);
-  const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(selectedAgent ? selectedAgentLogs : logs)}`;
-  const followOutput = useAgentOutputFollow(drawerLogVersion, selectedAgentId);
+  const drawerLogVersion = `${selectedAgent?.updatedAt || "fallback"}|${agentStreamVersion(conversationLogs)}`;
+  const followOutput = useAgentOutputFollow(drawerLogVersion, selectedIdentityKey);
   return (
     <AgentDrawer title={title} onClose={onClose} followOutput={followOutput} header={<header>
           <div className="agent-drawer-title">
             <span className={`subagent-mark ${drawerProvider || "agent"}`}>{drawerProvider ? <ProviderIcon provider={drawerProvider} icon={drawerProviderControl?.identity.icon} accent={drawerProviderControl?.identity.accent} size={18} /> : <Bot size={18} />}</span>
             <span>
               <strong>{title}<em className={`agent-provider-badge ${drawerProvider || "agent"}`}>{agentProviderLabel(drawerProvider)}</em></strong>
-              <small>{subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条活动{selectedAgent ? ` · ${formatTokens(usageTotal(selectedAgent.usage))} tokens` : ""}</small>
+              <small><i className={`agent-live-indicator ${drawerStatus === "running" ? "active" : ""}`} aria-hidden="true" />{subagentStatusLabel(drawerStatus)} · {drawerLogCount} 条活动{selectedAgent ? ` · ${formatTokens(usageTotal(selectedAgent.usage))} tokens` : ""}</small>
             </span>
           </div>
           <IconButton label="关闭子 Agent 日志" onClick={onClose}><X size={18} /></IconButton>
         </header>} navigation={agentThreads && orderedAgentThreads.length > 1 && (
             <nav className="agent-thread-tabs" aria-label="切换子 Agent">
               {orderedAgentThreads.map((agent) => (
+                <AgentTaskTooltip key={agentSelectionKey(agent)} name={agent.nickname} provider={agentProviderLabel(agent.provider)} status={subagentStatusLabel(agent.status)} summary={agent.task}>
+                {(descriptionId) => (
                 <button
-                  className={agent.id === selectedAgentId ? "active" : ""}
-                  key={agent.id}
-                  aria-pressed={agent.id === selectedAgentId}
-                  onClick={() => setSelectedAgentId(agent.id)}
+                  className={agentSelectionKey(agent) === selectedAgentId ? "active" : ""}
+                  aria-pressed={agentSelectionKey(agent) === selectedAgentId}
+                  aria-describedby={descriptionId}
+                  onClick={() => setSelectedAgentId(agentSelectionKey(agent))}
                 >
                   <span className={`agent-status-dot ${agent.status}`} />
                   <span>
@@ -1724,9 +1957,12 @@ function SubagentDrawer({
                     <small>{agentProviderLabel(agent.provider)} · {agentModeLabel(agent.mode)}</small>
                   </span>
                 </button>
+                )}
+                </AgentTaskTooltip>
               ))}
             </nav>
           )}>
+          {drawerDetailPending && <div className="agent-drawer-progress syncing" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} /><span>正在同步子 Agent 日志…</span></div>}
           {(selectedAgent?.task || info.task) && (
             <AgentTaskDescription key={selectedAgentId} title="委派任务" text={selectedAgent?.task || info.task || ""} />
           )}
@@ -1735,17 +1971,19 @@ function SubagentDrawer({
               <AgentConversation
                 key={selectedAgentId}
                 scrollRef={followOutput.containerRef}
-                loading={agentThreads === null || agentDetailLoading || (!!selectedAgent && !currentAgentDetail)}
+                loading={agentThreads === null || (agentDetailLoading && !selectedAgentLogs.length && !logs.length)}
                 error={agentListError || agentDetailError}
-                logs={selectedAgent ? selectedAgentLogs : logs.map(eventActivityLog)}
+                logs={conversationLogs}
                 status={selectedAgent?.status || drawerStatus}
-                provider={selectedAgent?.provider || drawerProvider || "agent"}
+                provider={drawerProvider || "agent"}
                 providerLabel={agentProviderLabel(selectedAgent?.provider || drawerProvider)}
                 providerIcon={drawerProviderControl?.identity.icon}
                 providerAccent={drawerProviderControl?.identity.accent}
                 messageLabel="子 Agent"
                 workspaceId={workspaceId}
                 showProvider={false}
+                showFilters={false}
+                hiddenCategories={["search"]}
                 renderMessage={(text: string) => <MarkdownBody text={text} workspaceId={workspaceId} workspaceRoot={workspaceRoot} onOpenLocalFile={onOpenLocalFile} />}
               />
             </div>
@@ -1861,15 +2099,27 @@ function EventMessage({
     ? String((message.payload as { thinking?: unknown } | undefined)?.thinking || message.text || "")
     : "";
   const agent = subagentInfo(message);
-  if (message.eventType === "user_question" && claudeQuestions(message).length) {
+  if (message.eventType === "subagent_wait" || asRecord(message.payload)?.type === "subagent_wait") return null;
+  if (message.eventType === "user_question" && claudeQuestions(message).length && !asRecord(message.payload)?.native_controlled) {
     return <ClaudeQuestionCard message={message} onSubmit={onAnswerQuestion} />;
   }
+  if (message.eventType === "user_question" && asRecord(message.payload)?.native_controlled) {
+    return <div className="event-row"><button onClick={() => setOpen(v => !v)} aria-expanded={open}><MessagesSquare size={15} /><span><b>原生问题</b>{claudeQuestions(message).map(q => q.header || q.question).join(" · ")}</span>{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>{open && <div className="event-detail-panel">{claudeQuestions(message).map((q, i) => <p key={i}>{q.question}</p>)}</div>}</div>;
+  }
   if (agent.isSubagent) {
-    const provider = agent.provider || engine;
+    // Parent engine is not a reliable child identity. Only use it for legacy
+    // events that do not identify a concrete Agent; otherwise keep the neutral
+    // mark until the canonical Agent snapshot resolves.
+    const provider = agent.provider || (agent.agentIds.length ? undefined : engine);
     const providerControl = providerControls.find((control) => control.providerId === provider);
+    const rawTask = agent.task?.trim();
+    const taskSummary = rawTask && !rawTask.startsWith("{") && !rawTask.startsWith("[")
+      ? compactLine(rawTask, 120)
+      : subagentActivityText(agent, "");
+    const providerLabel = agentProviderLabel(provider);
     return (
       <div className="event-row subagent-row">
-        <button className={`${provider || "agent"} ${provider ? "" : "no-provider"}`.trim()} title="打开子 Agent 日志" onClick={() => onOpenAgent(message.id)}>
+        <button className={`${provider || "agent"} ${provider ? "" : "no-provider"}`.trim()} title={`委派：${agent.nickname || agent.agentType || "子 Agent"} · ${providerLabel}\n任务：${taskSummary || "查看实时日志"}`} aria-label={`打开委派任务，${providerLabel}，${taskSummary || "查看实时日志"}`} onClick={() => onOpenAgent(message.id)}>
           {provider && <span className={`subagent-mark ${provider}`}><ProviderIcon provider={provider} icon={providerControl?.identity.icon} accent={providerControl?.identity.accent} size={18} /></span>}
           <span className="subagent-card-title">
             <b>{agent.nickname || agent.agentType || "子 Agent"}</b>
@@ -1924,6 +2174,96 @@ function EventMessage({
           </div>)}
     </div>
   );
+}
+
+type AgentActivityRailItem = {
+  key: string;
+  messageId: string;
+  name: string;
+  provider?: string;
+  task?: string;
+  status: SubagentInfo["status"];
+  count: number;
+  updatedAt: string;
+};
+
+function SubagentActivityRail({
+  messages,
+  providerControls,
+  onOpenAgent
+}: {
+  messages: Message[];
+  providerControls: ProviderControlSnapshot[];
+  onOpenAgent: (messageId: string) => void;
+}) {
+  const providerLocksRef = useRef(new Map<string, string>());
+  const items = useMemo<AgentActivityRailItem[]>(() => {
+    const grouped = new Map<string, AgentActivityRailItem>();
+    for (const message of messages) {
+      const info = subagentInfo(message);
+      if (!info.isSubagent) continue;
+      const key = info.identityKey || info.agentIds[0] || `${info.nickname || info.agentType || "agent"}:${info.provider || ""}`;
+      const previous = grouped.get(key);
+      const candidateProvider = info.provider?.trim().toLowerCase();
+      const lockedProvider = providerLocksRef.current.get(key);
+      if (candidateProvider && !lockedProvider) providerLocksRef.current.set(key, candidateProvider);
+      const provider = lockedProvider || candidateProvider || previous?.provider;
+      const rawTask = info.task?.trim();
+      const task = previous?.task || (rawTask && !rawTask.startsWith("{") && !rawTask.startsWith("[") ? compactLine(rawTask, 240) : undefined);
+      const stableMessage = Boolean(info.identityKey || info.agentIds.length);
+      const next: AgentActivityRailItem = {
+        key,
+        messageId: stableMessage || !previous ? message.id : previous.messageId,
+        name: info.nickname || info.agentType || previous?.name || "子 Agent",
+        provider,
+        task: task || previous?.task,
+        status: info.status === "unknown" ? previous?.status || "running" : info.status,
+        count: (previous?.count || 0) + 1,
+        updatedAt: message.createdAt
+      };
+      if (!previous || Date.parse(message.createdAt) >= Date.parse(previous.updatedAt)) grouped.set(key, next);
+      else grouped.set(key, { ...previous, count: next.count });
+    }
+    return [...grouped.values()];
+  }, [messages]);
+  const allSettled = items.length > 0 && items.every((item) => item.status === "completed");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    if (!allSettled) { setCompact(false); return; }
+    const timer = window.setTimeout(() => setCompact(true), 1800);
+    return () => window.clearTimeout(timer);
+  }, [allSettled]);
+  if (!items.length) return null;
+  const collapsed = compact && !historyOpen;
+  return <aside className={`agent-activity-rail ${compact ? "is-settled" : ""}`} aria-label="子 Agent 活动">
+    {compact && <button type="button" className="agent-activity-orb history-toggle" title="子 Agent 历史" aria-label="子 Agent 历史" aria-expanded={!collapsed} onClick={() => setHistoryOpen((value) => !value)}><History size={16} /></button>}
+    {!collapsed && <>
+    <div className="agent-activity-rail-items">
+      {items.map((item) => {
+        const control = providerControls.find((candidate) => candidate.providerId === item.provider);
+        const live = item.status === "running" || item.status === "waiting";
+        const statusLabel = subagentStatusLabel(item.status);
+        const providerLabel = agentProviderLabel(item.provider);
+        const taskSummary = item.task || "点击查看该委派任务的实时日志";
+        return <AgentTaskTooltip key={item.key} name={item.name} provider={providerLabel} status={statusLabel} summary={item.task}>
+          {(descriptionId) => <button
+          type="button"
+          className={`agent-activity-orb ${live ? "is-live" : `is-${item.status}`}`}
+          aria-label={`打开 ${item.name}，${providerLabel}，${statusLabel}，任务：${taskSummary}`}
+          aria-describedby={descriptionId}
+          onClick={() => onOpenAgent(item.messageId)}
+        >
+          <span className="agent-activity-orb-icon">
+            {item.provider ? <ProviderIcon provider={item.provider} icon={control?.identity.icon} accent={control?.identity.accent} size={16} /> : <Bot size={16} />}
+          </span>
+          <span className="agent-activity-orb-dot" aria-hidden="true" />
+        </button>}
+        </AgentTaskTooltip>;
+      })}
+    </div>
+    </>}
+  </aside>;
 }
 
 async function copyText(text: string) {
@@ -2009,26 +2349,34 @@ const PAPER_FORMATS: Array<{ value: PaperFormat; label: string; detail: string; 
   { value: "docx", label: "人工复核", detail: "输出变更摘要、风险与后续清单", prompt: "人工复核" }
 ];
 
+function TaskTemplateIcon({ id }: { id: TaskTemplateId }) {
+  if (id === "code-review") return <FileSearch size={19} />;
+  if (id === "bug-fix") return <Wrench size={19} />;
+  if (id === "test-coverage") return <ListChecks size={19} />;
+  return <RefreshCw size={19} />;
+}
+
 function TaskLaunch({ workspaceName, onPromptSelect, onOpenWorkflow }: { workspaceName: string; onPromptSelect: (prompt: string) => void; onOpenWorkflow: () => void }) {
   return (
     <section className="task-launch">
       <header className="task-launch-heading">
         <div className="task-launch-brand"><ProductLogo className="task-launch-logo" /></div>
         <h1>想在 {workspaceName || "当前工作区"} 中做些什么？</h1>
+        <p className="task-launch-subtitle">从一个可验证的目标开始，完成后你会看到修改、测试和风险说明。</p>
       </header>
 
       <div className="task-launch-actions" aria-label="常用任务">
-        <button type="button" onClick={() => onPromptSelect("请探索并理解当前工作区，梳理项目结构、核心逻辑与值得优先改进的问题。")}>
-          <Search size={19} />
-          <span>探索并理解工作区</span>
-        </button>
-        <button type="button" onClick={() => onPromptSelect("请在当前工作区中设计并实现一个新功能、应用或工具：")}>
-          <Wrench size={19} />
-          <span>构建新功能、应用或工具</span>
-        </button>
+        {TASK_TEMPLATES.map((template) => (
+          <button type="button" key={template.id} onClick={() => onPromptSelect(template.prompt)}>
+            <TaskTemplateIcon id={template.id} />
+            <span>{template.label}</span>
+            <small>{template.description}</small>
+          </button>
+        ))}
         <button type="button" onClick={onOpenWorkflow}>
           <Route size={19} />
           <span>规划复杂任务并协作执行</span>
+          <small>先审查计划，再按依赖执行</small>
         </button>
       </div>
     </section>
@@ -2090,19 +2438,22 @@ export function App() {
   const navigationPending = sessionNavigation.phase === "loading";
   const navigationSummary = sessionNavigation.phase === "loading" ? sessionNavigation.summary : undefined;
   const taskFileScopeId = activeSession
-    ? activeSession.scopeKind === "standalone" ? activeSession.id : activeSession.workspaceId
+    ? activeSession.id
     : activeWorkspaceId;
   const [workspaceArchiveOpen, setWorkspaceArchiveOpen] = useState(false);
   const [sidebarSection, setSidebarSection] = useState<SidebarSection>("tasks");
   const [sidebarQuery, setSidebarQuery] = useState("");
+  // Browsing a workspace never changes a new task's execution target.
+  const [sidebarWorkspaceFilter, setSidebarWorkspaceFilter] = useState("");
   const [layoutWidths, setLayoutWidths] = useState<LayoutWidths>(readLayoutWidths);
   const [resizingPane, setResizingPane] = useState<ResizingPane | null>(null);
   const [sessionContextMenu, setSessionContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [sessionAreaMenu, setSessionAreaMenu] = useState<{ x: number; y: number } | null>(null);
-  const [taskFolderMenu, setTaskFolderMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [taskFolderMenu, setTaskFolderMenu] = useState<{ id: string; workspaceId: string; x: number; y: number } | null>(null);
   const [view, setView] = useState<"chat" | "agents" | "mcp" | "settings" | "git">("chat");
   const [activeWorkflowId, setActiveWorkflowId] = useState("");
   const [workflowDraftOpen, setWorkflowDraftOpen] = useState(false);
+  const [taskWorkflowLink, setTaskWorkflowLink] = useState<{ sessionId: string; workflowId: string } | null>(null);
   const activeTaskKindRef = useRef<typeof activeTaskKind>(null);
   const taskSelectionGenerationRef = useRef(0);
   // A newly-created task must win over restored tabs and background refreshes
@@ -2126,8 +2477,15 @@ export function App() {
   const [invokedSkillNames, setInvokedSkillNames] = useState<string[]>([]);
   const [tree, setTree] = useState<WorkspaceFileNode[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 720);
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 1050);
+  const [inspectorOpen, setInspectorOpen] = useState(() => {
+    try { return localStorage.getItem(INSPECTOR_OPEN_KEY) === "1"; }
+    catch { return false; }
+  });
+  const filePanelTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeFilePanel = () => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); };
   const [dialog, setDialog] = useState<"workspace" | "task-mode" | "agent" | "agent-import" | "agents" | null>(null);
+  const [newTaskWorkspaceId, setNewTaskWorkspaceId] = useState("");
+  const [nativeTerminalTask, setNativeTerminalTask] = useState<{ id: string; title: string; provider: string } | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const guideInitializedRef = useRef(false);
   const [pendingNewTaskPrompt, setPendingNewTaskPrompt] = useState("");
@@ -2181,7 +2539,10 @@ export function App() {
     }
   }, [data]);
   const activeScopeBrowserResource = workspaceBrowser.tabs.find((tab) => tab.id === workspaceBrowser.activeTabId)?.resource;
-  const activeFileScopeId = workspaceBrowserScopeId(activeScopeBrowserResource, taskFileScopeId);
+  const activeFileScopeId = activeScopeBrowserResource?.kind === "workflow" ? activeScopeBrowserResource.workflowId
+    : activeScopeBrowserResource?.kind === "conversation" ? activeScopeBrowserResource.conversationId
+    : workspaceBrowserScopeId(activeScopeBrowserResource, activeTaskKind === "workflow" && activeWorkflowId ? activeWorkflowId : taskFileScopeId);
+  const directoryPanelVisible = inspectorOpen && view === "chat" && activeScopeBrowserResource?.kind !== "tool";
   const settlePendingSessionTab = useCallback(() => {
     const pending = sessionNavigationRef.current;
     if (pending.phase !== "loading") return;
@@ -2210,7 +2571,6 @@ export function App() {
     setActiveTaskKind(kind);
     return taskSelectionGenerationRef.current;
   }, [settlePendingSessionTab, updateSessionNavigation]);
-  const [tokenDetailsOpen, setTokenDetailsOpen] = useState(false);
   const [messageRenderLimits, setMessageRenderLimits] = useState<Record<string, number>>({});
   const [runningInputMode, setRunningInputMode] = useState<"queue" | "steer">("queue");
   const [skillPolicies, setSkillPolicies] = useState<SkillPolicies>({});
@@ -2223,6 +2583,9 @@ export function App() {
   const [treeError, setTreeError] = useState("");
   const treeErrorRef = useRef("");
   const [treeQuery, setTreeQuery] = useState("");
+  const [treeSearchOpen, setTreeSearchOpen] = useState(false);
+  const treeSearchRef = useRef<HTMLInputElement>(null);
+  const searchWorkspaceFileList = useCallback((workspaceId: string, query: string, signal: AbortSignal) => api<WorkspaceFileSearchResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/files/search?q=${encodeURIComponent(query)}`, { signal, timeoutMs: 25_000 }), []);
   const [historyLoad, setHistoryLoad] = useState<{ sessionId: string; start: number; target: number } | null>(null);
   const [historyPageLoading, setHistoryPageLoading] = useState(false);
   const [agentDrawerMessageId, setAgentDrawerMessageId] = useState("");
@@ -2277,11 +2640,11 @@ export function App() {
     setTaskFolderMenu(null);
     setSessionAreaMenu({ x, y });
   }, []);
-  const openSidebarTaskFolderMenu = useCallback((id: string, x: number, y: number) => {
+  const openSidebarTaskFolderMenu = useCallback((id: string, x: number, y: number, workspaceId: string) => {
     if (sessionNavigationRef.current.phase === "loading") return;
     setSessionContextMenu(null);
     setSessionAreaMenu(null);
-    setTaskFolderMenu({ id, x, y });
+    setTaskFolderMenu({ id, workspaceId, x, y });
   }, []);
 
   useEffect(() => () => cancelFilePreviewRequest(false), [cancelFilePreviewRequest]);
@@ -2334,6 +2697,11 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(LAYOUT_WIDTHS_KEY, JSON.stringify(layoutWidths));
   }, [layoutWidths]);
+
+  useEffect(() => {
+    try { localStorage.setItem(INSPECTOR_OPEN_KEY, inspectorOpen ? "1" : "0"); }
+    catch { /* Storage may be unavailable in a restricted browser context. */ }
+  }, [inspectorOpen]);
 
   const setPaneWidth = (pane: ResizingPane, width: number) => {
     const otherWidth = pane === "sidebar"
@@ -2562,7 +2930,7 @@ export function App() {
       }, 120);
     };
     const unsubscribers = [
-      ...["settings.changed", "mcp.changed", "skills.changed", "agent-market.changed"]
+      ...["settings.changed", "mcp.changed", "skills.changed", "agent-market.changed", "plugins.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, refreshBootstrap)),
       ...["runtime.changed", "agent-market.changed", "provider-control.changed"]
         .map((type) => realtimeCoordinator.subscribe(type, () => refreshProviderSnapshot(true))),
@@ -2665,6 +3033,13 @@ export function App() {
     setSettingsProvider(provider);
     setSettingsTarget("ai");
     setView("settings");
+  };
+
+  const openPluginSettings = () => {
+    cancelSessionNavigation();
+    setSettingsTarget("plugins");
+    setView("settings");
+    if (window.innerWidth <= 720) setSidebarOpen(false);
   };
 
   useEffect(() => {
@@ -3051,6 +3426,12 @@ export function App() {
     setTreeError(cached?.error || "");
     setTreeUpdatedAt(cached?.updatedAt || null);
     void loadWorkspaceTree(activeFileScopeId, { silent: Boolean(cached) });
+  }, [activeFileScopeId]);
+
+  useEffect(() => {
+    if (!activeFileScopeId || !directoryPanelVisible) return;
+    const cached = treeCacheRef.current.get(activeFileScopeId);
+    if (cached) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     const pollTimer = window.setInterval(() => {
       if (!document.hidden) void loadWorkspaceTree(activeFileScopeId, { silent: true });
     }, 15_000);
@@ -3061,7 +3442,7 @@ export function App() {
       window.clearInterval(pollTimer);
       unsubscribeReconcile();
     };
-  }, [activeFileScopeId]);
+  }, [activeFileScopeId, directoryPanelVisible]);
 
   useEffect(() => {
     if (!activeFileScopeId || !tree.length) return;
@@ -3082,23 +3463,29 @@ export function App() {
   }, [prompt]);
 
   const workspace = data?.workspaces.find((item) => item.id === activeWorkspaceId);
-  const fileScopeWorkspace = data?.workspaces.find((item) => item.id === activeFileScopeId);
+  const fileScopeWorkflow = data?.workflows.find((item) => item.id === activeFileScopeId);
+  const fileScopeSession = data?.sessions.find((item) => item.id === activeFileScopeId);
+  const fileScopeWorkspace = data?.workspaces.find((item) => item.id === activeFileScopeId || item.id === fileScopeWorkflow?.workspaceId || item.id === fileScopeSession?.workspaceId);
   const fileScopeStandalone = !fileScopeWorkspace && data?.sessions.some((item) => item.scopeKind === "standalone" && item.id === activeFileScopeId);
+  const activeFileScopeRoot = activeSession?.id === activeFileScopeId && activeSession.executionRoot
+    ? activeSession.executionRoot
+    : fileScopeRoot(activeFileScopeId, data);
   const manualSkillCandidates = useMemo(
     () => (data?.skills || []).filter((skill) => !skill.builtIn && (skillPolicies[skill.name] || "off") !== "off"),
     [data?.skills, skillPolicies]
   );
   const treeHasVisibleItems = useMemo(() => workspaceTreeContainsQuery(tree, treeQuery), [tree, treeQuery]);
+  const treeHasVisibleDirectories = useMemo(() => workspaceTreeContainsQuery(tree.filter((node) => node.type === "directory"), treeQuery), [tree, treeQuery]);
   const standaloneActive = activeScopeBrowserResource?.kind === "conversation"
     ? !activeScopeBrowserResource.workspaceId
     : standaloneScope || activeSession?.scopeKind === "standalone";
   const sessions = useMemo(
-    () => (data?.sessions || []).filter((item) => (standaloneActive ? item.scopeKind === "standalone" : item.scopeKind !== "standalone" && item.workspaceId === activeWorkspaceId) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
-    [data?.sessions, activeWorkspaceId, standaloneActive]
+    () => (data?.sessions || []).filter((item) => (!sidebarWorkspaceFilter || item.scopeKind !== "standalone" && item.workspaceId === sidebarWorkspaceFilter) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+    [data?.sessions, sidebarWorkspaceFilter]
   );
   const workflows = useMemo(
-    () => (data?.workflows || []).filter((item) => item.workspaceId === activeWorkspaceId && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
-    [data?.workflows, activeWorkspaceId]
+    () => (data?.workflows || []).filter((item) => (!sidebarWorkspaceFilter || item.workspaceId === sidebarWorkspaceFilter) && !item.archivedAt).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+    [data?.workflows, sidebarWorkspaceFilter]
   );
   const browserConversationProviders = useMemo(() => {
     const controlsById = new Map((data?.providerControls || []).map((control) => [control.providerId, control]));
@@ -3129,6 +3516,9 @@ export function App() {
   const displayedSession = activeBrowserConversationResource
     ? activeSession?.id === activeBrowserConversationResource.conversationId ? activeSession : null
     : activeWorkspaceBrowserTab ? null : activeSession;
+  const fallbackEngine = data?.providerControls.find((control) => control.operations.setDefault)?.providerId
+    || data?.agentProviders.find((provider) => provider.capabilities.sessions.create)?.id
+    || "claude";
   const displayedWorkflowId = activeBrowserWorkflowResource?.workflowId || (!activeWorkspaceBrowserTab ? activeWorkflowId : "");
   const showWorkflowBrowserContent = !activeBrowserFileResource && !activeBrowserToolResource && (
     Boolean(activeBrowserWorkflowResource)
@@ -3140,7 +3530,8 @@ export function App() {
     const knownSessionIds = new Set(data.sessions.map((item) => item.id));
     const validScopeIds = new Set([
       ...data.workspaces.map((item) => item.id),
-      ...data.sessions.filter((item) => item.scopeKind === "standalone").map((item) => item.id)
+      ...data.sessions.map((item) => item.id),
+      ...data.workflows.map((item) => item.id)
     ]);
     const next = reconcileWorkspaceBrowserTabs(workspaceBrowser, {
       maxTabs: pagePreferencesRef.current.maxTabs,
@@ -3180,11 +3571,16 @@ export function App() {
     });
     if (next !== workspaceBrowser) dispatchWorkspaceBrowser({ type: "replace", state: next });
   }, [data, workspaceBrowser]);
-  const taskFolders = useMemo(() => workspace?.taskFolders || [], [workspace?.taskFolders]);
-  const taskItems = useMemo<SidebarTaskItem[]>(() => [
-    ...sessions.map((task) => ({ kind: "chat" as const, task })),
-    ...workflows.map((task) => ({ kind: "workflow" as const, task }))
-  ].sort((a, b) => Number(Boolean(b.task.pinned)) - Number(Boolean(a.task.pinned)) || Date.parse(b.task.updatedAt) - Date.parse(a.task.updatedAt)), [sessions, workflows]);
+  const sidebarWorkspace = data?.workspaces.find((item) => item.id === sidebarWorkspaceFilter);
+  const workspaceNames = useMemo(() => Object.fromEntries((data?.workspaces || []).map((item) => [item.id, item.name])), [data?.workspaces]);
+  const taskFolders = useMemo(() => sidebarWorkspace?.taskFolders || [], [sidebarWorkspace?.taskFolders]);
+  useEffect(() => {
+    if (sidebarWorkspaceFilter && data && !data.workspaces.some((item) => item.id === sidebarWorkspaceFilter && !item.archivedAt)) setSidebarWorkspaceFilter("");
+  }, [data?.workspaces, sidebarWorkspaceFilter]);
+  const taskItems = useMemo<SidebarTaskItem[]>(() => {
+    const items: SidebarTaskRecord[] = [...sessions.map((task) => ({ kind: "chat" as const, task })), ...workflows.map((task) => ({ kind: "workflow" as const, task }))];
+    return groupSidebarTasks(items);
+  }, [sessions, workflows]);
   const normalizedSidebarQuery = useMemo(() => sidebarQuery.trim().toLocaleLowerCase(), [sidebarQuery]);
   const deferredSidebarQuery = useDeferredValue(normalizedSidebarQuery);
   const { visibleTaskItems, activeTaskShortcuts, pinnedTaskShortcuts, recentUnfiledTasks, folderTaskItems } = useMemo(() => {
@@ -3197,11 +3593,12 @@ export function App() {
 
     for (const item of taskItems) {
       const isActive = ACTIVE_TASK_STATUSES.has(item.task.status);
-      if (!deferredSidebarQuery || item.task.title.toLocaleLowerCase().includes(deferredSidebarQuery)) visible.push(item);
+      const records = item.group?.records || [item];
+      if (!deferredSidebarQuery || records.some((record) => `${record.task.title} ${workspaceNames[record.task.workspaceId] || "临时对话"}`.toLocaleLowerCase().includes(deferredSidebarQuery))) visible.push(item);
       if (isActive) active.push(item);
-      else if (item.task.pinned) pinned.push(item);
-      if (!item.task.pinned && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
-      if (item.task.folderId) byFolder.get(item.task.folderId)?.push(item);
+      else if (sidebarTaskIsPinned(item)) pinned.push(item);
+      if (!sidebarTaskIsPinned(item) && !isActive && (!item.task.folderId || !knownFolderIds.has(item.task.folderId))) recent.push(item);
+      if (item.task.folderId && !isActive && !sidebarTaskIsPinned(item)) byFolder.get(item.task.folderId)?.push(item);
     }
 
     return {
@@ -3211,9 +3608,9 @@ export function App() {
       recentUnfiledTasks: recent,
       folderTaskItems: byFolder
     };
-  }, [taskItems, taskFolders, deferredSidebarQuery]);
-  const archivedSessions = useMemo(() => (data?.sessions || []).filter((item) => (standaloneScope ? item.scopeKind === "standalone" : item.scopeKind !== "standalone" && item.workspaceId === activeWorkspaceId) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.sessions, activeWorkspaceId, standaloneScope]);
-  const archivedWorkflows = useMemo(() => (data?.workflows || []).filter((item) => item.workspaceId === activeWorkspaceId && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.workflows, activeWorkspaceId]);
+  }, [taskItems, taskFolders, deferredSidebarQuery, workspaceNames]);
+  const archivedSessions = useMemo(() => (data?.sessions || []).filter((item) => (!sidebarWorkspaceFilter || item.scopeKind !== "standalone" && item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.sessions, sidebarWorkspaceFilter]);
+  const archivedWorkflows = useMemo(() => (data?.workflows || []).filter((item) => (!sidebarWorkspaceFilter || item.workspaceId === sidebarWorkspaceFilter) && item.archivedAt).sort((a, b) => Date.parse(b.archivedAt || "") - Date.parse(a.archivedAt || "")), [data?.workflows, sidebarWorkspaceFilter]);
   const archivedTasks = useMemo<SidebarTaskItem[]>(() => [
     ...archivedSessions.map((task) => ({ kind: "chat" as const, task })),
     ...archivedWorkflows.map((task) => ({ kind: "workflow" as const, task }))
@@ -3222,7 +3619,7 @@ export function App() {
   const activeCapabilityProfile = useMemo(() => data?.capabilityProfiles?.find((profile) => profile.id === activeCapabilityProfileId) || null, [data?.capabilityProfiles, activeCapabilityProfileId]);
   const currentExecutionMode: ExecutionMode = activeSession?.scopeKind === "standalone"
     ? activeSession.standaloneExecutionMode || "native"
-    : workspace?.agentExecutionMode || ((skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "auto" || skillPolicies[BUILTIN_DELEGATION_SKILL_NAME] === "always") ? "collaborative" : "native");
+    : workspace?.agentExecutionMode || "native";
   const recentCapabilityProfiles = useMemo(() => [...(data?.capabilityProfiles || [])].sort((left, right) => (right.lastUsedAt || right.updatedAt).localeCompare(left.lastUsedAt || left.updatedAt)).slice(0, 4), [data?.capabilityProfiles]);
   const applyCapabilityProfile = async (profileId: string | null, savedProfile?: CapabilityProfile) => {
     if (activeSession?.scopeKind === "standalone") {
@@ -3304,12 +3701,20 @@ export function App() {
       <button type="button" onClick={async () => { const name = window.prompt("修改工作区名称", item.name)?.trim(); if (name && name !== item.name) await updateWorkspaceMetadata(item.id, { name }); }}><Pencil size={14} />重命名</button>
     </div></details>
   </div>;
+  const renderProjectMenu = (item: Workspace) => <div className="sidebar-project-actions"><button type="button" className="sidebar-project-create" aria-label={`新建对话：${item.name}`} title="新建对话" onClick={() => createSession(item.id)}><Plus size={15} /></button><ActionMenu className="sidebar-project-menu" label={`项目设置：${item.name}`}>
+    <button type="button" onClick={() => createSession(item.id)}><MessageSquarePlus size={14} />新建对话</button>
+    <button type="button" onClick={() => { setSidebarWorkspaceFilter((current) => current === item.id ? "" : item.id); }}><FileSearch size={14} />{sidebarWorkspaceFilter === item.id ? "全部任务" : "只看此项目"}</button>
+    <button type="button" onClick={() => void openWorkspace(item.id).catch((error) => setNotice(error.message))}><FolderOpen size={14} />打开项目</button>
+    <button type="button" onClick={() => void createTaskFolder(item.id)}><Folder size={14} />新建任务文件夹</button>
+    <button type="button" onClick={() => void updateWorkspaceMetadata(item.id, { pinned: !item.pinned }).catch((error) => setNotice(error.message))}><Pin size={14} />{item.pinned ? "取消置顶" : "置顶项目"}</button>
+    <button type="button" onClick={async () => { const name = window.prompt("修改项目名称", item.name)?.trim(); if (name && name !== item.name) await updateWorkspaceMetadata(item.id, { name }).catch((error) => setNotice(error.message)); }}><Pencil size={14} />重命名</button>
+    <button type="button" onClick={() => void updateWorkspaceMetadata(item.id, { archived: true }).catch((error) => setNotice(error.message))}><Archive size={14} />归档项目</button>
+  </ActionMenu></div>;
 
   const resetTaskViewState = () => {
     cancelFilePreviewRequest();
     setFollowOutput(true);
     setAgentDrawerMessageId("");
-    setTokenDetailsOpen(false);
     setHistoryLoad(null);
     setHistoryPageLoading(false);
     setEditingMessageId("");
@@ -3359,7 +3764,7 @@ export function App() {
     if (window.innerWidth <= 720 && source !== "scope") setSidebarOpen(false);
   };
 
-  const navigateToSession = async (id: string, source: SessionNavigationSource = "task"): Promise<boolean> => {
+  const navigateToSession = async (id: string, source: SessionNavigationSource = "task", refreshedSummary?: SessionSummary): Promise<boolean> => {
     const previousSelection = {
       session: activeSession,
       standaloneScope,
@@ -3380,7 +3785,7 @@ export function App() {
       return true;
     }
 
-    const summary = data?.sessions.find((item) => item.id === id);
+    const summary = refreshedSummary?.id === id ? refreshedSummary : data?.sessions.find((item) => item.id === id);
     if (!summary) {
       sessionCacheRef.current.delete(id);
       setNotice("任务不存在或已被移除");
@@ -3712,16 +4117,21 @@ export function App() {
     }
   };
 
-  const createSession = () => {
+  const createSession = (workspaceId = "") => {
     cancelSessionNavigation();
     setPendingNewTaskPrompt("");
     setPendingNewTaskSkills([]);
     setPendingNewTaskAttachments([]);
     setDraftAttachments([]);
+    setNewTaskWorkspaceId(workspaceId);
     setDialog("task-mode");
   };
 
-  const openWorkflowDraft = async () => {
+  const openWorkflowDraft = async (workspaceId = activeWorkspaceId) => {
+    if (!workspaceId) throw new Error("任务编排需要选择工作区");
+    setActiveWorkspaceId(workspaceId);
+    sessionStorage.setItem(ACTIVE_WORKSPACE_KEY, workspaceId);
+    activateStandaloneScope(false);
     activateTaskKind("workflow-draft");
     dispatchWorkspaceBrowser({ type: "deactivate" });
     previewActivationRef.current = "";
@@ -3735,25 +4145,30 @@ export function App() {
     setView("chat");
   };
 
-  const createWorkflow = async (plannerEngine: EngineName, workflowPrompt: string, maxConcurrentAgents: number | null) => {
+  const createWorkflow = async (plannerEngine: EngineName, workflowPrompt: string, maxConcurrentAgents: number | null, options: { executionTarget?: "workspace" | "isolated" | "worktree"; hostSessionId?: string; taskContextId?: string } = {}) => {
     if (!activeWorkspaceId || !workflowPrompt.trim()) throw new Error("请输入完整任务");
-    const created = await api<WorkflowSummary>("/api/workflows", { method: "POST", body: JSON.stringify({ workspaceId: activeWorkspaceId, prompt: workflowPrompt.trim(), plannerEngine, maxConcurrentAgents }) });
-    activateTaskKind("workflow");
-    setActiveSession(null);
-    setActiveWorkflowId(created.id);
-    setWorkflowDraftOpen(false);
-    rememberWorkflow(activeWorkspaceId, created.id);
-    setDialog(null);
-    setView("chat");
-    dispatchWorkspaceBrowser({
-      type: "open",
-      input: {
-        resource: { kind: "workflow", workflowId: created.id, workspaceId: activeWorkspaceId },
-        title: created.title || "工作流",
-        detail: data?.workspaces.find((item) => item.id === activeWorkspaceId)?.name || "工作区",
-        mode: "regular"
-      }
-    });
+    const workspaceId = activeWorkspaceId;
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    const created = await api<WorkflowSummary>("/api/workflows", { method: "POST", body: JSON.stringify({ workspaceId, prompt: workflowPrompt.trim(), plannerEngine, maxConcurrentAgents, ...options }) });
+    setData((current) => current ? { ...current, workflows: [...current.workflows.filter((workflow) => workflow.id !== created.id), created] } : current);
+    if (!options.hostSessionId && selectionGeneration === taskSelectionGenerationRef.current) {
+      activateTaskKind("workflow");
+      setActiveSession(null);
+      setActiveWorkflowId(created.id);
+      setWorkflowDraftOpen(false);
+      rememberWorkflow(workspaceId, created.id);
+      setDialog(null);
+      setView("chat");
+      dispatchWorkspaceBrowser({
+        type: "open",
+        input: {
+          resource: { kind: "workflow", workflowId: created.id, workspaceId },
+          title: created.title || "工作流",
+          detail: data?.workspaces.find((item) => item.id === workspaceId)?.name || "工作区",
+          mode: "regular"
+        }
+      });
+    }
     await refresh();
     setNotice("任务已创建，规划 Agent 正在分析", "success");
     void api(`/api/workflows/${encodeURIComponent(created.id)}/plan`, { method: "POST" })
@@ -3762,12 +4177,28 @@ export function App() {
     return created;
   };
 
-  const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone") => {
-    if (scopeKind === "workspace" && !activeWorkspaceId) throw new Error("请先选择工作区");
+  const continueTaskConversation = async (id: string) => {
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    const navigation = await refreshNavigation(true);
+    // React has not necessarily committed setData yet. Use this response's
+    // admitted summary when a mode switch has just created the conversation.
+    if (selectionGeneration === taskSelectionGenerationRef.current) await navigateToSession(id, "task", navigation.sessions.find((session) => session.id === id));
+  };
+  const startTaskOrchestration = async (taskContextId: string, goal: string) => {
+    if (!activeSession || activeSession.scopeKind === "standalone") throw new Error("请先为任务指定项目工作区");
+    if (!goal.trim()) return;
+    const sessionId = activeSession.id;
+    const selectionGeneration = taskSelectionGenerationRef.current;
+    const created = await createWorkflow(activeSession.engine, goal, null, { hostSessionId: sessionId, taskContextId });
+    if (selectionGeneration === taskSelectionGenerationRef.current) setTaskWorkflowLink({ sessionId, workflowId: created.id });
+  };
+
+  const createSessionForEngine = async (engine: EngineName, scopeKind: "workspace" | "standalone", targetWorkspaceId: string) => {
+    if (scopeKind === "workspace" && !targetWorkspaceId) throw new Error("请先选择工作区");
     const initialPrompt = pendingNewTaskPrompt.trim();
     const initialSkills = pendingNewTaskSkills;
     const initialAttachments = pendingNewTaskAttachments;
-    const scopeKey = scopeKind === "standalone" ? "__standalone__" : activeWorkspaceId;
+    const scopeKey = scopeKind === "standalone" ? "__standalone__" : targetWorkspaceId;
     const creationRequest: PendingSessionCreation = {
       requestId: `session-create:${crypto.randomUUID()}`,
       scopeKey,
@@ -3800,7 +4231,7 @@ export function App() {
       createdSession = await api<Session>(`/api/sessions?messageLimit=${MESSAGE_INITIAL_RENDER}`, {
         method: "POST",
         body: JSON.stringify({
-          workspaceId: scopeKind === "workspace" ? activeWorkspaceId : undefined,
+          workspaceId: scopeKind === "workspace" ? targetWorkspaceId : undefined,
           scopeKind,
           engine,
           skillPolicies: scopeKind === "standalone" ? skillPolicies : undefined,
@@ -3857,9 +4288,7 @@ export function App() {
       if (!createdSession) {
         setPrompt(initialPrompt);
         setDraftAttachments(initialAttachments);
-        setDialog(null);
-        setView("chat");
-        setNotice(error instanceof Error ? error.message : String(error));
+        throw error;
       } else {
         setNotice(`新任务已保留，但后续处理未完成：${error instanceof Error ? error.message : String(error)}`, "warning");
       }
@@ -3876,10 +4305,12 @@ export function App() {
     const key = deletionTaskKey("session", id);
     if (deletingTaskIds.has(key)) return;
     const policy = deletionPolicyFor("session", target || activeSession || ({ id, status: "idle" } as SessionSummary));
-    const subject = target?.scopeKind === "standalone" ? "临时任务" : "任务";
+    const subject = `对话记录「${target?.title || activeSession?.title || "未命名对话"}」`;
+    const hasLinkedRecords = target?.taskContextId && (data?.sessions.some((session) => session.id !== id && session.taskContextId === target.taskContextId) || data?.workflows.some((workflow) => workflow.taskContextId === target.taskContextId));
+    const preservation = `工作区文件不会被删除。${hasLinkedRecords ? "同一任务中的其他对话和编排记录会保留。" : ""}`;
     const message = policy.requiresTermination
-      ? `${policy.reason || "任务仍在运行或暂停中"}。继续后会先停止主任务和子 Agent，再将${subject}移入回收站。工作区文件不会被删除。`
-      : `将这个${subject}移入回收站？工作区文件不会被删除。`;
+      ? `${policy.reason || "任务仍在运行或暂停中"}。继续后会先停止此对话和子 Agent，再将${subject}移入回收站。${preservation}`
+      : `将${subject}移入回收站？${preservation}`;
     if (!await confirmAction(message, {
       title: policy.requiresTermination ? "停止并删除任务" : "删除任务",
       confirmLabel: policy.requiresTermination ? "停止并删除" : "移入回收站",
@@ -3889,6 +4320,7 @@ export function App() {
     try {
       await api(`/api/sessions/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
       if (pendingCreatedSessionRef.current?.sessionId === id) pendingCreatedSessionRef.current = null;
+      setTaskWorkflowLink((current) => current?.sessionId === id ? null : current);
       setData((current) => current ? { ...current, sessions: current.sessions.filter((session) => session.id !== id) } : current);
       forgetSession(id);
       const tabId = workspaceBrowserResourceKey({
@@ -3929,9 +4361,12 @@ export function App() {
     const key = deletionTaskKey("workflow", id);
     if (deletingTaskIds.has(key)) return;
     const policy = deletionPolicyFor("workflow", target || ({ id, status: "draft" } as WorkflowSummary));
+    const subject = `编排记录「${target?.title || "未命名编排"}」`;
+    const hasLinkedRecords = target?.taskContextId && (data?.sessions.some((session) => session.taskContextId === target.taskContextId) || data?.workflows.some((workflow) => workflow.id !== id && workflow.taskContextId === target.taskContextId));
+    const preservation = `成果和已有文件不会被删除。${hasLinkedRecords ? "同一任务中的其他对话和编排记录会保留。" : ""}`;
     const message = policy.requiresTermination
-      ? `${policy.reason || "任务编排仍在执行或暂停中"}。继续后会取消未完成节点，等待全部 Agent 退出，再删除任务记录。成果目录和已有文件不会被删除。`
-      : "删除这个编排任务记录？成果目录和已有文件不会被删除。";
+      ? `${policy.reason || "任务编排仍在执行或暂停中"}。继续后会取消此编排未完成的节点，等待其 Agent 退出，再删除${subject}。${preservation}`
+      : `删除${subject}？${preservation}`;
     if (!await confirmAction(message, {
       title: policy.requiresTermination ? "取消并删除编排任务" : "删除编排任务",
       confirmLabel: policy.requiresTermination ? "取消并删除" : "确认删除",
@@ -3940,6 +4375,7 @@ export function App() {
     setDeletingTaskIds((current) => new Set(current).add(key));
     try {
       await api(`/api/workflows/${encodeURIComponent(id)}${policy.requiresTermination ? "?terminate=1" : ""}`, { method: "DELETE", timeoutMs: 90_000 });
+      setTaskWorkflowLink((current) => current?.workflowId === id ? null : current);
       setData((current) => current ? { ...current, workflows: current.workflows.filter((workflow) => workflow.id !== id) } : current);
       const tabId = workspaceBrowserResourceKey({ kind: "workflow", workflowId: id, ...(target?.workspaceId ? { workspaceId: target.workspaceId } : {}) });
       const hadTab = workspaceBrowserRef.current.tabs.some((tab) => tab.id === tabId);
@@ -3960,32 +4396,32 @@ export function App() {
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
 
-  const createTaskFolder = useCallback(async () => {
-    if (!activeWorkspaceId) return;
+  const createTaskFolder = useCallback(async (workspaceId = sidebarWorkspaceFilter) => {
+    if (!workspaceId) return;
     const name = window.prompt("新建任务文件夹")?.trim();
     if (!name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders`, { method: "POST", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setSessionAreaMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
-  }, [activeWorkspaceId, setNotice]);
+  }, [sidebarWorkspaceFilter, setNotice]);
 
-  const renameTaskFolder = async (folder: TaskFolder) => {
+  const renameTaskFolder = async (workspaceId: string, folder: TaskFolder) => {
     const name = window.prompt("重命名任务文件夹", folder.name)?.trim();
     if (!name || name === folder.name) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "PUT", body: JSON.stringify({ name }) });
       setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
 
-  const deleteTaskFolder = async (folder: TaskFolder) => {
+  const deleteTaskFolder = async (workspaceId: string, folder: TaskFolder) => {
     if (!await confirmAction(`删除任务文件夹「${folder.name}」？\n其中的任务会移回最近任务，不会被删除。`, { destructive: true })) return;
     try {
-      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
-      setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
+      const result = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/task-folders/${encodeURIComponent(folder.id)}`, { method: "DELETE" });
+      setData((current) => current ? { ...current, workspaces: current.workspaces.map((item) => item.id === result.workspace.id ? result.workspace : item), sessions: current.sessions.map((item) => item.workspaceId === result.workspace.id && item.folderId === folder.id ? { ...item, folderId: null } : item), workflows: current.workflows.map((item) => item.workspaceId === result.workspace.id && item.folderId === folder.id ? { ...item, folderId: null } : item) } : current);
       setTaskFolderMenu(null);
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
@@ -4015,6 +4451,7 @@ export function App() {
     if (!text && !drafts.length) return;
     await agentConfigSaveRef.current;
     if (!activeSession) {
+      setNewTaskWorkspaceId("");
       setPendingNewTaskPrompt(text);
       setPendingNewTaskSkills(explicitSkills);
       setPendingNewTaskAttachments(drafts);
@@ -4300,7 +4737,7 @@ export function App() {
     previewRequestTabIdRef.current = tabId;
     dispatchWorkspaceBrowser({ type: "update-presentation", tabId, patch: { status: "loading" } });
     const url = `/api/workspaces/${encodeURIComponent(resource.workspaceId)}/file?path=${encodeURIComponent(resource.path)}`;
-    let workspaceRoot = data?.workspaces.find((item) => item.id === resource.workspaceId)?.root || "";
+    let workspaceRoot = fileScopeRoot(resource.workspaceId, data);
     try {
       let file: PreviewFile;
       if (kind === "pdf" || kind === "image") {
@@ -4370,7 +4807,10 @@ export function App() {
   };
 
   const openFilePreviewPath = async (relativePath: string) => {
-    const normalized = relativePath.replaceAll("/", "\\");
+    const absolute = /^(?:file:|[a-zA-Z]:[\\/]|[\\/])/i.test(relativePath);
+    const previewPath = absolute ? workspaceRelativePath(relativePath, activeFileScopeRoot) : relativePath;
+    if (!previewPath) throw new Error("文件链接不属于当前任务的执行目录");
+    const normalized = previewPath.replaceAll("/", "\\");
     const name = normalized.split("\\").filter(Boolean).at(-1) || normalized;
     await openFilePreview({ name, path: normalized, type: "file" });
   };
@@ -4455,7 +4895,8 @@ export function App() {
         ? data.workflows.some((item) => item.id === resource.workflowId)
         : resource.kind === "file"
           ? data.workspaces.some((item) => item.id === resource.workspaceId)
-            || data.sessions.some((item) => item.scopeKind === "standalone" && item.id === resource.workspaceId)
+            || data.sessions.some((item) => item.id === resource.workspaceId)
+            || data.workflows.some((item) => item.id === resource.workspaceId)
           : true;
     if (!available) return;
     workspaceBrowserHydratedRef.current = true;
@@ -4662,7 +5103,9 @@ export function App() {
     () => locallyHiddenMessageCount > 0 ? activeMessages.slice(-messageRenderLimit) : activeMessages,
     [activeMessages, locallyHiddenMessageCount, messageRenderLimit]
   );
-  const displayMessages = useMemo(() => groupMessages(visibleMessages), [visibleMessages]);
+  const displayMessages = useMemo(() => {
+    return groupMessages(groupAdjacentWorkflowHandoffs(visibleMessages));
+  }, [visibleMessages]);
   const agentDrawerMessage = useMemo(
     () => activeSession?.messages.find((message) => message.id === agentDrawerMessageId && message.role === "event") || null,
     [activeSession?.messages, agentDrawerMessageId]
@@ -4794,8 +5237,16 @@ export function App() {
 
   const agentProviders = data.agentProviders || [];
   const sidebarVisible = sidebarOpen && view === "chat";
-  const inspectorVisible = inspectorOpen && view === "chat" && !activeBrowserToolResource;
+  const inspectorPinned = inspectorOpen && view === "chat" && !activeBrowserToolResource;
+  const inspectorVisible = inspectorPinned;
   const workspaceBrowserVisible = view === "chat" && workspaceBrowser.tabs.length > 0;
+  const activeConversationWorkflowId = displayedSession
+    ? linkedWorkflowId({
+      ...displayedSession,
+      taskContextId: displayedSession.taskContextId || data.sessions.find((session) => session.id === displayedSession.id)?.taskContextId,
+      executionRoot: displayedSession.executionRoot || data.sessions.find((session) => session.id === displayedSession.id)?.executionRoot
+    }, data.workflows, taskWorkflowLink)
+    : "";
   const displayedDeletionKind = displayedWorkflowId ? "workflow" : displayedSession ? "session" : null;
   const displayedDeletionId = displayedWorkflowId || displayedSession?.id || "";
   const displayedDeletionTarget = displayedDeletionKind === "workflow"
@@ -4807,38 +5258,38 @@ export function App() {
   const displayedDeletionBusy = displayedDeletionKind
     ? deletingTaskIds.has(deletionTaskKey(displayedDeletionKind, displayedDeletionId))
     : false;
+  const displayedDeleteLabel = displayedDeletionPolicy?.requiresTermination
+    ? displayedDeletionKind === "workflow" ? "取消并删除任务" : "停止并删除任务"
+    : "删除任务";
 
   return (
     <div
-      className={`app-shell ${sidebarVisible ? "" : "sidebar-collapsed"} ${inspectorVisible ? "" : "inspector-collapsed"} ${resizingPane ? "is-resizing" : ""} ${navigationPending ? "navigation-pending" : ""}`}
-      style={{ "--sidebar-width": sidebarVisible ? `${layoutWidths.sidebar}px` : "0px", "--inspector-width": inspectorVisible ? `${layoutWidths.inspector}px` : "0px" } as React.CSSProperties}
+      className={`app-shell ${sidebarVisible ? "" : "sidebar-collapsed"} ${inspectorPinned ? "" : "inspector-collapsed"} ${resizingPane ? "is-resizing" : ""} ${navigationPending ? "navigation-pending" : ""}`}
+      style={{ "--sidebar-width": sidebarVisible ? `${layoutWidths.sidebar}px` : "0px", "--inspector-width": inspectorPinned ? `${layoutWidths.inspector}px` : "0px" } as React.CSSProperties}
     >
       <nav className="activity-rail" aria-label="工作台导航">
         <button type="button" className="activity-brand" title="返回 Meta Code 工作台" aria-label="返回 Meta Code 工作台" onClick={() => { cancelSessionNavigation(); setView("chat"); }}><ProductLogo variant="mark" /></button>
         <div className="activity-primary">
-          <button type="button" className={sidebarOpen && sidebarSection === "tasks" && !standaloneActive ? "active" : ""} aria-label="任务" title="工作区任务" onClick={() => openTaskScope("workspace")}><MessagesSquare size={20} /></button>
-          <button type="button" className={sidebarOpen && sidebarSection === "tasks" && standaloneActive ? "active" : ""} aria-label="临时任务" title="临时任务" onClick={() => openTaskScope("standalone")}><Clock3 size={19} /></button>
-          <button type="button" className={sidebarOpen && sidebarSection === "workspaces" ? "active" : ""} aria-label="工作区" title="工作区" onClick={() => showSidebarSection("workspaces")}><FolderOpen size={20} /></button>
+          <button type="button" className={sidebarOpen && sidebarSection === "tasks" ? "active" : ""} aria-label="任务" title="全部任务" onClick={() => showSidebarSection("tasks")}><MessagesSquare size={20} /></button>
+          <button type="button" aria-label="新任务" title="新任务" onClick={() => createSession()}><MessageSquarePlus size={20} /></button>
         </div>
         <div className="activity-secondary">
           <button type="button" className={view === "agents" ? "active" : ""} aria-label="Skill 中心" title="Skill 中心" onClick={() => { cancelSessionNavigation(); setView("agents"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Sparkles size={19} /></button>
           <button type="button" className={view === "mcp" ? "active" : ""} aria-label="MCP" title="MCP" onClick={() => { cancelSessionNavigation(); setView("mcp"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><Plug size={19} /></button>
           <button type="button" className={view === "git" ? "active" : ""} aria-label="版本管理" title="版本管理" onClick={() => { cancelSessionNavigation(); setView("git"); if (window.innerWidth <= 720) setSidebarOpen(false); }}><GitBranch size={19} /></button>
-          <button type="button" className={view === "settings" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
+          <button type="button" className={view === "settings" && settingsTarget === "plugins" ? "active" : ""} aria-label="工作台插件" title="工作台插件" onClick={openPluginSettings}><Puzzle size={19} /></button>
+          <button type="button" className={view === "settings" && settingsTarget !== "plugins" ? "active" : ""} aria-label="设置" title="设置" onClick={() => openModelSettings(settingsProvider)}><Settings size={19} /></button>
         </div>
       </nav>
       <aside className="sidebar">
         <header className="sidebar-pane-header">
-          <span><strong>{sidebarSection === "tasks" ? standaloneActive ? "临时任务" : "任务" : "工作区"}</strong><small>{sidebarSection === "tasks" ? standaloneActive ? "不绑定项目目录" : workspace?.name || "尚未选择工作区" : `${activeWorkspaces.length} 个可用工作区`}</small></span>
+          <span><strong>任务</strong></span>
           <IconButton label="收起导航面板" onClick={() => setSidebarOpen(false)}><PanelLeftClose size={16} /></IconButton>
         </header>
-        {sidebarSection === "tasks" ? <>
-          {!standaloneActive && <div className="sidebar-workspace-row">
-            <button type="button" className="sidebar-workspace-current" onClick={() => showSidebarSection("workspaces")} title={workspace?.root || "选择工作区"}><FolderOpen size={15} /><span><strong>{workspace?.name || "选择工作区"}</strong><small>{workspace?.root || "添加工作区后开始"}</small></span><ChevronRight size={14} /></button>
-            <IconButton label="添加工作区" onClick={() => setDialog("workspace")}><Plus size={15} /></IconButton>
-          </div>}
-          <div className="sidebar-task-actions"><button className="new-task" onClick={createSession}><MessageSquarePlus size={16} /><span>新任务</span></button></div>
-          <label className="sidebar-search"><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />{sidebarQuery && <button type="button" aria-label="清除搜索" onClick={() => setSidebarQuery("")}><X size={13} /></button>}</label>
+        <>
+          <div className="sidebar-task-actions"><button className="new-task" onClick={() => createSession()}><MessageSquarePlus size={16} /><span>新任务</span></button></div>
+          <div className="sidebar-toolbar"><label className={`sidebar-search ${sidebarQuery ? "has-query" : ""}`}><Search size={14} /><input value={sidebarQuery} onChange={(event) => setSidebarQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />{sidebarQuery && <button type="button" aria-label="清除搜索" onClick={() => setSidebarQuery("")}><X size={13} /></button>}</label><IconButton label="添加项目" onClick={() => setDialog("workspace")}><FolderOpen size={15} /></IconButton></div>
+          {sidebarWorkspaceFilter && <button type="button" className="sidebar-filter-reset" onClick={() => setSidebarWorkspaceFilter("")}><ArrowLeft size={12} />全部任务</button>}
           <SidebarTaskList
             query={deferredSidebarQuery}
             visibleTaskItems={visibleTaskItems}
@@ -4849,14 +5300,17 @@ export function App() {
             archivedTasks={archivedTasks}
             taskFolders={taskFolders}
             taskCount={taskItems.length}
-            standaloneActive={standaloneActive}
+            standaloneActive={!sidebarWorkspaceFilter}
             visible={sidebarVisible && sidebarSection === "tasks"}
             searchStale={normalizedSidebarQuery !== deferredSidebarQuery}
-            scopeKey={standaloneActive ? "__standalone__" : activeWorkspaceId}
+            scopeKey={sidebarWorkspaceFilter || "__all_tasks__"}
             activeChatId={activeBrowserConversationResource?.conversationId || navigationSummary?.id || activeSession?.id || ""}
             activeWorkflowId={activeWorkflowId}
             delegationEnabled={delegationEnabled}
             providerControls={data.providerControls}
+            workspaceNames={workspaceNames}
+            projects={[...pinnedWorkspaces, ...recentWorkspaces].filter((item) => !sidebarWorkspaceFilter || item.id === sidebarWorkspaceFilter)}
+            renderProjectMenu={renderProjectMenu}
             onSelect={handleSidebarTaskSelection}
             onPrefetch={scheduleSessionPrefetch}
             onCancelPrefetch={cancelSessionPrefetch}
@@ -4865,87 +5319,57 @@ export function App() {
             onOpenFolderContextMenu={openSidebarTaskFolderMenu}
             onCreateFolder={createTaskFolder}
           />
-        </> : <div className="workspace-panel">
-          <div className="workspace-panel-actions"><button type="button" className="primary" onClick={() => setDialog("workspace")}><Plus size={15} />添加工作区</button></div>
-          <div className="workspace-panel-list">
-            {pinnedWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>置顶</span><small>{pinnedWorkspaces.length}</small></div>{pinnedWorkspaces.map(renderWorkspaceItem)}</section>}
-            {recentWorkspaces.length > 0 && <section><div className="sidebar-section-heading"><span>最近使用</span><small>{recentWorkspaces.length}</small></div>{recentWorkspaces.map(renderWorkspaceItem)}</section>}
-            {archivedWorkspaces.length > 0 && <section className="workspace-archive-section"><button type="button" className="workspace-archive-toggle" aria-expanded={workspaceArchiveOpen} onClick={() => setWorkspaceArchiveOpen((value) => !value)}><Archive size={13} /><span>已归档</span><small>{archivedWorkspaces.length}</small><ChevronRight size={13} /></button>{workspaceArchiveOpen && <div className="workspace-archive-items">{archivedWorkspaces.map(renderWorkspaceItem)}</div>}</section>}
-            {data.workspaces.length === 0 && <div className="sidebar-empty-state"><FolderOpen size={20} /><strong>还没有工作区</strong><small>添加本地文件夹后开始</small></div>}
-          </div>
-        </div>}
+          {archivedWorkspaces.length > 0 && <details className="sidebar-archived-projects"><summary><Archive size={12} />已归档项目</summary>{archivedWorkspaces.map(renderWorkspaceItem)}</details>}
+        </>
       </aside>
       {!navigationPending && sessionContextMenu && (() => {
         const session = data.sessions.find((item) => item.id === sessionContextMenu.id);
         const workflow = data.workflows.find((item) => item.id === sessionContextMenu.id);
         const task = session || workflow;
+        const taskFolders = data.workspaces.find((item) => item.id === task?.workspaceId)?.taskFolders || [];
         if (!task) return null;
         const isWorkflow = Boolean(workflow);
         const isStandaloneTask = Boolean(session?.scopeKind === "standalone");
-        const cannotArchive = session ? session.status === "running" || session.status === "paused" : ["queued", "running", "integrating"].includes(workflow!.status);
+        const cannotArchive = session ? session.status === "running" || session.status === "paused" : ["planning", "queued", "running", "integrating"].includes(workflow!.status);
         const deletionKind = isWorkflow ? "workflow" : "session";
         const deletionPolicy = deletionPolicyFor(deletionKind, task);
         const deletionBusy = deletingTaskIds.has(deletionTaskKey(deletionKind, task.id));
+        const recordLabel = isWorkflow ? "编排记录" : "对话记录";
+        const groupedTask = taskItems.find((item) => item.group?.records.some((record) => record.task.id === task.id));
+        const currentRecord: SidebarTaskRecord = workflow ? { kind: "workflow", task: workflow } : { kind: "chat", task: session! };
+        const pinnedRecords = task.archivedAt ? [] : sidebarTaskPinnedRecords<SidebarTaskRecord>(groupedTask || currentRecord);
+        const pinnedRecordLabel = (record: SidebarTaskRecord) => `${record.kind === "workflow" ? "编排" : "对话"}：${record.task.title}`;
+        const unpinRecord = (record: SidebarTaskRecord) => record.kind === "workflow" ? updateWorkflowMetadata(record.task.id, { pinned: false }) : updateSessionMetadata(record.task.id, { pinned: false });
         const updateMetadata = (body: { title?: string; pinned?: boolean; archived?: boolean; folderId?: string | null }) => isWorkflow ? updateWorkflowMetadata(task.id, body) : updateSessionMetadata(task.id, body);
         return <><button type="button" className="session-context-dismiss" aria-label="关闭任务菜单" onClick={() => setSessionContextMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionContextMenu.x, top: sessionContextMenu.y }}>
-          {!task.archivedAt && <button type="button" onClick={() => void updateMetadata({ pinned: !task.pinned })}><Pin size={14} />{task.pinned ? "取消置顶" : "置顶任务"}</button>}
-          <button type="button" onClick={() => { const title = window.prompt("修改任务名称", task.title)?.trim(); if (title && title !== task.title) void updateMetadata({ title }); }}><Pencil size={14} />重命名</button>
-          <button type="button" onClick={() => isWorkflow ? void openWorkflowFolder(task.id) : void openSessionFolder(task.id, "workspace")}><FolderOpen size={14} />{isWorkflow || isStandaloneTask ? "打开任务文件夹" : "打开工作区"}</button>
-          {!isStandaloneTask && <details><summary><Folder size={14} />移动到文件夹<ChevronRight size={13} /></summary><div className="session-folder-submenu">
+          <div className="session-context-record"><span>{recordLabel}</span><strong title={task.title}>{task.title}</strong>{(groupedTask?.group?.records.length || 0) > 1 && <small>归档和删除仅针对此记录</small>}</div>
+          {!task.archivedAt && (pinnedRecords.length > 1 ? <details><summary><Pin size={14} />取消置顶<ChevronRight size={13} /></summary><div className="session-folder-submenu session-pin-submenu">{pinnedRecords.map((record) => <button type="button" key={`${record.kind}:${record.task.id}`} title={pinnedRecordLabel(record)} onClick={() => void unpinRecord(record)}>{pinnedRecordLabel(record)}</button>)}</div></details> : pinnedRecords.length === 1 ? <button type="button" title={`取消置顶 ${pinnedRecordLabel(pinnedRecords[0])}`} onClick={() => void unpinRecord(pinnedRecords[0])}><Pin size={14} /><span className="session-context-target">取消置顶 · {pinnedRecordLabel(pinnedRecords[0])}</span></button> : <button type="button" onClick={() => void updateMetadata({ pinned: true })}><Pin size={14} />置顶此{recordLabel}</button>)}
+          <button type="button" onClick={() => { const title = window.prompt(`修改${recordLabel}名称`, task.title)?.trim(); if (title && title !== task.title) void updateMetadata({ title }); }}><Pencil size={14} />重命名此记录</button>
+          <button type="button" onClick={() => isWorkflow ? void openWorkflowFolder(task.id) : void openSessionFolder(task.id, "workspace")}><FolderOpen size={14} />{isStandaloneTask ? "打开任务文件夹" : "打开工作目录"}</button>
+          {!isStandaloneTask && <details><summary title={groupedTask?.group?.mixedFolders ? "关联记录位于不同文件夹；只移动当前记录" : undefined}><Folder size={14} />移动此记录<ChevronRight size={13} /></summary><div className="session-folder-submenu">
             {taskFolders.map((folder) => <button type="button" key={folder.id} onClick={() => void updateMetadata({ folderId: folder.id })}>{folder.name}</button>)}
             {task.folderId && <button type="button" onClick={() => void updateMetadata({ folderId: null })}>移出文件夹</button>}
             {!taskFolders.length && <span className="session-folder-empty">暂无文件夹</span>}
           </div></details>}
-          <button type="button" disabled={cannotArchive} title={cannotArchive ? "执行中的任务不能归档" : ""} onClick={() => void updateMetadata({ archived: !task.archivedAt })}>{task.archivedAt ? <ArchiveRestore size={14} /> : <Archive size={14} />}{task.archivedAt ? "恢复任务" : "归档任务"}</button>
-          <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || ""} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除" : "停止并删除" : "删除任务"}</button>
+          <button type="button" disabled={!task.archivedAt && cannotArchive} title={!task.archivedAt && cannotArchive ? "执行中的记录不能归档" : ""} onClick={() => void updateMetadata({ archived: !task.archivedAt })}>{task.archivedAt ? <ArchiveRestore size={14} /> : <Archive size={14} />}{task.archivedAt ? "恢复此记录" : "归档此记录"}</button>
+          <button type="button" className="danger" disabled={deletionBusy} title={deletionPolicy.reason || `删除${recordLabel}：${task.title}`} onClick={() => { setSessionContextMenu(null); isWorkflow ? void deleteWorkflow(task.id) : void deleteSession(task.id); }}>{deletionBusy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deletionPolicy.requiresTermination ? isWorkflow ? "取消并删除此记录" : "停止并删除此记录" : "删除此记录"}</button>
         </div></>;
       })()}
-      {!navigationPending && sessionAreaMenu && !standaloneActive && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
-      {!navigationPending && taskFolderMenu && (() => { const folder = taskFolders.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
+      {!navigationPending && sessionAreaMenu && sidebarWorkspaceFilter && <><button type="button" className="session-context-dismiss" aria-label="关闭任务区菜单" onClick={() => setSessionAreaMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: sessionAreaMenu.x, top: sessionAreaMenu.y }}><button type="button" onClick={() => void createTaskFolder()}><Folder size={14} />新建任务文件夹</button></div></>}
+      {!navigationPending && taskFolderMenu && (() => { const { workspaceId } = taskFolderMenu; const folder = data.workspaces.find((item) => item.id === workspaceId)?.taskFolders?.find((item) => item.id === taskFolderMenu.id); if (!folder) return null; return <><button type="button" className="session-context-dismiss" aria-label="关闭文件夹菜单" onClick={() => setTaskFolderMenu(null)} /><div className="session-context-menu" role="menu" style={{ left: taskFolderMenu.x, top: taskFolderMenu.y }}><button type="button" onClick={() => void renameTaskFolder(workspaceId, folder)}><Pencil size={14} />重命名文件夹</button><button type="button" className="danger" onClick={() => void deleteTaskFolder(workspaceId, folder)}><Trash2 size={14} />删除文件夹</button></div></>; })()}
       {sidebarVisible && <button className="mobile-sidebar-backdrop" aria-label="关闭侧栏" onClick={() => setSidebarOpen(false)} />}
       {sidebarVisible && <button className="pane-resizer pane-resizer-sidebar" type="button" role="separator" aria-label="调整任务区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.sidebar} onPointerDown={(event) => beginPaneResize("sidebar", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("sidebar")} onKeyDown={(event) => handlePaneResizeKeyDown("sidebar", event)}><GripVertical size={14} /></button>}
 
-      <main className={`main-panel ${workspaceBrowserVisible ? "has-workspace-browser-tabs" : ""}`} aria-busy={navigationPending}>
-        <header className="topbar">
+      <main className="main-panel" aria-busy={navigationPending}>
+        <header className={`topbar ${view === "chat" ? "topbar-browser-layout" : ""}`}>
+          <div className="topbar-title">
           {view !== "chat" && <IconButton label="返回任务" onClick={() => setView("chat")}><ArrowLeft size={18} /></IconButton>}
           <div className="title-block">
             <strong>{view === "chat" ? activeWorkspaceBrowserTab?.title || (workflowDraftOpen ? "Meta 任务编排" : activeWorkflowId ? data.workflows.find((item) => item.id === activeWorkflowId)?.title : activeSession?.title) || "新任务" : view === "agents" ? "Skill 中心" : view === "mcp" ? "MCP" : view === "git" ? "版本管理" : "设置"}</strong>
-            <span>{view === "chat" && activeWorkspaceBrowserTab?.detail ? activeWorkspaceBrowserTab.detail : workspace?.root || "请添加一个工作区"}</span>
           </div>
-          {displayedSession?.status === "running" && <div className="run-status"><LoaderCircle className="spin" size={13} />执行中</div>}
-          {!navigationPending && displayedSession?.status === "paused" && <div className="run-status paused"><Pause size={13} />已暂停</div>}
-          {!navigationPending && displayedSession && (
-            <div className="token-status-wrap">
-              <button
-                type="button"
-                className={`token-status ${displayedSession.usageSource === "pending" ? "pending" : ""}`}
-                title="查看任务 Token 明细"
-                onClick={() => setTokenDetailsOpen((value) => !value)}
-              >
-                <Gauge size={13} />
-                <span>{displayedSession.usageSource === "pending" && displayedSession.status === "running" ? "统计中" : `${formatTokens(displayedTokens)} tokens`}</span>
-                <i>总计</i>
-              </button>
-              {tokenDetailsOpen && (
-                <section className="token-details">
-                  <header><strong>任务 Token</strong><span>{usageLabel}</span></header>
-                  <div className="token-detail-total"><span>全部线程</span><strong>{displayedTokens.toLocaleString()}</strong></div>
-                  <div><span>主线程</span><strong>{mainTokens.toLocaleString()}</strong></div>
-                  <div><span>子 Agent（{usageSummary.agentCount}）</span><strong>{agentTokens.toLocaleString()}</strong></div>
-                  <div><span>输入 / 输出</span><strong>{usageSummary.total.input_tokens.toLocaleString()} / {usageSummary.total.output_tokens.toLocaleString()}</strong></div>
-                  <div><span>缓存输入</span><strong>{usageSummary.total.cached_input_tokens.toLocaleString()}</strong></div>
-                  <div><span>推理输出</span><strong>{usageSummary.total.reasoning_output_tokens.toLocaleString()}</strong></div>
-                  <p>总计仅为输入 + 输出；缓存和推理是其中的明细，不会重复相加。</p>
-                </section>
-              )}
-            </div>
-          )}
-          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || data.settings.defaultEngine} onSelect={openModelSettings} />}
-          {view === "chat" && !navigationPending && (displayedSession || displayedWorkflowId) && <IconButton disabled={displayedDeletionBusy} label={displayedDeletionPolicy?.requiresTermination ? displayedDeletionKind === "workflow" ? "取消并删除当前编排任务" : "停止并删除当前任务" : "删除当前任务"} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}</IconButton>}
-          <ThemeToggle />
-          {view === "chat" && !activeBrowserToolResource && <IconButton label={inspectorOpen ? "关闭检查器" : "打开检查器"} onClick={() => setInspectorOpen((value) => !value)}><Menu size={18} /></IconButton>}
-        </header>
-
+          </div>
+          <div className="topbar-pages">
+          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && <TaskModeBar workflowSummaries={data.workflows} sessionId={displayedSession?.id} workflowId={displayedWorkflowId || undefined} engine={displayedSession?.engine || data.workflows.find((item) => item.id === displayedWorkflowId)?.plannerEngine || fallbackEngine} defaultGoal={displayedSession ? [...displayedSession.messages].reverse().find((message) => message.role === "user")?.text || displayedSession.title : ""} enabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)} onConversation={(id) => void continueTaskConversation(id).catch((error) => setNotice(error.message))} onWorkflow={selectWorkflow} onCreateWorkflow={startTaskOrchestration} onError={setNotice} />}
         {workspaceBrowserVisible && <WorkspaceBrowserTabs
           tabs={workspaceBrowser.tabs}
           conversationProviders={browserConversationProviders}
@@ -4960,7 +5384,29 @@ export function App() {
           onMove={(tabId, targetIndex) => dispatchWorkspaceBrowser({ type: "move", tabId, targetIndex })}
           onPinnedChange={(tabId, pinned) => dispatchWorkspaceBrowser({ type: "set-pinned", tabId, pinned })}
           onReopenLastClosed={() => dispatchWorkspaceBrowser({ type: "reopen-last-closed" })}
+          onReturnToConversation={() => {
+            const current = workspaceBrowserRef.current;
+            const conversation = current.tabs.find((tab) => tab.resource.kind === "conversation" && tab.resource.conversationId === activeSession?.id)
+              || [...current.tabs].reverse().find((tab) => tab.resource.kind === "conversation");
+            if (conversation) activateWorkspaceBrowserTab(conversation.id);
+            else if (activeSession) void navigateToSession(activeSession.id, "task");
+            else { dispatchWorkspaceBrowser({ type: "deactivate" }); setPreviewFile(null); setView("chat"); }
+          }}
         />}
+          </div>
+          <div className="topbar-actions">
+          {displayedSession?.status === "running" && <div className="run-status" title="执行中" aria-label="执行中"><LoaderCircle className="spin" size={13} /><span>执行中</span></div>}
+          {!navigationPending && displayedSession?.status === "paused" && <div className="run-status paused" title="已暂停" aria-label="已暂停"><Pause size={13} /><span>已暂停</span></div>}
+          {view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && !showWorkflowBrowserContent && <ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} />}
+          {view === "chat" && !activeBrowserToolResource && <button ref={filePanelTriggerRef} type="button" className={`icon-button task-file-trigger ${inspectorOpen ? "active" : ""}`} title={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-label={inspectorOpen ? "关闭任务文件区" : "查看任务文件"} aria-expanded={inspectorVisible} aria-controls="task-file-panel" onClick={() => setInspectorOpen((value) => !value)}><FolderOpen size={17} /></button>}
+          {view === "chat" && !navigationPending && displayedDeletionKind && <button type="button" className="icon-button task-delete-trigger" disabled={displayedDeletionBusy} title={displayedDeleteLabel} aria-label={displayedDeleteLabel} onClick={() => displayedWorkflowId ? void deleteWorkflow(displayedWorkflowId) : displayedSession ? void deleteSession(displayedSession.id) : undefined}>{displayedDeletionBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button>}
+          <ActionMenu className="task-more-menu" label="任务详情与更多操作">
+              {!navigationPending && displayedSession && data.providerControls.find((control) => control.providerId === displayedSession.engine)?.capabilities.execution.interactiveTerminal && <button type="button" onClick={() => setNativeTerminalTask({ id: displayedSession.id, title: displayedSession.title, provider: displayedSession.engine })}><TerminalSquare size={14} />原生终端</button>}
+              {!navigationPending && displayedSession && <section className="task-usage-details"><header><Gauge size={14} /><strong>任务 Token</strong><span>{usageLabel}</span></header><dl><div><dt>全部线程</dt><dd>{displayedTokens.toLocaleString()}</dd></div><div><dt>主线程</dt><dd>{mainTokens.toLocaleString()}</dd></div><div><dt>子 Agent（{usageSummary.agentCount}）</dt><dd>{agentTokens.toLocaleString()}</dd></div><div><dt>输入／输出</dt><dd>{usageSummary.total.input_tokens.toLocaleString()} / {usageSummary.total.output_tokens.toLocaleString()}</dd></div><div><dt>缓存输入</dt><dd>{usageSummary.total.cached_input_tokens.toLocaleString()}</dd></div><div><dt>推理输出</dt><dd>{usageSummary.total.reasoning_output_tokens.toLocaleString()}</dd></div></dl></section>}
+              <div className="mobile-provider-summary"><ConnectedProviderShowcase items={data.providerControls} activeProvider={displayedSession?.engine || fallbackEngine} onSelect={openModelSettings} /></div>
+          </ActionMenu>
+          </div>
+        </header>
 
         {view === "chat" && activeBrowserFileResource && (
           <section className="workspace-browser-preview" aria-label={`预览 ${activeWorkspaceBrowserTab?.title || activeBrowserFileResource.path}`}>
@@ -5009,8 +5455,10 @@ export function App() {
           </section>
         )}
 
-        {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={data.settings.defaultEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeWorkspaceId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
+          {view === "chat" && showWorkflowBrowserContent ? <WorkflowWorkbench enabled={data.plugins.some((plugin) => plugin.enabled && plugin.capabilities.includes("workflow.execution"))} onOpenPluginSettings={openPluginSettings} key={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || `draft:${activeWorkspaceId}`} workflowId={activeBrowserWorkflowResource?.workflowId || activeWorkflowId || undefined} defaultPlannerEngine={fallbackEngine} runtime={data.runtime} providers={agentProviders} workspaceId={activeWorkspaceId} renderAgentMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />} onCreate={createWorkflow} onOpenWorkflow={selectWorkflow} onOpenLocalFile={(path) => void openFilePreviewPath(path)} onChanged={refresh} onNotice={setNotice} /> : view === "chat" && !activeBrowserFileResource && !activeBrowserToolResource && (!activeBrowserConversationResource || Boolean(displayedSession)) && (
           <section className="chat-view">
+            {displayedSession && activeConversationWorkflowId && <CompactWorkflowProgress enabled={data.plugins.some((plugin) => plugin.enabled && plugin.capabilities.includes("workflow.maintenance"))} onOpenPluginSettings={openPluginSettings} workflowId={activeConversationWorkflowId} onOpen={() => selectWorkflow(activeConversationWorkflowId)} onContinueConversation={() => composerRef.current?.focus()} />}
+            <SubagentActivityRail key={activeSession?.id || "draft"} messages={activeMessages} providerControls={data.providerControls} onOpenAgent={setAgentDrawerMessageId} />
             <div
               className="messages"
               ref={messagesRef}
@@ -5097,6 +5545,22 @@ export function App() {
                         onAnswerQuestion={answerClaudeQuestion}
                       />
                     ) : (() => {
+                      if (isWorkflowHandoffMessage(message)) {
+                        const sourceKind = workflowHandoffSourceKind(message);
+                        const sourceWorkflowId = sourceKind === "session" ? "" : handoffWorkflowId(workflowHandoffSourceId(message), {
+                          taskContextId: activeSession?.taskContextId || data.sessions.find((session) => session.id === activeSession?.id)?.taskContextId,
+                          executionRoot: activeSession?.executionRoot || data.sessions.find((session) => session.id === activeSession?.id)?.executionRoot
+                        }, data.workflows);
+                        return <HandoffCard
+                          key={message.id}
+                          text={message.text}
+                          history={message.handoffHistory}
+                          sourceKind={sourceKind}
+                          dataMessageId={message.id}
+                          workflowId={sourceWorkflowId || undefined}
+                          onOpenWorkflow={sourceWorkflowId ? () => selectWorkflow(sourceWorkflowId) : undefined}
+                        />;
+                      }
                       if (message.role === "assistant") return <AssistantReply
                         text={message.text}
                         avatar={<Bot size={17} />}
@@ -5108,7 +5572,7 @@ export function App() {
                           if (target?.closest("button, a, input, textarea, summary")) return;
                           setTouchActionMessageId((current) => current === message.id ? "" : message.id);
                         }}
-                        renderMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={workspace?.root || ""} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
+                        renderMessage={(text) => <MarkdownBody text={text} workspaceId={activeFileScopeId} workspaceRoot={activeFileScopeRoot} onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} />}
                         actions={<AssistantMessageActions text={message.text} branching={branching} onBranch={() => void branchFromAssistantMessage(message.id)} onError={(error) => setNotice(`复制失败：${error instanceof Error ? error.message : String(error)}`)} />}
                       ><AttachmentList attachments={message.attachments} onOpen={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))} /></AssistantReply>;
                       const editing = message.role === "user" && editingMessageId === message.id;
@@ -5151,7 +5615,7 @@ export function App() {
                   </div>;
                 })}
               </div>
-              {running && <div className="working-line"><LoaderCircle className="spin" size={16} />智能体正在工作</div>}
+              {running && <AgentWorkProgress status="running" className="working-line" />}
               <div />
             </div>
             {!navigationPending && !followOutput && (
@@ -5262,6 +5726,7 @@ export function App() {
                   <button type="button" className="attachment-button composer-control-button icon-only" onClick={() => attachmentInputRef.current?.click()} disabled={!activeFileScopeId || uploadingAttachments || submittingInput || navigationPending} title="添加附件"><Paperclip size={15} /></button>
                   <ComposerPreferenceSelect label="项目权限" value={data.settings.sandboxMode} icon={<ShieldCheck size={14} />} options={[{ value: "danger-full-access", label: "完全访问" }, { value: "workspace-write", label: "仅工作区" }, { value: "read-only", label: "只读" }]} onChange={(sandboxMode) => updateExecutionSetting({ sandboxMode })} />
                   <ComposerPreferenceSelect label="联网模式" value={data.settings.webSearch} icon={<Globe2 size={14} />} options={[{ value: "live", label: "实时联网" }, { value: "cached", label: "缓存搜索" }, { value: "disabled", label: "关闭联网" }]} onChange={(webSearch) => updateExecutionSetting({ webSearch })} />
+                  {activeSession && ["codex", "claude"].includes(activeSession.engine) && <NativeConversationControls key={activeSession.id} sessionId={activeSession.id} provider={activeSession.engine} running={running} collaborative={currentExecutionMode === "collaborative"} request={api} onChanged={() => void refresh()} onFork={(branch: Session) => { setData(current => current ? { ...current, sessions: [branch, ...current.sessions.filter(s => s.id !== branch.id)] } : current); rememberSession(branch.scopeKind === "standalone" ? "__standalone__" : branch.workspaceId, branch.id); commitSessionSelection(branch, "task"); setNotice("已创建原生历史分支", "success"); }} />}
                   <CapabilityProfileControl
                     open={skillQuickConfigOpen}
                     activeProfileId={activeCapabilityProfileId}
@@ -5275,12 +5740,13 @@ export function App() {
                     onManage={() => { setSkillQuickConfigOpen(false); setView("agents"); }}
                   />
                   <ComposerRuntimeControl
-                    provider={activeSession?.engine || data.settings.defaultEngine}
-                    descriptor={agentProviders.find((provider) => provider.id === (activeSession?.engine || data.settings.defaultEngine))}
-                    control={data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))}
+                    provider={activeSession?.engine || fallbackEngine}
+                    descriptor={agentProviders.find((provider) => provider.id === (activeSession?.engine || fallbackEngine))}
+                    control={data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))}
                     sessionId={activeSession?.id}
-                    model={data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))?.configuration.model || ""}
-                    effort={String(data.providerControls.find((control) => control.providerId === (activeSession?.engine || data.settings.defaultEngine))?.configuration.reasoningValue ?? "")}
+                    model={data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.model || ""}
+                    effort={String(data.providerControls.find((control) => control.providerId === (activeSession?.engine || fallbackEngine))?.configuration.reasoningValue ?? "")}
+                    collaborationEnabled={data.plugins.some((plugin) => plugin.id === "collaboration" && plugin.enabled)}
                     executionMode={currentExecutionMode}
                     loadModels={loadComposerModels}
                     onModelChange={saveComposerModel}
@@ -5326,7 +5792,7 @@ export function App() {
                 sessionId={activeSession.id}
                 sessionRunning={running}
                 workspaceId={activeFileScopeId}
-                workspaceRoot={workspace?.root || ""}
+                workspaceRoot={activeFileScopeRoot}
                 providerControls={data.providerControls}
                 onOpenLocalFile={(path) => openFilePreviewPath(path).catch((error) => setNotice(error.message))}
                 onClose={() => setAgentDrawerMessageId("")}
@@ -5353,7 +5819,9 @@ export function App() {
         {view === "mcp" && <McpView servers={data.mcpServers || []} workspaces={data.workspaces} activeWorkspaceId={activeWorkspaceId} onChanged={refresh} onNotice={setNotice} />}
         {view === "git" && <GitWorkbench workspaceId={activeWorkspaceId} />}
         {view === "settings" && <RecoverableSectionBoundary resetKey={`${settingsTarget}:${settingsProvider}`} title="设置页面暂时无法显示"><SettingsView
+          plugins={data.plugins}
           initialSection={settingsTarget}
+          onSectionChange={setSettingsTarget}
           settings={data.settings}
           dataHome={data.runtime.dataHome}
           codexHome={data.runtime.codexHome}
@@ -5367,7 +5835,7 @@ export function App() {
           onSettingsChanged={(settings) => setData((current) => current ? {
             ...current,
             settings,
-            providerControls: current.providerControls.map((control) => ({ ...control, isDefault: control.providerId === settings.defaultEngine }))
+            providerControls: current.providerControls
           } : current)}
           onResetTabs={async () => {
             if (!await confirmAction("关闭全部工作区页面？任务、文件和对话不会被删除。")) return;
@@ -5388,33 +5856,36 @@ export function App() {
         )}
       </main>
 
-      {inspectorVisible && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => setInspectorOpen(false)} />}
-      {inspectorVisible && (
-        <aside className={`inspector ${navigationPending ? "navigation-pending" : ""}`} aria-busy={navigationPending}>
+      {nativeTerminalTask && <Suspense fallback={<div className="preview-state"><LoaderCircle className="spin" size={18} />正在加载原生终端</div>}><NativeTerminalPanel key={nativeTerminalTask.id} sessionId={nativeTerminalTask.id} title={nativeTerminalTask.title} provider={nativeTerminalTask.provider} request={api} onClose={() => setNativeTerminalTask(null)} /></Suspense>}
+
+      {inspectorPinned && <button type="button" className="mobile-inspector-backdrop" aria-label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); }} />}
+        <aside id="task-file-panel" className={`inspector ${navigationPending ? "navigation-pending" : ""}`} hidden={!inspectorVisible} inert={!inspectorVisible || undefined} aria-label="任务文件" aria-busy={navigationPending} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFilePanel(); } }}>
           <div className="inspector-header">
             <span>
-              <strong>{fileScopeStandalone ? "临时目录" : "工作区"}</strong>
-              <small>{treeLoading ? "正在读取" : `${workspaceTreeNodeCount(tree)} 项 · ${treeUpdatedAt ? `${treeUpdatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} 更新` : "尚未读取"}`}</small>
+              <strong title={fileScopeWorkspace?.name}>{fileScopeStandalone ? "临时目录" : "文件"}</strong>
+              <small title={treeUpdatedAt ? `目录已刷新：${treeUpdatedAt.toLocaleString()}` : "尚未读取"}>{treeUpdatedAt ? `${treeUpdatedAt.toDateString() === new Date().toDateString() ? "" : `${treeUpdatedAt.toLocaleDateString([], { month: "short", day: "numeric" })} `}${treeUpdatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "尚未读取"}</small>
             </span>
             <span className="inspector-header-actions">
-              {fileScopeWorkspace && <button type="button" className="agents-file-button" onClick={openAgents} title="编辑 AGENTS.md" aria-label="编辑 AGENTS.md"><FileCode2 size={15} /></button>}
-              <IconButton label="在文件管理器中打开工作区" disabled={!activeFileScopeId} onClick={() => openWorkspaceFolder()}><FolderOpen size={15} /></IconButton>
               <IconButton label="刷新文件" disabled={!activeFileScopeId || treeLoading} onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>
                 <RefreshCw className={treeLoading ? "spin" : undefined} size={15} />
               </IconButton>
-              <IconButton label="关闭文件区" onClick={() => setInspectorOpen(false)}><X size={15} /></IconButton>
+              <IconButton label="搜索文件" disabled={!activeFileScopeId} onClick={() => { setTreeSearchOpen(true); requestAnimationFrame(() => treeSearchRef.current?.focus()); }}><Search size={15} /></IconButton>
+              <ActionMenu className="file-more-menu" label="文件区更多操作" ownerId="task-file-panel">{fileScopeWorkspace && <button type="button" aria-label="编辑 AGENTS.md" onClick={openAgents}><FileCode2 size={14} />项目指令</button>}<button type="button" disabled={!activeFileScopeId} onClick={() => openWorkspaceFolder()}><FolderOpen size={14} />在文件管理器中打开</button></ActionMenu>
+              <IconButton label="关闭文件区" onClick={() => { setInspectorOpen(false); filePanelTriggerRef.current?.focus(); }}><X size={15} /></IconButton>
             </span>
           </div>
-          <label className="tree-search">
+          <label className={`tree-search ${treeSearchOpen || treeQuery ? "is-expanded" : ""}`}>
             <Search size={14} aria-hidden="true" />
-            <input value={treeQuery} onChange={(event) => setTreeQuery(event.target.value)} placeholder="搜索文件和目录" aria-label="搜索文件和目录" />
+            <input ref={treeSearchRef} value={treeQuery} onFocus={() => setTreeSearchOpen(true)} onBlur={() => { if (!treeQuery) setTreeSearchOpen(false); }} onChange={(event) => setTreeQuery(event.target.value)} placeholder="搜索文件和目录" aria-label="搜索文件和目录" />
             {treeQuery && <button type="button" aria-label="清除文件搜索" onClick={() => setTreeQuery("")}><X size={13} /></button>}
           </label>
           {treeError && <div className="tree-error"><span>{treeError}</span><button type="button" onClick={() => void loadWorkspaceTree(activeFileScopeId, { force: true })}>重试</button></div>}
-          {treeHasVisibleItems ? <RecoverableSectionBoundary resetKey={`${activeFileScopeId}:${treeUpdatedAt?.getTime() || 0}`} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary> : <p className="empty-note">{treeLoading ? "正在读取工作区文件" : treeQuery ? "没有匹配的文件" : "没有可显示的文件"}</p>}
+          {treeQuery.trim() && inspectorVisible && <WorkspaceFileSearch workspaceId={activeFileScopeId} query={treeQuery} search={searchWorkspaceFileList} loadedTree={tree} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={(node) => void openFilePreview(node)} />}
+          {treeQuery.trim() && treeHasVisibleDirectories && <small className="tree-local-label">已加载目录</small>}
+          <div className="persistent-file-tree"><RecoverableSectionBoundary resetKey={activeFileScopeId} title="文件列表暂时无法显示"><WorkspaceFileTree workspaceId={activeFileScopeId} nodes={treeQuery.trim() ? tree.filter((node) => node.type === "directory") : tree} query={treeQuery} selectedPath={activeBrowserFileResource?.workspaceId === activeFileScopeId ? activeBrowserFileResource.path : undefined} onFileOpen={openFilePreview} onDirectoryOpen={loadWorkspaceDirectory} onMove={moveWorkspaceFiles} onCopyPaths={copyWorkspacePaths} onDelete={deleteWorkspaceFiles} /></RecoverableSectionBoundary></div>
+          {!treeHasVisibleItems && !treeQuery.trim() && <p className="empty-note">{treeLoading ? "正在读取工作区文件" : "没有可显示的文件"}</p>}
         </aside>
-      )}
-      {inspectorVisible && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
+      {inspectorPinned && <button className="pane-resizer pane-resizer-inspector" type="button" role="separator" aria-label="调整文件区宽度" aria-valuemin={LAYOUT_MIN_WIDTH} aria-valuemax={LAYOUT_MAX_WIDTH} aria-valuenow={layoutWidths.inspector} onPointerDown={(event) => beginPaneResize("inspector", event)} onPointerMove={movePaneResize} onPointerUp={endPaneResize} onPointerCancel={endPaneResize} onDoubleClick={() => resetPaneWidth("inspector")} onKeyDown={(event) => handlePaneResizeKeyDown("inspector", event)}><GripVertical size={14} /></button>}
 
       {dialog === "workspace" && <WorkspaceDialog onClose={() => setDialog(null)} onCreated={async (item) => {
         await refresh();
@@ -5422,11 +5893,13 @@ export function App() {
         setDialog(null);
       }} />}
       {dialog === "task-mode" && <TaskEngineDialog
+        initialWorkspaceId={newTaskWorkspaceId}
+        orchestrationEnabled={data.plugins.some((plugin) => plugin.id === "orchestration" && plugin.enabled)}
         runtime={data.runtime}
         providers={agentProviders}
         providerControls={data.providerControls}
-        defaultEngine={data.settings.defaultEngine}
-        hasWorkspace={Boolean(activeWorkspaceId)}
+        workspaces={activeWorkspaces}
+        onWorkspaceAdded={(item) => setData((current) => current ? { ...current, workspaces: [...current.workspaces.filter((workspace) => workspace.id !== item.id), item] } : current)}
         onClose={() => { setPendingNewTaskPrompt(""); setPendingNewTaskSkills([]); setDialog(null); }}
         onSelect={createSessionForEngine}
         onSelectWorkflow={openWorkflowDraft}
@@ -5523,51 +5996,30 @@ function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; onCreate
   </Dialog>;
 }
 
-function TaskEngineDialog({ runtime, providers, providerControls, defaultEngine, hasWorkspace, onClose, onSelect, onSelectWorkflow }: { runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; defaultEngine: EngineName; hasWorkspace: boolean; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone") => Promise<void>; onSelectWorkflow: () => Promise<void> }) {
-  const engines = providers.filter((provider) => provider.capabilities.sessions.create).map((provider) => ({
-    engine: provider.id,
-    title: provider.shortName,
-    description: provider.description,
-    detail: provider.capabilities.delegation.nativeSubagents
-      ? "原生模式保留 CLI 自身的 Agent 能力；协作模式使用工作台统一委派。"
-      : "协作模式通过工作台统一委派；不假定该 CLI 具备原生子 Agent。"
-  }));
+function TaskEngineDialog({ initialWorkspaceId, orchestrationEnabled, runtime, providers, providerControls, workspaces, onWorkspaceAdded, onClose, onSelect, onSelectWorkflow }: { initialWorkspaceId: string; orchestrationEnabled: boolean; runtime: Bootstrap["runtime"]; providers: AgentProviderDescriptor[]; providerControls: ProviderControlSnapshot[]; workspaces: Workspace[]; onWorkspaceAdded: (workspace: Workspace) => void; onClose: () => void; onSelect: (engine: EngineName, scopeKind: "workspace" | "standalone", workspaceId: string) => Promise<void>; onSelectWorkflow: (workspaceId: string) => Promise<void> }) {
   const engineReady = (engine: EngineName) => {
     const control = providerControls.find((candidate) => candidate.providerId === engine);
     return control ? control.operations.setDefault : Boolean(runtime.providers[engine]?.available);
   };
-  const initialEngine = engineReady(defaultEngine) ? defaultEngine : engines.find((item) => engineReady(item.engine))?.engine || defaultEngine;
-  const [selected, setSelected] = useState<EngineName | "workflow">(initialEngine);
-  const [scopeKind, setScopeKind] = useState<"workspace" | "standalone">(hasWorkspace ? "workspace" : "standalone");
+  // Project actions may explicitly target a workspace; generic tasks stay temporary.
+  const [selected, setSelected] = useState<EngineName | "">("");
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspaceId);
+  const [taskKind, setTaskKind] = useState<"conversation" | "workflow">("conversation");
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const workflowReady = providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
-  const selectedAvailable = selected === "workflow" ? scopeKind === "workspace" && workflowReady : engineReady(selected);
-  const taskTypes = [...engines.map((item) => ({ ...item, engine: item.engine as EngineName | "workflow" })), { engine: "workflow" as const, title: "Meta 任务编排", description: "先规划审批，再并行调度多个子 Agent", detail: "适合可拆分的大任务；会在当前工作区创建独立任务文件夹。" }];
-  return <Dialog title="新建任务" onClose={busy ? () => undefined : onClose}>
-    <div className="task-mode-intro-row"><p className="task-mode-intro">普通任务选择对话协议；Meta 编排会先生成计划并等待审批。</p><HelpButton topic="workspace-scope" /></div>
-    <div className="task-scope-control" role="group" aria-label="任务位置">
-      <button type="button" className={scopeKind === "standalone" ? "selected" : ""} onClick={() => { setScopeKind("standalone"); if (selected === "workflow") setSelected(initialEngine); }}>临时任务</button>
-      <button type="button" className={scopeKind === "workspace" ? "selected" : ""} disabled={!hasWorkspace} onClick={() => setScopeKind("workspace")}>当前工作区</button>
-    </div>
-    <div className="task-mode-grid">
-      {taskTypes.map((item) => {
-        if (item.engine === "workflow") return <button type="button" key="workflow" className={`task-mode-card ${selected === "workflow" ? "selected" : ""}`} disabled={busy || scopeKind === "standalone" || !workflowReady} title={scopeKind === "standalone" ? "任务编排需要真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : undefined} onClick={() => setSelected("workflow")}><span className="task-mode-icon"><Route size={19} /></span><span><strong>{item.title}</strong><small>{item.description}</small><p>{scopeKind === "standalone" ? "任务编排需要选择真实工作区" : !workflowReady ? "请先连接支持规划的 Agent" : item.detail}</p></span><i>{workflowReady && selected === "workflow" ? <Check size={15} /> : !workflowReady ? "不可用" : null}</i></button>;
-        const control = providerControls.find((candidate) => candidate.providerId === item.engine);
-        const available = engineReady(item.engine);
-        return <button type="button" key={item.engine} className={`task-mode-card ${selected === item.engine ? "selected" : ""}`} disabled={!available || busy} onClick={() => setSelected(item.engine)}>
-          <span className="task-mode-icon"><ProviderIcon provider={item.engine} icon={control?.identity.icon} accent={control?.identity.accent} size={21} /></span>
-          <span><strong>{item.title}</strong><small>{control?.identity.transport === "acp" ? "ACP 标准接入" : "原生增强"} · {item.description}</small><p>{available ? control?.identity.transport === "acp" && !control.capabilities.tools.shell ? "支持原生任务；该 Agent 未声明终端能力，因此不开放工作台协作模式。" : item.detail : providerMainAgentUnavailableReason(control)}</p></span>
-          <i>{available ? selected === item.engine ? <Check size={15} /> : null : "不可用"}</i>
-        </button>;
-      })}
-    </div>
-    {error && <p className="form-error">{error}</p>}
+  const scopeKind = workspaceId ? "workspace" : "standalone";
+  const workflowReady = orchestrationEnabled && providers.some((provider) => provider.capabilities.workflow.planner && engineReady(provider.id));
+  const selectedAvailable = taskKind === "workflow" ? Boolean(workspaceId) && workflowReady : Boolean(selected) && engineReady(selected);
+  if (addingWorkspace) return <WorkspaceDialog onClose={() => setAddingWorkspace(false)} onCreated={(item) => { onWorkspaceAdded(item); setWorkspaceId(item.id); setAddingWorkspace(false); }} />;
+  return <Dialog title="新任务" className="task-launch-dialog" onClose={busy ? () => undefined : onClose}>
+    <TaskLaunchControls workspaces={workspaces} providers={providers} providerControls={providerControls} workspaceId={workspaceId} onWorkspaceChange={setWorkspaceId} selectedProvider={selected} onProviderChange={setSelected} taskKind={taskKind} onTaskKindChange={setTaskKind} engineReady={engineReady} workflowReady={workflowReady} busy={busy} onAddDirectory={() => setAddingWorkspace(true)} />
+    {error && <p className="form-error" role="alert">{error}</p>}
     <div className="dialog-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button type="button" className="primary" disabled={busy || !selectedAvailable} onClick={async () => {
       setBusy(true); setError("");
-      try { if (selected === "workflow") await onSelectWorkflow(); else await onSelect(selected, scopeKind); }
+      try { if (taskKind === "workflow") await onSelectWorkflow(workspaceId); else await onSelect(selected, scopeKind, workspaceId); }
       catch (err) { setError(err instanceof Error ? err.message : String(err)); setBusy(false); }
-    }}>{busy ? <LoaderCircle className="spin" size={16} /> : selected === "workflow" ? <Route size={16} /> : <Check size={16} />}{busy ? selected === "workflow" ? "正在准备画布" : "正在创建并确认任务" : selected === "workflow" ? "进入画布" : "创建任务"}</button></div>
+    }}>{busy ? <LoaderCircle className="spin" size={16} /> : taskKind === "workflow" ? <Route size={16} /> : <Plus size={16} />}{busy ? "正在准备任务" : taskKind === "workflow" ? "进入画布" : "创建任务"}</button></div>
   </Dialog>;
 }
 
@@ -6036,7 +6488,9 @@ function McpDialog({ server, workspaces, activeWorkspaceId, onClose, onDone }: {
 }
 
 function SettingsView({
+  plugins,
   initialSection,
+  onSectionChange,
   settings,
   dataHome,
   codexHome,
@@ -6055,7 +6509,9 @@ function SettingsView({
   onNotice,
   onChanged
 }: {
+  plugins: Bootstrap["plugins"];
   initialSection: SettingsSectionName;
+  onSectionChange: (section: SettingsSectionName) => void;
   settings: SettingsData;
   dataHome: string;
   codexHome: string;
@@ -6473,9 +6929,6 @@ function SettingsView({
     </section>;
   };
   const displayedRuntimeCatalog = runtimeCatalog.map((item) => ({ ...item, status: item.id === "claude" ? claudeRuntimeState : item.id === "codex" ? runtime : item.status }));
-  const selectedDefaultControl = providerControls.find((control) => control.providerId === form.defaultEngine);
-  const eligibleDefaultControls = providerControls.filter((control) => control.operations.setDefault);
-  const selectedDefaultEligible = eligibleDefaultControls.some((control) => control.providerId === form.defaultEngine);
   const claudeProviderControl = providerControls.find((control) => control.providerId === "claude");
   const codexProviderControl = providerControls.find((control) => control.providerId === "codex");
   const saveLabel = saveState === "saving" ? "保存中" : saveState === "saved" ? "已保存" : saveState === "error" ? "重试保存" : "保存设置";
@@ -6492,15 +6945,15 @@ function SettingsView({
     </div>
   </details>;
   return <section className="content-view settings-view">
-    <div className="section-heading settings-sticky-heading"><div><h1>设置</h1><p>管理 Agent、会话、页面、个人数据与软件版本。</p></div>{!(["updates", "sessions", "data"] as SettingsSectionName[]).includes(settingsSection) && <div className="settings-save-actions">{saveError && <span role="alert">{saveError}</span>}<button className="primary" disabled={saveState === "clean" || saveState === "saving"} onClick={() => void save()}>{saveState === "saving" ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saveLabel}</button></div>}</div>
+    <div className="section-heading settings-sticky-heading"><div><h1>设置</h1><p>管理 Agent、会话、页面、个人数据与软件版本。</p></div>{!(["updates", "sessions", "data", "plugins"] as SettingsSectionName[]).includes(settingsSection) && <div className="settings-save-actions">{saveError && <span role="alert">{saveError}</span>}<button className="primary" disabled={saveState === "clean" || saveState === "saving"} onClick={() => void save()}>{saveState === "saving" ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}{saveLabel}</button></div>}</div>
     <div className="settings-shell">
-    <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={setSettingsSection} onAgentPageChange={setAiSettingsPage} />
+    <SettingsNavigation value={settingsSection} agentPage={aiSettingsPage} onChange={(section) => { setSettingsSection(section); onSectionChange(section); }} onAgentPageChange={setAiSettingsPage} />
     <div className="settings-page-content">
+    {settingsSection === "plugins" && <PluginSettings plugins={plugins} request={api} onChanged={onChanged} />}
     {settingsSection === "sessions" && <RecoverableSectionBoundary resetKey={settingsSection} title="会话管理暂时无法显示"><Suspense fallback={<div className="session-management-loading"><LoaderCircle className="spin" size={20} />正在载入会话管理</div>}><SessionManagementView embedded request={api} onOpenSession={onOpenSession} onOpenWorkflow={onOpenWorkflow} onChanged={onChanged} onNotice={onNotice} /></Suspense></RecoverableSectionBoundary>}
     {settingsSection === "ai" && aiSettingsPage === "market" && <div className="settings-market-view"><AgentMarketSettings onNativeConfigure={(providerId, runtime) => { onProviderChange(providerId); setAiSettingsPage(runtime ? "runtime" : "providers"); }} /></div>}
     {settingsSection === "ai" && aiSettingsPage === "overview" && <div className="settings-section settings-agent-overview">
-      <div className="settings-page-heading"><h2>Agent 总览</h2><p>设置默认主脑，并查看所有已连接 Agent 的运行状态。</p></div>
-      <div className="settings-default-engine"><div><strong>默认主脑</strong><span>新任务默认使用的 Agent；任务内仍可随时切换，协作模式由工作区 Skill 管理。</span>{selectedDefaultControl && !selectedDefaultEligible && <small>{selectedDefaultControl.connection.message}</small>}</div><select value={form.defaultEngine} onChange={(event) => update("defaultEngine", event.target.value)}>{selectedDefaultControl && !selectedDefaultEligible && <option value={selectedDefaultControl.providerId} disabled>{selectedDefaultControl.identity.shortName}（待连接）</option>}{eligibleDefaultControls.map((control) => <option key={control.providerId} value={control.providerId}>{control.identity.shortName}</option>)}</select></div>
+      <div className="settings-page-heading"><h2>Agent 总览</h2><p>查看已连接 Agent 的运行状态；创建任务时会由你明确选择 Claude、Codex 或其他可用 Agent。</p></div>
       <div className="settings-provider-overview-grid">{providerControls.map((control) => <button type="button" key={control.providerId} className={`settings-provider-summary ${providerTab === control.providerId ? "focused" : ""}`} onClick={() => { onProviderChange(control.providerId); setAiSettingsPage("providers"); }}><ProviderIcon provider={control.providerId} icon={control.identity.icon} accent={control.identity.accent} size={24} /><span><strong>{control.identity.shortName}</strong><small>{control.lifecycle.version || "未检测版本"} · {control.identity.transport === "native" ? "原生增强" : "ACP"}</small></span><i className={control.connection.status === "ready" ? "ready" : "attention"}>{control.connection.status === "ready" ? "已连接" : control.connection.status === "checking" ? "检测中" : control.connection.status === "attention" ? "待配置" : "不可用"}</i></button>)}</div>
     </div>}
     {settingsSection === "ai" && aiSettingsPage === "providers" && <div id="native-provider-settings" className="settings-section settings-ai-models">

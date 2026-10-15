@@ -160,8 +160,23 @@ async function install(options) {
 }
 
 async function create(options) {
-  const specPath = path.resolve(String(options.spec || ""));
-  const spec = JSON.parse(await fsp.readFile(specPath, "utf8"));
+  if (options.stdin && options.spec) throw new Error("--stdin 和 --spec 不能同时使用");
+  let source;
+  if (options.stdin) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of process.stdin) {
+      size += chunk.length;
+      if (size > 2 * 1024 * 1024) throw new Error("Skill 规格不能超过 2 MB");
+      chunks.push(chunk);
+    }
+    source = Buffer.concat(chunks).toString("utf8");
+  } else {
+    if (!options.spec) throw new Error("请使用 --stdin 或 --spec 提供 Skill 规格");
+    source = await fsp.readFile(path.resolve(String(options.spec)), "utf8");
+  }
+  const spec = JSON.parse(source);
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Skill 规格必须是 JSON 对象");
   const name = skillName(spec.name);
   const description = String(spec.description || "").trim();
   const instructions = String(spec.instructions || "").trim();

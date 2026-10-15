@@ -1,14 +1,16 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { ArrowDown } from "lucide-react";
 import type { useAgentOutputFollow } from "./AgentConversation";
 
 /** Shared shell; each caller retains its own execution state and controls. */
-export function AgentDrawer({ title, header, navigation, followOutput, children, className = "", onClose }: {
+export function AgentDrawer({ title, header, navigation, followOutput, children, className = "", contentLabel, onClose }: {
   title: string;
   header: ReactNode;
   navigation?: ReactNode;
   followOutput: ReturnType<typeof useAgentOutputFollow>;
   children: ReactNode;
   className?: string;
+  contentLabel?: string;
   onClose: () => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
@@ -19,7 +21,7 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
   }, []);
   return <div className="agent-drawer-backdrop" onMouseDown={onClose}>
     <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`${title}日志`} className={`agent-drawer ${className}`} onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
-      if (event.key === "Escape") { event.stopPropagation(); onClose(); }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (event.key !== "Tab") return;
       const targets = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input, textarea, select, summary, [tabindex="0"]')).filter((element) => element.getClientRects().length);
       const first = targets[0];
@@ -30,7 +32,10 @@ export function AgentDrawer({ title, header, navigation, followOutput, children,
     }}>
       {header}
       <div className="agent-drawer-navigation">{navigation}</div>
-      <div className="agent-drawer-body" ref={followOutput.containerRef} onScroll={followOutput.onScroll}>
+      {!followOutput.following && followOutput.pendingCount > 0 && <button type="button" className="agent-drawer-new-activity" onClick={followOutput.jumpToLatest}>
+        <ArrowDown size={13} /> 新增 {followOutput.pendingCount > 99 ? "99+" : followOutput.pendingCount} 条活动
+      </button>}
+      <div className="agent-drawer-body" tabIndex={0} ref={followOutput.containerRef} onScroll={followOutput.onScroll} role="region" aria-label={contentLabel || `${title}活动日志`}>
         <div className="agent-drawer-content" ref={followOutput.contentRef}>{children}</div>
       </div>
     </aside>

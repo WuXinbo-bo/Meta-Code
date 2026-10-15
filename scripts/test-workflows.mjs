@@ -8,8 +8,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { normalizeWorkflowPlan, plannerTurnPrompt, planSystemPrompt, validateWorkflowPlan } from "../dist-server/workflows/plan.js";
-import { failedDependencyReason, missingRequiredArtifacts, normalizeWorkflowNodeResult, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowRetryLimit, workflowResultArtifactPaths } from "../dist-server/workflows/execution.js";
+import { normalizeWorkflowPlan, plannerTurnPrompt, planSystemPrompt, validateWorkflowPlan, workflowExplorationGuidance } from "../dist-server/workflows/plan.js";
+import { failedDependencyReason, missingRequiredArtifacts, normalizeWorkflowNodeResult, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowNodeResultGateIssues, workflowRetryLimit, workflowResultArtifactPaths } from "../dist-server/workflows/execution.js";
+import { parseWorkflowArtifactDeclaration, workflowRequiredArtifactMatches } from "../dist-server/plugins/orchestration/artifactDeclarations.js";
 import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommand, snapshotEntryIgnored, tokenizeVerificationCommand, validateVerificationCommand, verificationSpawnSpec } from "../dist-server/workflows/enforcement.js";
 import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent } from "../dist-server/workflows/logs.js";
 import { compactPlannerLogs, WorkflowRepository } from "../dist-server/workflows/repository.js";
@@ -21,17 +22,18 @@ import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPla
 
 const execFileAsync = promisify(execFile);
 
-const serverSource = await fs.readFile(new URL("../server/index.ts", import.meta.url), "utf8");
-const transactionFileSource = await fs.readFile(new URL("../server/workflows/transactionFile.ts", import.meta.url), "utf8");
+const serverSource = await fs.readFile(new URL("../server/plugins/orchestration/runtime.ts", import.meta.url), "utf8");
+const controllerSource = await fs.readFile(new URL("../server/plugins/orchestration/controller.ts", import.meta.url), "utf8");
+const transactionFileSource = await fs.readFile(new URL("../server/plugins/orchestration/transactionFile.ts", import.meta.url), "utf8");
 assert.match(
   serverSource,
-  /runVerificationCommands\(current\.verificationCommands, workflow\.workDirectory,/,
-  "工作流系统验收必须在独立任务目录执行，不能误用父工作区根目录"
+  /runVerificationCommands\(current\.verificationCommands, workflowExecutionRoot\(workflow\),/,
+  "工作流系统验收必须使用声明的业务执行根目录，兼容工作区、隔离目录和 Worktree"
 );
 assert.match(serverSource, /const readiness = await providerReadiness\(descriptor\.id, ownerUserId, workspace\)/, "工作流 Provider 可用性必须统一检查 CLI、连接和工作区权限");
-assert.match(serverSource, /app\.post\("\/api\/workflows", async[\s\S]*?providerReadiness\(plannerEngine, req\.authUser!\.id, workspace\)/, "创建工作流前必须验证规划 Agent 已就绪");
-assert.match(serverSource, /app\.post\("\/api\/workflows\/:id\/plan", async[\s\S]*?providerReadiness\(workflow\.plannerEngine, req\.authUser!\.id, workspace\)/, "启动规划前必须重新验证规划 Agent 已就绪");
-assert.match(serverSource, /app\.post\("\/api\/workflows\/:id\/approve", async[\s\S]*?assertWorkflowExecutionReady\(workflow, req\.authUser!\.id\)/, "批准计划前必须复查节点 Agent 和工作区能力");
+assert.match(controllerSource, /app\.post\("\/api\/workflows", withAdmission\(async[\s\S]*?providerReadiness\(plannerEngine, req\.authUser!\.id, workspace\)/, "创建工作流前必须验证规划 Agent 已就绪");
+assert.match(controllerSource, /app\.post\("\/api\/workflows\/:id\/plan", withAdmission\(async[\s\S]*?providerReadiness\(workflow\.plannerEngine, req\.authUser!\.id, workspace\)/, "启动规划前必须重新验证规划 Agent 已就绪");
+assert.match(controllerSource, /app\.post\("\/api\/workflows\/:id\/approve", withAdmission\(async[\s\S]*?assertWorkflowExecutionReady\(workflow, req\.authUser!\.id\)/, "批准计划前必须复查节点 Agent 和工作区能力");
 assert.match(serverSource, /new WorkflowNodeStageRetryError\("snapshot"/, "快照异常必须进入阶段重试，不能重跑整个 Agent");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /并行产物一致性契约/, "规划官必须约束并行生产节点的共享数据口径");
 assert.match(WORKFLOW_ROLE_SKILLS.planner, /共享合同必须逐字可比/, "规划官必须逐字核对共享 schema 和枚举");
@@ -42,7 +44,9 @@ assert.match(serverSource, /合同优先级固定为/, "执行提示必须声明
 assert.match(serverSource, /changedFiles: result\?\.changedFiles \|\| \[\]/, "最终 Validator 必须接收节点已验证的 changedFiles，不能把真实登记误判为缺失");
 assert.match(transactionFileSource, /retryableCodes = new Set\(\["EACCES", "EBUSY", "EEXIST", "EPERM"\]\)/, "Windows 事务锁竞争必须识别 EPERM/EBUSY/EACCES");
 assert.match(transactionFileSource, /if \(!retryableCodes\.has\(errorCode\(error\)\)\) throw error;/, "事务锁获取必须使用跨平台可重试错误集合，不能只识别 EEXIST");
-assert.match(serverSource, /workflowNodeCheckpointRoot\(workflow\.workDirectory, node\.id, node\.planVersion\)/, "节点检查点必须按计划版本隔离");
+const schedulerSource = await fs.readFile(new URL("../server/plugins/orchestration/scheduler.ts", import.meta.url), "utf8");
+assert.match(schedulerSource, /stateFiles|workflowStateFiles/, "调度器必须使用插件状态目录");
+assert.match(schedulerSource, /String\(node\.planVersion\)/, "节点检查点必须按计划版本隔离");
 const planOneCheckpoint = workflowNodeCheckpointRoot("C:/workspace/task", "implement", 1);
 const planTwoCheckpoint = workflowNodeCheckpointRoot("C:/workspace/task", "implement", 2);
 assert.notEqual(planOneCheckpoint, planTwoCheckpoint, "不同计划版本不能复用同一节点结果事务目录");
@@ -115,7 +119,9 @@ assert.match(planSystemPrompt([], [], "", 3), /dependency-minimality/);
 assert.match(planSystemPrompt([], [], "", 3), /读取会被另一并行节点修改的内容也不能并行/);
 assert.match(planSystemPrompt([], [], "", 3), /workflow_validate_draft/);
 assert.match(planSystemPrompt([], [], "", 3), /自然语言回复不再承载计划 JSON/);
-assert.match(planSystemPrompt([], [], "", 3), /首批工具调用中写入计划级字段/);
+assert.match(planSystemPrompt([], [], "", 3), /形成足够事实后/);
+assert.match(planSystemPrompt([], [], "", 3, undefined, "workspace", "迁移并兼容多个模块"), /探索预算：/);
+assert.match(workflowExplorationGuidance("研究并比较多个模块的兼容迁移"), /复杂或不确定任务/);
 assert.match(planSystemPrompt([], [], "", 3), /禁止读取工作台源码/);
 assert.match(planSystemPrompt([], [], "", 3), /不得因为自己的模型身份而默认选择相同 provider/);
 assert.match(planSystemPrompt([], [], "", 3), /auto 不是运行时动态能力比较/);
@@ -126,6 +132,15 @@ assert.match(codexWorkflowPlannerToolInstructions(), /不能调用 tools\.workfl
 assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_read_node_contract/);
 assert.match(codexWorkflowResultToolInstructions(), /tools\.mcp__workbench_workflow_result__workflow_commit_result/);
 assert.match(planSystemPrompt([], [], "", 3), /验证命令必须具有能力闭环/);
+assert.deepEqual(parseWorkflowArtifactDeclaration("src/math.js"), { kind: "path", path: "src/math.js" });
+assert.deepEqual(parseWorkflowArtifactDeclaration("src/math.js with corrected addition operator"), { kind: "described", path: "src/math.js", description: "corrected addition operator" });
+assert.equal(parseWorkflowArtifactDeclaration("src/math.js and tests/math.test.js").kind, "ambiguous", "多个路径不能作为一个交付声明");
+assert.equal(parseWorkflowArtifactDeclaration("研究摘要").kind, "text", "纯文本成果不应被误判成文件路径");
+assert.equal(workflowRequiredArtifactMatches("report.md", ["deliverables/report.md"]), true, "旧版 basename 依赖仅在唯一匹配时兼容");
+assert.equal(workflowRequiredArtifactMatches("report.md", ["a/report.md", "b/report.md"]), false, "重复 basename 不得模糊匹配");
+const gateResult = normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "完成", outputs: [{ id: "report", type: "file", path: "deliverables/report.md", mediaType: "text/markdown", description: "报告", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] });
+assert.deepEqual(workflowNodeResultGateIssues(gateResult, { downstreamNodeIds: [], deliverables: ["report.md"], executionRoot: "/tmp/project" }), [], "唯一 basename 交付声明应兼容已登记产物");
+assert.match(workflowNodeResultGateIssues(gateResult, { downstreamNodeIds: [], deliverables: ["src/math.js with corrected addition operator"] }).join("；"), /计划产物声明存在歧义|缺少计划要求的文件产物声明/, "描述混入路径时必须阻止错误提交");
 assert.match(planSystemPrompt([], [], "", 3, { claudeAvailable: true, codexAvailable: false }), /Claude（claude）：可用、可写；Codex（codex）：不可用、可写/);
 const missingProviderReason = normalizeWorkflowPlan({ ...validPlan, nodes: [{ ...validPlan.nodes[0], providerReason: "" }] });
 assert.match(validateWorkflowPlan(missingProviderReason, new Set()).join("；"), /缺少模型选择理由/);
@@ -918,7 +933,7 @@ assert.deepEqual(missingRequiredArtifacts(approved.nodes[1], approved.nodes), ["
 approved.nodes[0].summary.outputs = [{ id: "research", type: "document", path: "artifacts/research.md", mediaType: "text/markdown", description: "研究结果", consumableBy: ["implement"] }];
 assert.deepEqual(missingRequiredArtifacts(approved.nodes[1], approved.nodes), []);
 const transitiveArtifactNodes = [
-  { ...approved.nodes[0], id: "source", status: "completed", dependsOn: [], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "祖先产物", outputs: [{ id: "evidence", type: "document", path: "task/work/source/evidence.md", description: "证据", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
+  { ...approved.nodes[0], id: "source", status: "completed", dependsOn: [], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "祖先产物", outputs: [{ id: "evidence", type: "document", path: "work/source/evidence.md", description: "证据", consumableBy: [] }], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
   { ...approved.nodes[0], id: "middle", status: "completed", dependsOn: ["source"], summary: normalizeWorkflowNodeResult({ outcome: "completed", humanSummary: "中间交接", outputs: [], changedFiles: [], checks: [], decisions: [], handoff: { facts: [], constraints: [], nextAgentInstructions: [] }, warnings: [], unresolved: [] }) },
   { ...approved.nodes[1], id: "consumer", status: "pending", dependsOn: ["middle"], requiredArtifacts: ["work/source/evidence.md"] }
 ];
@@ -1143,9 +1158,9 @@ assert.equal(maintenanceResumed.status, "awaiting_approval", "维护规划恢复
 assert.equal(maintenancePausePlanned.activePlanVersion, maintenanceResumed.activePlanVersion);
 
 assert.match(serverSource, /workbench-workflow-result 与 workbench-workflow-plan 是 Workbench 系统控制面/, "Validator 必须区分系统控制面 MCP 与业务 MCP");
-assert.match(serverSource, /不要扫描 \.workflow\/events\.jsonl/, "Validator 不得默认重扫完整事件日志");
+assert.match(serverSource, /不要扫描插件内部事件文件/, "Validator 不得默认重扫完整事件日志");
 assert.match(serverSource, /最多执行一次合并的只读验收命令/, "Validator 必须限制重复验收命令");
 assert.match(serverSource, /省略 workdir\/cwd 参数，或只使用相对目录“\.”/, "执行 Agent 不得复制超长绝对工作目录到工具调用");
-assert.match(serverSource, /执行结果路径越出任务目录/, "节点产物必须由任务目录边界校验");
-assert.match(serverSource, /slice\(0, 48\)\.replace\(\/\[ \.\]\+\$\/g, ""\)/, "Windows 工作流目录截断后不得保留尾随空格或点");
+assert.match(serverSource, /return resolveWorkflowResultPath\(workflow, reportedPath, mustExist\)/, "节点产物必须通过业务执行根目录与真实路径边界校验");
+assert.match(controllerSource, /targetService\.prepare\(/, "执行目标必须由平台通用的目标服务准备，不能在项目中拼接任务目录");
 console.log("workflow plan validation and approval gate OK");

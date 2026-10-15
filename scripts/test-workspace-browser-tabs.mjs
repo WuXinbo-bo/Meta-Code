@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { linkedWorkflowId } from "../src/tasks/linkedWorkflow.ts";
+import { ACTIVE_SIDEBAR_TASK_STATUSES, groupSidebarTasks, sidebarTaskIsPinned, sidebarTaskIsSelected, sidebarTaskPinnedRecords } from "../src/tasks/sidebarTaskGroups.ts";
 import {
   activateWorkspaceBrowserTab,
   canonicalWorkspaceBrowserFilePath,
@@ -30,6 +32,43 @@ import {
 
 const conversation = (conversationId, workspaceId = "workspace-a") => ({ kind: "conversation", conversationId, workspaceId });
 const file = (path, workspaceId = "workspace-a") => ({ kind: "file", path, workspaceId });
+
+const linkedWorkflows = [{ id: "old", taskContextId: "task", executionRoot: "/project", updatedAt: "2026-10-07T12:00:00Z" }, { id: "unrelated", updatedAt: "2026-10-08T12:00:00Z" }, { id: "recent", taskContextId: "task", executionRoot: "/project", updatedAt: "2026-10-08T12:00:00Z" }];
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project" }, linkedWorkflows), "recent", "the compact task view follows the latest workflow round in the same execution root");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project" }, [...linkedWorkflows, { id: "worktree", taskContextId: "task", executionRoot: "/project-worktree", updatedAt: "2026-10-09T12:00:00Z" }]), "recent", "a newer Worktree round must not replace the current project conversation");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project" }, linkedWorkflows, { sessionId: "chat", workflowId: "new-round" }), "new-round", "the just-created round takes priority before bootstrap reconciliation");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project" }, [...linkedWorkflows, { id: "worktree", taskContextId: "task", executionRoot: "/project-worktree", updatedAt: "2026-10-09T12:00:00Z" }], { sessionId: "chat", workflowId: "worktree" }), "recent", "a known pending link on another root must be rejected");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project" }, linkedWorkflows, { sessionId: "other", workflowId: "new-round" }), "recent", "pending links only apply to the source session");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "C:\\Project" }, [{ id: "windows", taskContextId: "task", executionRoot: "c:/project", updatedAt: "2026-10-09T12:00:00Z" }]), "windows", "Windows roots compare case-insensitively");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/Project" }, [{ id: "lower", taskContextId: "task", executionRoot: "/project", updatedAt: "2026-10-09T12:00:00Z" }]), "", "POSIX roots preserve case");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task", executionRoot: "/project/" }, [{ id: "legacy", taskContextId: "task", workDirectory: "/project", updatedAt: "2026-10-09T12:00:00Z" }]), "legacy", "legacy workDirectory is the validated root fallback");
+assert.equal(linkedWorkflowId({ id: "chat", taskContextId: "task" }, linkedWorkflows), "", "missing root provenance must not automatically select a branch");
+assert.equal(linkedWorkflowId({ id: "chat" }, linkedWorkflows), "", "sessions without task context cannot match unrelated legacy workflows");
+
+const taskRecord = (kind, id, overrides = {}) => ({ kind, task: { id, title: id, workspaceId: "project", status: "completed", updatedAt: "2026-10-08T12:00:00Z", ...overrides } });
+const priorChat = taskRecord("chat", "prior-chat", { taskContextId: "same-task", pinned: true, folderId: "research", updatedAt: "2026-10-07T12:00:00Z" });
+const latestWorkflow = taskRecord("workflow", "latest-plan", { taskContextId: "same-task", updatedAt: "2026-10-08T12:00:00Z" });
+let groupedTasks = groupSidebarTasks([priorChat, latestWorkflow]);
+assert.equal(groupedTasks.length, 1);
+assert.equal(groupedTasks[0].task, latestWorkflow.task, "the latest execution remains the representative without overwriting raw metadata");
+assert.equal(sidebarTaskIsPinned(groupedTasks[0]), true, "an older linked pinned conversation must still keep its task in the pinned section");
+assert.equal(groupedTasks[0].task.pinned, undefined, "group state must not leak into the execution record");
+assert.equal(groupedTasks[0].task.folderId, undefined, "mixed folder placement stays on the representative rather than silently moving another record");
+assert.equal(groupedTasks[0].group.mixedFolders, true, "a folder difference must be visible to the user");
+assert.equal(sidebarTaskIsSelected(groupedTasks[0], "prior-chat", ""), true, "the task stays highlighted when its linked conversation is selected");
+assert.equal(sidebarTaskIsSelected(groupedTasks[0], "", "latest-plan"), true);
+assert.equal(sidebarTaskIsSelected(groupedTasks[0], "another-chat", ""), false);
+assert.deepEqual(sidebarTaskPinnedRecords(groupedTasks[0]), [priorChat], "unpin targets the actual pinned record, not the representative workflow");
+assert.deepEqual(sidebarTaskPinnedRecords(groupSidebarTasks([priorChat, { ...latestWorkflow, task: { ...latestWorkflow.task, pinned: true } }])[0]).map((record) => [record.kind, record.task.id]), [["chat", "prior-chat"], ["workflow", "latest-plan"]], "multiple pins stay separately addressable");
+const originalKey = groupedTasks[0].group.key;
+groupedTasks = groupSidebarTasks([{ ...priorChat, task: { ...priorChat.task, status: "running" } }, latestWorkflow]);
+assert.equal(groupedTasks[0].task.id, "prior-chat", "an active execution takes priority over a newer completed record");
+assert.equal(groupedTasks[0].group.key, originalKey, "task identity remains stable as its representative changes");
+assert.equal(ACTIVE_SIDEBAR_TASK_STATUSES.has("planning"), true, "planning remains observable in the ongoing task section");
+assert.equal(groupSidebarTasks([priorChat, { ...latestWorkflow, task: { ...latestWorkflow.task, archivedAt: "2026-10-08T13:00:00Z" } }]).length, 2, "archiving one execution must not hide a linked conversation");
+assert.equal(groupSidebarTasks([taskRecord("chat", "legacy"), taskRecord("workflow", "legacy")]).length, 2, "legacy records without a shared context must remain independent");
+assert.equal(groupSidebarTasks([taskRecord("chat", "same-folder-a", { taskContextId: "folder-task", folderId: "docs" }), taskRecord("workflow", "same-folder-b", { taskContextId: "folder-task", folderId: "docs" })])[0].group.mixedFolders, false);
+assert.equal(sidebarTaskIsPinned(priorChat), true, "individual archive/legacy records still use their own metadata");
 
 assert.equal(workspaceBrowserResourceKey(file("docs\\guide.md")), workspaceBrowserResourceKey(file("docs/guide.md")), "Windows and URL-style separators should address the same file");
 assert.equal(workspaceBrowserResourceKey(file("README.md")), workspaceBrowserResourceKey(file("readme.md")), "Windows file identity should be case insensitive");
@@ -195,3 +234,9 @@ adjacentFallback = reconcileWorkspaceBrowserTabs(adjacentFallback, {
 assert.equal(adjacentFallback.activeTabId, workspaceBrowserResourceKey(conversation("c")), "invalidating an active tab should select its nearest right neighbor");
 
 console.log("workspace browser tab tests passed");
+
+const stableTitle = groupSidebarTasks([{ ...priorChat, task: { ...priorChat.task, title: "User project task", status: "running" } }, { ...latestWorkflow, task: { ...latestWorkflow.task, title: "Plan title" } }])[0];
+assert.equal(stableTitle.group.title, "User project task", "A deliberately concise conversation title stays stable across mode switches");
+const businessTitle = groupSidebarTasks([{ ...priorChat, task: { ...priorChat.task, title: "Long user requirements ".repeat(20) } }, { ...latestWorkflow, task: { ...latestWorkflow.task, title: "Plan title" } }])[0];
+assert.equal(businessTitle.group.title, "Plan title", "Long generated prompt titles yield to the concise business plan title");
+assert.equal(businessTitle.group.records[0].task.title, "Long user requirements ".repeat(20), "Presentation never renames persisted task records");

@@ -1,0 +1,88 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { DatabaseSync } from "node:sqlite";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { TaskContextStore, sessionHandoff } from "../server/tasks/context.ts";
+import { prepareSessionTaskHistoryServers, mergeTaskHistoryServers, TASK_HISTORY_SERVER_NAME } from "../server/tasks/sessionHistory.ts";
+import { claudeMcpConfig, codexMcpConfig } from "../server/mcpConfig.ts";
+
+const directory = await fs.mkdtemp(path.join(os.tmpdir(), "metacode-task-history-mcp-"));
+const project = path.join(directory, "project");
+const branch = path.join(directory, "branch");
+const runtimeDirectory = path.join(directory, "runtime");
+await fs.mkdir(project); await fs.mkdir(branch);
+const db = new DatabaseSync(":memory:");
+const store = new TaskContextStore(db);
+const context = store.ensure({ kind: "session", id: "conversation", executionRoot: project }, "owner", "workspace", "Maintain project");
+const original = `Keep synchronous exports. ${"Long exact source requirement. ".repeat(1800)}Never drop zero amounts.`;
+const message = (id, text) => ({ id, role: "user", text });
+const handoffFor = (id, revision, root, messages) => sessionHandoff({ id, revision, title: "Maintain project", messages }, root);
+let contextWithHistory = store.handoff(context.id, "owner", handoffFor("conversation", 1, project, [message("long-original", original)]));
+store.link(context.id, { kind: "session", id: "branch-session", executionRoot: branch }, "owner", "workspace");
+store.handoff(context.id, "owner", handoffFor("branch-session", 1, branch, [message("branch-only", "EXPERIMENTAL_BRANCH_ONLY_SECRET_CONSTRAINT")]));
+const args = ["--import", pathToFileURL(path.join(process.cwd(), "node_modules", "tsx", "dist", "loader.mjs")).href, path.join(process.cwd(), "server", "tasks", "historyToolServer.ts")];
+const request = { store, sessionId: "conversation", ownerUserId: "owner", executionRoot: project, runtimeDirectory, command: process.execPath, args };
+let client;
+try {
+  assert.deepEqual(await prepareSessionTaskHistoryServers({ ...request, handoff: undefined }), [], "Ordinary conversations without a handoff require no new MCP server");
+  const servers = await prepareSessionTaskHistoryServers({ ...request, handoff: contextWithHistory.handoffs.at(-1) });
+  assert.equal(servers.length, 1);
+  const snapshotPath = servers[0].env.METACODE_TASK_HISTORY_PATH;
+  assert.ok(snapshotPath.startsWith(runtimeDirectory));
+  const snapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8"));
+  assert.equal(snapshot.entries.length, 1);
+  assert.equal(snapshot.entries[0].text, original);
+  assert.ok(!JSON.stringify(snapshot).includes("EXPERIMENTAL_BRANCH_ONLY"));
+  if (process.platform !== "win32") assert.equal((await fs.stat(snapshotPath)).mode & 0o777, 0o600);
+  assert.deepEqual((await prepareSessionTaskHistoryServers({ ...request, handoff: contextWithHistory.handoffs.at(-1) }))[0], servers[0], "Identical snapshots reuse one immutable path");
+  await assert.rejects(prepareSessionTaskHistoryServers({ ...request, executionRoot: branch, handoff: contextWithHistory.handoffs.at(-1) }), /不匹配/);
+  await assert.rejects(prepareSessionTaskHistoryServers({ ...request, ownerUserId: "intruder", handoff: contextWithHistory.handoffs.at(-1) }), /不匹配/);
+  const userServers = [{ name: "business", transport: "stdio", command: "business" }, { name: TASK_HISTORY_SERVER_NAME, transport: "stdio", command: "user-collision" }];
+  const unchanged = structuredClone(userServers);
+  const merged = mergeTaskHistoryServers(userServers, [...servers, ...servers]);
+  assert.equal(merged.filter((server) => server.name === TASK_HISTORY_SERVER_NAME).length, 1);
+  assert.equal(merged[0].command, process.execPath);
+  assert.deepEqual(userServers, unchanged, "Per-run control config does not mutate user MCP settings");
+  assert.ok(claudeMcpConfig(merged).mcpServers[TASK_HISTORY_SERVER_NAME]);
+  assert.ok(codexMcpConfig(merged).config.mcp_servers[TASK_HISTORY_SERVER_NAME]);
+  assert.deepEqual(await fs.readdir(project), [], "No source-workspace projection or task directory is created");
+
+  client = new Client({ name: "task-history-test", version: "1.0.0" });
+  await client.connect(new StdioClientTransport({ command: servers[0].command, args: servers[0].args, env: { ...process.env, ...servers[0].env }, stderr: "pipe" }));
+  const tools = await client.listTools();
+  assert.deepEqual(tools.tools.map((tool) => tool.name), ["workflow_read_task_history"]);
+  assert.ok(!Object.hasOwn(tools.tools[0].inputSchema.properties, "snapshotPath"));
+  const call = async (arguments_) => {
+    const response = await client.callTool({ name: "workflow_read_task_history", arguments: arguments_ });
+    assert.notEqual(response.isError, true);
+    return JSON.parse(response.content.find((part) => part.type === "text").text);
+  };
+  const referenceId = snapshot.entries[0].referenceId;
+  let restored = "";
+  let textOffset = 0;
+  do {
+    const page = await call({ referenceId, textOffset, maxChars: 2048 });
+    assert.equal(page.entries[0].sourceRevision, 1);
+    assert.equal(page.entries[0].source.executionRoot, project);
+    restored += page.entries[0].text;
+    textOffset = page.entries[0].nextTextOffset;
+  } while (textOffset !== null);
+  assert.equal(restored, original, "A real native MCP session can recover the complete long constraint by reference");
+  assert.equal((await call({ query: "EXPERIMENTAL_BRANCH_ONLY" })).entries.length, 0);
+  const branchReference = store.exportHistorySnapshot(context.id, "owner", branch).entries[0].referenceId;
+  assert.equal((await call({ referenceId: branchReference })).entries.length, 0);
+  contextWithHistory = store.handoff(context.id, "owner", handoffFor("conversation", 2, project, [message("long-original", original), message("new-request", "NEW_REQUEST_AFTER_NATIVE_RUN_STARTED")]));
+  const newerServers = await prepareSessionTaskHistoryServers({ ...request, handoff: contextWithHistory.handoffs.at(-1) });
+  assert.notEqual(newerServers[0].env.METACODE_TASK_HISTORY_PATH, snapshotPath);
+  assert.equal((await call({ query: "NEW_REQUEST_AFTER_NATIVE_RUN_STARTED" })).entries.length, 0, "An active run reads only its bound immutable snapshot");
+  assert.equal(JSON.parse(await fs.readFile(newerServers[0].env.METACODE_TASK_HISTORY_PATH, "utf8")).entries.length, 2);
+  console.log("task history MCP: native stdio retrieval, long reference pagination, source/root isolation, immutable per-run snapshots, private config merging, no workspace writes and both provider configs passed");
+} finally {
+  await client?.close();
+  db.close();
+  await fs.rm(directory, { recursive: true, force: true });
+}

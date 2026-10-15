@@ -205,6 +205,11 @@
 .workflow-review-stats span,
 .workflow-review-audit,
 .workflow-review-notes { border-color: var(--mc-line); color: var(--mc-text-secondary); background: var(--mc-surface-subtle); }
+.workflow-validation-mode label { display: grid; gap: 6px; color: var(--mc-text); font-size: 11px; }
+.workflow-validation-mode select { width: 100%; min-width: 0; min-height: 30px; padding: 4px 6px; border: 1px solid var(--mc-line); border-radius: 6px; background: var(--mc-surface); color: var(--mc-text); font: inherit; }
+.workflow-validation-mode select:focus-visible { outline: 2px solid var(--mc-accent); outline-offset: 2px; }
+.workflow-maintenance-history[aria-label="最近编排回复"] { max-height: 144px; padding: 6px 3px; mask-image: none; scrollbar-width: thin; }
+.workflow-maintenance-history[aria-label="最近编排回复"] p { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .workflow-review-list button:hover,
 .workflow-delivery-files > div > button:first-child:hover,
 .workflow-delivery-nodes button:hover { border-color: var(--mc-line); background: var(--mc-surface-subtle); }

@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   attachmentPrompt,
+  copySessionAttachments,
+  configureAttachmentStorage,
+  migrateSessionAttachments,
+  resolveAttachmentPath,
   deleteSessionAttachments,
   MAX_ATTACHMENTS_PER_MESSAGE,
   storeAttachment,
@@ -32,7 +36,7 @@ try {
   assert.notEqual(first.relativePath, second.relativePath);
   assert.match(first.relativePath, /^\.claude-codex\/attachments\/task_test\//);
   assert.equal((await validateAttachments({ workspaceRoot: root, sessionId, value: [first] }))[0].sha256, first.sha256);
-  assert.match(attachmentPrompt("检查文件", [first]), /本轮附件已保存到当前任务执行目录/);
+  assert.match(attachmentPrompt("检查文件", [first]), /本轮附件已保存到工作台的任务附件目录/);
   assert.match(attachmentPrompt("检查文件", [first]), /notes\.txt/);
 
   await assert.rejects(validateAttachments({
@@ -52,9 +56,29 @@ try {
     data: Buffer.alloc(0)
   }), /附件内容为空/);
 
+  const managed = path.join(root, "managed-attachments");
+  configureAttachmentStorage(managed);
+  await migrateSessionAttachments(root, sessionId, [first, second]);
+  assert.equal((await validateAttachments({ workspaceRoot: root, sessionId, value: [first] }))[0].sha256, first.sha256);
+  const migratedPath = resolveAttachmentPath(root, sessionId, first.relativePath);
+  assert.ok(migratedPath.startsWith(managed));
+  assert.equal(await fsp.readFile(migratedPath, "utf8"), "first");
+  await assert.rejects(fsp.stat(path.join(root, ".claude-codex")), /ENOENT/);
+  const third = await storeAttachment({ workspaceRoot: root, sessionId, originalName: "managed.txt", data: Buffer.from("third") });
+  assert.match(third.relativePath, /^@attachments\/task_test\//);
+  assert.equal(resolveAttachmentPath(root, sessionId, third.relativePath.replaceAll("/", "\\")), resolveAttachmentPath(root, sessionId, third.relativePath));
+  assert.ok(attachmentPrompt("", [third]).includes(resolveAttachmentPath(root, sessionId, third.relativePath)));
+  await assert.rejects(validateAttachments({ workspaceRoot: root, sessionId: "other", value: [third] }), /不属于/);
+  await fsp.writeFile(resolveAttachmentPath(root, sessionId, third.relativePath), "other");
+  await assert.rejects(validateAttachments({ workspaceRoot: root, sessionId, value: [third] }), /校验/);
+  const [copied] = await copySessionAttachments(root, sessionId, root, "task_branch", [first]);
+  assert.equal(copied.sha256, first.sha256);
+  assert.notEqual(copied.relativePath, first.relativePath);
   await deleteSessionAttachments(root, sessionId);
-  await assert.rejects(fsp.stat(path.join(root, ".claude-codex", "attachments", sessionId)), /ENOENT/);
-  console.log("Attachment contracts OK");
+  assert.equal((await validateAttachments({ workspaceRoot: root, sessionId: "task_branch", value: [copied] }))[0].sha256, first.sha256);
+  await assert.rejects(fsp.stat(path.join(managed, sessionId)), /ENOENT/);
+  await assert.rejects(fsp.stat(path.join(managed, "legacy-backup", sessionId)), /ENOENT/);
+  console.log("Attachment contracts, managed paths, migration and hash validation OK");
 } finally {
   await fsp.rm(root, { recursive: true, force: true });
 }

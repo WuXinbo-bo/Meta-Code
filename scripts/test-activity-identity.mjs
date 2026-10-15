@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import { agentStreamVersion, normalizeActivityLogs } from "../src/components/activityModel.ts";
+
+const command = { id: "command-1", createdAt: "2026-10-06T12:00:00+08:00", kind: "tool", category: "command", title: "执行命令", text: "npm test", phase: "running", provider: "claude", actor: { kind: "delegated", id: "worker-1" } };
+assert.equal(normalizeActivityLogs([command, { ...command, id: "retry-1" }]).length, 2, "distinct command attempts must not disappear because their text matches");
+const mixed = normalizeActivityLogs([command, { ...command, provider: "codex" }]);
+assert.equal(mixed.length, 2, "providers must not share event identity");
+assert.equal(new Set(mixed.map(item => item.id)).size, 2, "mixed actor rows must have stable unique React keys");
+const attempts = normalizeActivityLogs([command, { ...command, scope: { attempt: 2 } }]);
+assert.equal(attempts.length, 2);
+const completed = { ...command, phase: "completed", detail: { exitCode: 0 } };
+assert.equal(normalizeActivityLogs([completed, command])[0].phase, "completed", "late partials must not regress a terminal event");
+assert.equal(normalizeActivityLogs([{ ...completed, createdAt: "2026-10-06T04:01:00Z" }, command])[0].phase, "completed", "out-of-order snapshots must retain the newest event");
+const chronological = normalizeActivityLogs([command, { ...command, id: "earlier", createdAt: "2026-10-06T03:59:00Z" }]);
+assert.equal(chronological[0].id, "earlier", "offset timestamps must sort by instant");
+assert.equal(chronological[1].createdAt, "2026-10-06T04:00:00.000Z");
+assert.notEqual(agentStreamVersion([command]), agentStreamVersion([completed]), "phase and detail updates invalidate the stream");
+assert.notEqual(agentStreamVersion([command]), agentStreamVersion([{ ...command, text: "npm lint" }]), "equal-length text changes invalidate the stream");
+assert.notEqual(agentStreamVersion([command, completed]), agentStreamVersion([{ ...command, detail: { output: "updated earlier event" } }, completed]), "an earlier event update also invalidates the stream");
+assert.equal(agentStreamVersion([completed]), agentStreamVersion([{ ...completed }]), "identical snapshots retain their content version");
+console.log("Activity identity, repeated attempts, monotonic phases, timestamps and stream revisions passed");

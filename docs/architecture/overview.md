@@ -9,7 +9,7 @@ Meta Code separates product UI, workbench domain services, Agent transports, and
 3. Provider Host contracts normalize identity, connection state, session configuration, model controls, activity, and cancellation.
 4. Native transports preserve Codex and Claude capabilities that are not yet fully represented by ACP.
 5. The ACP client host is the preferred integration path for additional coding Agents.
-6. Workbench extensions add CLI installation, Skill policy, delegation, orchestration, history linkage, and performance protection without inventing a competing Agent protocol.
+6. The plugin host independently manages collaboration and orchestration. Plugins use Provider Host services and retain separate state machines; MCP is their tool transport, not their lifecycle or Agent protocol.
 
 ## Runtime flow
 
@@ -28,8 +28,8 @@ Unknown activity types must degrade to a generic event rather than fail renderin
 ## Boundaries
 
 - Source repository: immutable code, tests, built-in assets, documentation.
-- `~/.metacode`: mutable personal state, credentials, managed runtimes, logs, backups.
-- Workspace directories: user project source and `.claude-codex` task artifacts.
+- `~/.metacode`: mutable personal state, credentials, managed runtimes, plugin state, attachments, logs, backups.
+- Workspace directories: user project source and requested business deliverables. Internal task protocols and managed Skill projections are stored outside projects.
 - Desktop Launcher: application process lifecycle and future atomic version switching.
 
 The local API is not treated as trusted merely because it listens on
@@ -37,4 +37,4 @@ The local API is not treated as trusted merely because it listens on
 from unrelated browser pages. This is a single-user desktop boundary, not an
 account or multi-tenant authorization layer.
 
-See also [CLI runtime](cli-runtime.md), [data layout](data-and-runtime.md), [task orchestration](task-orchestration.md), and [Codex native link](codex-native-link.md).
+See also [workbench plugins](workbench-plugins.md), [CLI runtime](cli-runtime.md), [data layout](data-and-runtime.md), [task orchestration](task-orchestration.md), and [Codex native link](codex-native-link.md).

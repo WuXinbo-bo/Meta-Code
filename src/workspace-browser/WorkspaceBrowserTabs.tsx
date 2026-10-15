@@ -1,23 +1,25 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent,
-  type WheelEvent
+  type PointerEvent as ReactPointerEvent
 } from "react";
+import { createPortal } from "react-dom";
 import {
-  Check,
+  ArrowLeft,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
   FileText,
   History,
-  ListFilter,
+  PanelsTopLeft,
   LoaderCircle,
   Pin,
   PinOff,
@@ -51,6 +53,7 @@ export type WorkspaceBrowserTabsProps = {
   onMove: (tabId: string, targetIndex: number) => void;
   onPinnedChange: (tabId: string, pinned: boolean) => void;
   onReopenLastClosed: () => void;
+  onReturnToConversation?: () => void;
   ariaControlsId?: string;
   ariaLabel?: string;
   className?: string;
@@ -107,10 +110,14 @@ export function WorkspaceBrowserTabs({
   onMove,
   onPinnedChange,
   onReopenLastClosed,
+  onReturnToConversation,
   ariaControlsId,
   ariaLabel = "工作区页面",
   className = ""
 }: WorkspaceBrowserTabsProps) {
+  const rootRef = useRef<HTMLElement>(null);
+  const popoverRef = useRef<HTMLElement>(null);
+  const popoverId = useId();
   const trackRef = useRef<HTMLDivElement>(null);
   const tabButtonsRef = useRef(new Map<string, HTMLButtonElement>());
   const tabElementsRef = useRef(new Map<string, HTMLDivElement>());
@@ -124,55 +131,116 @@ export function WorkspaceBrowserTabs({
   const dragGhostRef = useRef<HTMLElement | null>(null);
   const pendingLayoutRef = useRef<Map<string, DOMRect> | null>(null);
   const suppressClickRef = useRef(false);
-  const [overflow, setOverflow] = useState({ left: false, right: false, active: false });
+  const hoveredRef = useRef(false);
+  const clickOpenedRef = useRef(false);
+  const focusSearchRef = useRef(false);
+  const hoverTimerRef = useRef<number | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [allTabsOpen, setAllTabsOpen] = useState(false);
   const [tabQuery, setTabQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia("(max-width: 760px)").matches);
+  const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0, maxHeight: 480 });
   const reduceMotion = motion === "reduced" || (motion === "system" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
 
-  const updateOverflow = useCallback(() => {
-    const track = trackRef.current;
-    if (!track) return;
-    const active = track.scrollWidth > track.clientWidth + 1;
-    setOverflow({
-      active,
-      left: active && track.scrollLeft > 1,
-      right: active && track.scrollLeft + track.clientWidth < track.scrollWidth - 1
-    });
+  const containsNode = useCallback((node: Node | null) => Boolean(node && (
+    rootRef.current?.contains(node) || popoverRef.current?.contains(node) || contextMenuRef.current?.contains(node)
+  )), []);
+
+  const clearHoverTimer = useCallback(() => {
+    if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = null;
   }, []);
 
-  useEffect(() => {
-    const track = trackRef.current;
-    if (!track) return;
-    const observer = new ResizeObserver(updateOverflow);
-    observer.observe(track);
-    for (const child of track.children) observer.observe(child);
-    track.addEventListener("scroll", updateOverflow, { passive: true });
-    updateOverflow();
-    return () => {
-      observer.disconnect();
-      track.removeEventListener("scroll", updateOverflow);
-    };
-  }, [tabs.length, updateOverflow]);
+  const closePopover = useCallback(() => {
+    clearHoverTimer();
+    clickOpenedRef.current = false;
+    setAllTabsOpen(false);
+    setContextMenu(null);
+  }, [clearHoverTimer]);
+
+  const openPopover = (focusSearch: boolean) => {
+    clearHoverTimer();
+    if (focusSearch) clickOpenedRef.current = true;
+    focusSearchRef.current = focusSearch;
+    setAllTabsOpen(true);
+    if (focusSearch && !compact) setSearchOpen(true);
+    if (focusSearch) window.requestAnimationFrame(() => {
+      if (!compact) { searchInputRef.current?.focus(); return; }
+      const target = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
+      (target || searchButtonRef.current)?.focus();
+    });
+  };
 
   useEffect(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const onChange = () => {
+      setCompact(query.matches);
+      closePopover();
+      setTabQuery("");
+      hoveredRef.current = false;
+      suppressClickRef.current = false;
+      pointerDragRef.current = null;
+      dropTargetRef.current = null;
+      dragGhostRef.current?.remove();
+      dragGhostRef.current = null;
+      dragElementRef.current?.classList.remove("is-dragging");
+      dropElementRef.current?.classList.remove("is-drop-before", "is-drop-after");
+    };
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [closePopover]);
+
+  const scheduleClose = () => {
+    clearHoverTimer();
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      if (hoveredRef.current || pointerDragRef.current || contextMenuRef.current || containsNode(document.activeElement)) return;
+      closePopover();
+    }, 300);
+  };
+
+  useLayoutEffect(() => {
+    if (!allTabsOpen) return;
+    const placePopover = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = compact ? Math.min(680, Math.max(420, window.innerWidth * 0.6), window.innerWidth - 20) : Math.min(360, window.innerWidth - 20);
+      const left = Math.max(10, Math.min(rect.right - width, window.innerWidth - width - 10));
+      const top = Math.min(rect.bottom + 5, Math.max(10, window.innerHeight - 170));
+      setPopoverPosition({ left, top, maxHeight: Math.min(480, window.innerHeight - top - 10) });
+    };
+    placePopover();
+    window.addEventListener("resize", placePopover);
+    return () => window.removeEventListener("resize", placePopover);
+  }, [allTabsOpen, compact]);
+
+  useEffect(() => {
+    if (compact && !allTabsOpen) return;
     const activeButton = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
     activeButton?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    updateOverflow();
-  }, [activeTabId, updateOverflow]);
+  }, [activeTabId, allTabsOpen, compact]);
 
   useEffect(() => {
     if (!contextMenu && !allTabsOpen) return;
     const dismiss = (event: globalThis.MouseEvent) => {
       const target = event.target as Node;
       if (contextMenu && !(target instanceof Element && target.closest(".workspace-browser-tab-menu"))) setContextMenu(null);
-      if (allTabsOpen && !(target instanceof Element && target.closest(".workspace-browser-tabs__all-wrap"))) setAllTabsOpen(false);
+      if (allTabsOpen && !containsNode(target)) closePopover();
     };
     const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setContextMenu(null);
-      setAllTabsOpen(false);
-      allTabsButtonRef.current?.focus();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (containsNode(document.activeElement)) event.preventDefault();
+      if (contextMenu) {
+        setContextMenu(null);
+        focusTab(tabButtonsRef.current, contextMenu.tabId);
+      } else {
+        const restoreFocus = containsNode(document.activeElement);
+        closePopover();
+        if (restoreFocus) allTabsButtonRef.current?.focus();
+      }
     };
     const dismissContextMenu = () => { setContextMenu(null); };
     document.addEventListener("pointerdown", dismiss);
@@ -185,9 +253,9 @@ export function WorkspaceBrowserTabs({
       window.removeEventListener("resize", dismissContextMenu);
       window.removeEventListener("scroll", dismissContextMenu, true);
     };
-  }, [allTabsOpen, contextMenu]);
+  }, [allTabsOpen, closePopover, containsNode, contextMenu]);
 
-  useEffect(() => () => { dragGhostRef.current?.remove(); }, []);
+  useEffect(() => () => { clearHoverTimer(); dragGhostRef.current?.remove(); }, [clearHoverTimer]);
 
   useLayoutEffect(() => {
     const previous = pendingLayoutRef.current;
@@ -209,9 +277,13 @@ export function WorkspaceBrowserTabs({
 
   useEffect(() => {
     if (!allTabsOpen) return;
-    setTabQuery("");
-    window.requestAnimationFrame(() => searchInputRef.current?.focus());
-  }, [allTabsOpen]);
+    if (focusSearchRef.current) window.requestAnimationFrame(() => {
+      if (!compact) { searchInputRef.current?.focus(); return; }
+      const target = activeTabId ? tabButtonsRef.current.get(activeTabId) : undefined;
+      (target || searchButtonRef.current)?.focus();
+    });
+    focusSearchRef.current = false;
+  }, [activeTabId, allTabsOpen, compact]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -230,8 +302,11 @@ export function WorkspaceBrowserTabs({
     const index = tabs.findIndex((tab) => tab.id === tabId);
     const fallbackId = tabs[index + 1]?.id || tabs[index - 1]?.id;
     onClose(tabId);
-    focusTab(tabButtonsRef.current, fallbackId);
-  }, [onClose, tabs]);
+    window.requestAnimationFrame(() => {
+      const fallback = fallbackId ? tabButtonsRef.current.get(fallbackId) : undefined;
+      (fallback || searchInputRef.current || allTabsButtonRef.current)?.focus();
+    });
+  }, [tabs, onClose]);
 
   const activateAndFocus = useCallback((tabId: string) => {
     onActivate(tabId);
@@ -239,27 +314,28 @@ export function WorkspaceBrowserTabs({
   }, [onActivate]);
 
   const openContextMenu = useCallback((tabId: string, x: number, y: number) => {
-    setAllTabsOpen(false);
+    clearHoverTimer();
     setContextMenu({
       tabId,
       x: Math.max(8, Math.min(x, window.innerWidth - 206)),
       y: Math.max(8, Math.min(y, window.innerHeight - 300))
     });
-  }, []);
+  }, [clearHoverTimer]);
 
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number, tab: WorkspaceBrowserTab) => {
+    const visibleTabs = compact ? filteredTabs : tabs;
     let nextIndex: number | null = null;
-    if (event.ctrlKey && event.key === "PageUp") nextIndex = (index - 1 + tabs.length) % tabs.length;
-    else if (event.ctrlKey && event.key === "PageDown") nextIndex = (index + 1) % tabs.length;
-    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
-    else if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+    if (event.ctrlKey && event.key === "PageUp") nextIndex = (index - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (event.ctrlKey && event.key === "PageDown") nextIndex = (index + 1) % visibleTabs.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (event.key === "ArrowRight") nextIndex = (index + 1) % visibleTabs.length;
     else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = tabs.length - 1;
-    else if (event.ctrlKey && event.key.toLocaleLowerCase() === "w") {
+    else if (event.key === "End") nextIndex = visibleTabs.length - 1;
+    else if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "w") {
       event.preventDefault();
       requestClose(tab.id);
       return;
-    } else if (event.ctrlKey && event.shiftKey && event.key.toLocaleLowerCase() === "t" && recentlyClosedCount > 0) {
+    } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLocaleLowerCase() === "t" && recentlyClosedCount > 0) {
       event.preventDefault();
       onReopenLastClosed();
       return;
@@ -271,7 +347,7 @@ export function WorkspaceBrowserTabs({
     }
     if (nextIndex === null) return;
     event.preventDefault();
-    activateAndFocus(tabs[nextIndex].id);
+    activateAndFocus(visibleTabs[nextIndex].id);
   };
 
   const clearPointerDragVisuals = () => {
@@ -361,8 +437,8 @@ export function WorkspaceBrowserTabs({
     const track = trackRef.current;
     if (!track) return;
     const trackRect = track.getBoundingClientRect();
-    if (event.clientX < trackRect.left + 36) track.scrollBy({ left: -22 });
-    else if (event.clientX > trackRect.right - 36) track.scrollBy({ left: 22 });
+    if (event.clientX < trackRect.left + 24) track.scrollBy({ left: -18 });
+    else if (event.clientX > trackRect.right - 24) track.scrollBy({ left: 18 });
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -394,32 +470,9 @@ export function WorkspaceBrowserTabs({
     if (drag.dragging) window.setTimeout(() => { suppressClickRef.current = false; }, 0);
   };
 
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const track = trackRef.current;
-    if (!track || !overflow.active || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
-    event.preventDefault();
-    track.scrollBy({ left: event.deltaY });
-  };
-
-  const menuTabIndex = contextMenu ? tabs.findIndex((tab) => tab.id === contextMenu.tabId) : -1;
-  const menuTab = menuTabIndex >= 0 ? tabs[menuTabIndex] : undefined;
-
-  if (!tabs.length) return null;
-  return (
-    <nav className={`workspace-browser-tabs motion-${motion} ${className}`.trim()} aria-label={ariaLabel}>
-      {overflow.active && (
-        <button
-          type="button"
-          className="workspace-browser-tabs__scroll"
-          aria-label="向左滚动标签"
-          disabled={!overflow.left}
-          onClick={() => trackRef.current?.scrollBy({ left: -Math.max(180, trackRef.current.clientWidth * 0.7), behavior: "smooth" })}
-        >
-          <ChevronLeft size={15} />
-        </button>
-      )}
-      <div ref={trackRef} className="workspace-browser-tabs__track" role="tablist" aria-orientation="horizontal" onWheel={handleWheel}>
-        {tabs.map((tab, index) => {
+  const renderTabStrip = (displayedTabs: readonly WorkspaceBrowserTab[]) => (
+      <div ref={trackRef} className="workspace-browser-tabs__track" role="tablist" aria-orientation="horizontal" aria-label="打开的页面">
+        {displayedTabs.map((tab, visibleIndex) => {
           const active = tab.id === activeTabId;
           return (
             <div
@@ -440,7 +493,7 @@ export function WorkspaceBrowserTabs({
                 role="tab"
                 aria-controls={ariaControlsId}
                 aria-selected={active}
-                tabIndex={active || (activeTabId === null && index === 0) ? 0 : -1}
+                tabIndex={active || (!displayedTabs.some((item) => item.id === activeTabId) && visibleIndex === 0) ? 0 : -1}
                 title={tab.detail ? `${tab.title}\n${tab.detail}` : tab.title}
                 onClick={() => {
                   if (suppressClickRef.current) {
@@ -455,7 +508,7 @@ export function WorkspaceBrowserTabs({
                   requestClose(tab.id);
                 }}
                 onDoubleClick={() => { if (!tab.pinned) onPinnedChange(tab.id, true); }}
-                onKeyDown={(event) => handleTabKeyDown(event, index, tab)}
+                onKeyDown={(event) => handleTabKeyDown(event, visibleIndex, tab)}
                 onPointerDown={(event) => handlePointerDown(event, tab.id)}
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
@@ -496,83 +549,136 @@ export function WorkspaceBrowserTabs({
             </div>
           );
         })}
+        {!displayedTabs.length && <p className="workspace-browser-tabs__empty">没有匹配的页面</p>}
       </div>
-      {overflow.active && (
-        <button
+  );
+
+  const menuTabIndex = contextMenu ? tabs.findIndex((tab) => tab.id === contextMenu.tabId) : -1;
+  const menuTab = menuTabIndex >= 0 ? tabs[menuTabIndex] : undefined;
+
+  if (!tabs.length) return null;
+  return (
+    <nav
+      ref={rootRef}
+      className={`workspace-browser-tabs ${compact ? "is-compact" : "is-inline"} motion-${motion} ${allTabsOpen ? "is-open" : ""} ${className}`.trim()}
+      aria-label={ariaLabel}
+      onPointerEnter={(event) => {
+        if (!compact || event.pointerType !== "mouse") return;
+        hoveredRef.current = true;
+        clearHoverTimer();
+        if (!allTabsOpen) hoverTimerRef.current = window.setTimeout(() => openPopover(false), 200);
+      }}
+      onPointerLeave={(event) => {
+        if (!compact || event.pointerType !== "mouse") return;
+        hoveredRef.current = false;
+        scheduleClose();
+      }}
+      onBlur={(event) => {
+        if (!containsNode(event.relatedTarget as Node | null)) scheduleClose();
+      }}
+    >
+      {activeTab && activeTab.resource.kind !== "conversation" && onReturnToConversation && <button
+        type="button"
+        className="workspace-browser-tabs__return"
+        aria-label="返回对话"
+        title="返回对话"
+        onClick={() => { closePopover(); onReturnToConversation(); }}
+      ><ArrowLeft size={15} /></button>}
+      {!compact && renderTabStrip(tabs)}
+      <button
+        ref={allTabsButtonRef}
+        type="button"
+        className={compact ? "workspace-browser-tabs__current" : "workspace-browser-tabs__all"}
+        aria-expanded={allTabsOpen}
+        aria-haspopup="dialog"
+        aria-controls={popoverId}
+        aria-label={compact ? "切换页面" : "全部页面"}
+        title={compact ? activeTab?.detail ? `${activeTab.title}\n${activeTab.detail}` : activeTab?.title || "已打开页面" : "搜索和管理已打开页面"}
+        onClick={() => {
+          setContextMenu(null);
+          if (allTabsOpen && clickOpenedRef.current) {
+            closePopover();
+          } else openPopover(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            openPopover(true);
+          }
+        }}
+      >
+        <span className="workspace-browser-tab__icon" aria-hidden="true"><PanelsTopLeft size={15} /></span>
+        {compact && <><span className="workspace-browser-tabs__current-label">{activeTab?.resource.kind === "conversation" ? "页面" : activeTab?.title || "页面"}</span>
+          {activeTab?.status === "loading" && <LoaderCircle className="workspace-browser-tab__status is-loading" size={13} aria-label="加载中" />}
+          {activeTab?.status === "error" && <CircleAlert className="workspace-browser-tab__status is-error" size={13} aria-label="加载失败" />}
+          <ChevronDown size={13} className="workspace-browser-tabs__chevron" aria-hidden="true" />
+        </>}
+      </button>
+      {allTabsOpen && createPortal(<section
+        ref={popoverRef}
+        id={popoverId}
+        className={`workspace-browser-tabs__popover ${compact ? "is-compact" : "is-page-menu"} motion-${motion} ${reduceMotion ? "is-motion-reduced" : ""}`}
+        role="dialog"
+        aria-label="已打开页面"
+        style={{ left: popoverPosition.left, top: popoverPosition.top, maxHeight: popoverPosition.maxHeight }}
+        onPointerEnter={() => { hoveredRef.current = true; clearHoverTimer(); }}
+        onPointerLeave={() => { hoveredRef.current = false; scheduleClose(); }}
+        onBlur={(event) => { if (!containsNode(event.relatedTarget as Node | null)) scheduleClose(); }}
+      >
+        <div className="workspace-browser-tabs__popover-head"><strong>页面</strong><span>{tabs.length}/{maxTabs}</span><div className="workspace-browser-tabs__toolbar">
+          {compact && <><button type="button" aria-label="向左滚动页面" title="向左滚动页面" onClick={() => trackRef.current?.scrollBy({ left: -260, behavior: reduceMotion ? "instant" : "smooth" })}><ChevronLeft size={14} /></button>
+          <button type="button" aria-label="向右滚动页面" title="向右滚动页面" onClick={() => trackRef.current?.scrollBy({ left: 260, behavior: reduceMotion ? "instant" : "smooth" })}><ChevronRight size={14} /></button></>}
+          <button ref={searchButtonRef} type="button" aria-label="搜索页面" title="搜索页面" aria-expanded={searchOpen} onClick={() => { setSearchOpen((open) => !open); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }}><Search size={14} /></button>
+          <button type="button" aria-label="恢复最近关闭的页面" title="恢复最近关闭的页面" disabled={recentlyClosedCount === 0} onClick={() => onReopenLastClosed()}><History size={14} /></button>
+        </div></div>
+        {(searchOpen || tabQuery) && <label className="workspace-browser-tabs__search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            value={tabQuery}
+            onChange={(event) => setTabQuery(event.target.value)}
+            placeholder="搜索页面"
+            aria-label="搜索页面"
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowDown" || !filteredTabs.length) return;
+              event.preventDefault();
+              if (compact) focusTab(tabButtonsRef.current, filteredTabs[0].id);
+              else popoverRef.current?.querySelector<HTMLButtonElement>(".workspace-browser-tabs__all-list > button")?.focus();
+            }}
+          />
+          {tabQuery && <button type="button" aria-label="清空页面搜索" onClick={() => { setTabQuery(""); searchInputRef.current?.focus(); }}><X size={13} /></button>}
+        </label>}
+      {compact ? renderTabStrip(filteredTabs) : <div className="workspace-browser-tabs__all-list">
+        {filteredTabs.map((tab) => <button
           type="button"
-          className="workspace-browser-tabs__scroll"
-          aria-label="向右滚动标签"
-          disabled={!overflow.right}
-          onClick={() => trackRef.current?.scrollBy({ left: Math.max(180, trackRef.current.clientWidth * 0.7), behavior: "smooth" })}
-        >
-          <ChevronRight size={15} />
-        </button>
-      )}
-      <div className="workspace-browser-tabs__all-wrap">
-        <button
-          ref={allTabsButtonRef}
-          type="button"
-          className={`workspace-browser-tabs__all ${allTabsOpen ? "is-open" : ""}`}
-          aria-expanded={allTabsOpen}
-          aria-haspopup="dialog"
-          aria-label={`全部标签，已打开 ${tabs.length} 个，最多 ${maxTabs} 个`}
-          title="全部标签"
-          onClick={() => { setContextMenu(null); setAllTabsOpen((open) => !open); }}
-        >
-          <ListFilter size={15} />
-          <span>{tabs.length}/{maxTabs}</span>
-        </button>
-        {allTabsOpen && (
-          <section className="workspace-browser-tabs__popover" role="dialog" aria-label="全部标签">
-            <div className="workspace-browser-tabs__popover-head">
-              <strong>全部标签</strong>
-              <span>{tabs.length}/{maxTabs}</span>
-            </div>
-            <label className="workspace-browser-tabs__search">
-              <Search size={14} aria-hidden="true" />
-              <input
-                ref={searchInputRef}
-                value={tabQuery}
-                onChange={(event) => setTabQuery(event.target.value)}
-                placeholder="搜索标签"
-                aria-label="搜索标签"
-              />
-            </label>
-            <div className="workspace-browser-tabs__list">
-              {filteredTabs.map((tab) => (
-                <button
-                  type="button"
-                  className={tab.id === activeTabId ? "is-active" : ""}
-                  key={tab.id}
-                  onClick={() => { activateAndFocus(tab.id); setAllTabsOpen(false); }}
-                >
-                  <ResourceIcon tab={tab} conversationProviders={conversationProviders} />
-                  <span><strong>{tab.title}</strong>{tab.detail && <small>{tab.detail}</small>}</span>
-                  {tab.id === activeTabId && <Check size={14} aria-label="当前标签" />}
-                </button>
-              ))}
-              {!filteredTabs.length && <p>没有匹配的标签</p>}
-            </div>
-            <button
-              type="button"
-              className="workspace-browser-tabs__restore"
-              disabled={recentlyClosedCount === 0}
-              onClick={() => { onReopenLastClosed(); setAllTabsOpen(false); }}
-            >
-              <History size={14} />
-              <span>恢复最近关闭的标签</span>
-              {recentlyClosedCount > 0 && <small>{recentlyClosedCount}</small>}
-            </button>
-          </section>
-        )}
-      </div>
+          key={tab.id}
+          className={tab.id === activeTabId ? "is-active" : undefined}
+          aria-label={`切换到 ${tab.title}`}
+          onClick={() => { onActivate(tab.id); closePopover(); focusTab(tabButtonsRef.current, tab.id); }}
+          onKeyDown={(event) => {
+            const buttons = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button") || []);
+            const current = buttons.indexOf(event.currentTarget);
+            let index: number | null = null;
+            if (event.key === "ArrowDown") index = (current + 1) % buttons.length;
+            else if (event.key === "ArrowUp") index = (current - 1 + buttons.length) % buttons.length;
+            else if (event.key === "Home") index = 0;
+            else if (event.key === "End") index = buttons.length - 1;
+            if (index !== null) { event.preventDefault(); buttons[index]?.focus(); }
+          }}
+        ><ResourceIcon tab={tab} conversationProviders={conversationProviders} /><span><strong>{tab.title}</strong>{tab.detail && <small>{tab.detail}</small>}</span>{tab.pinned && <Pin size={12} aria-label="已固定" />}</button>)}
+        {!filteredTabs.length && <p className="workspace-browser-tabs__empty">没有匹配的页面</p>}
+      </div>}
+      </section>, document.body)}
       {contextMenu && menuTab && (
-        <div
+        createPortal(<div
           ref={contextMenuRef}
           className="workspace-browser-tab-menu"
           role="menu"
           aria-label={`${menuTab.title} 标签操作`}
           style={{ left: contextMenu.x, top: contextMenu.y }}
+          onPointerEnter={() => clearHoverTimer()}
+          onPointerLeave={scheduleClose}
+          onBlur={(event) => { if (!containsNode(event.relatedTarget as Node | null)) scheduleClose(); }}
           onContextMenu={(event) => event.preventDefault()}
           onKeyDown={(event) => {
             const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
@@ -594,8 +700,8 @@ export function WorkspaceBrowserTabs({
           <span className="workspace-browser-tab-menu__separator" role="separator" />
           <button type="button" role="menuitem" onClick={() => { requestClose(menuTab.id); setContextMenu(null); }}>关闭</button>
           <button type="button" role="menuitem" disabled={tabs.length <= 1} onClick={() => { onCloseOthers(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭其他标签</button>
-          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onCloseRight(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭右侧标签</button>
-        </div>
+          <button type="button" role="menuitem" disabled={menuTabIndex === tabs.length - 1} onClick={() => { onCloseRight(menuTab.id); setContextMenu(null); focusTab(tabButtonsRef.current, menuTab.id); }}>关闭右侧页面</button>
+        </div>, document.body)
       )}
     </nav>
   );

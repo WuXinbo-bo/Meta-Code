@@ -1,0 +1,15 @@
+.native-terminal-backdrop { position: fixed; inset: 0; z-index: 150; background: #13171b66; display: grid; place-items: center; padding: 24px; }
+.native-terminal-dialog { box-sizing: border-box; min-width: 0; width: min(1100px, calc(100vw - 48px)); max-width: calc(100vw - 48px); overflow: hidden; height: min(760px, calc(100dvh - 48px)); background: var(--panel, #fff); color: var(--text, #20252b); border: 1px solid var(--border, #dfe3e7); border-radius: 16px; box-shadow: 0 24px 80px #0003; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.native-terminal-dialog header { display: flex; align-items: center; gap: 10px; }
+.native-terminal-dialog header div { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.native-terminal-dialog header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.native-terminal-dialog small, .native-terminal-dialog p { color: var(--muted, #737b85); font-size: 12px; }
+.native-terminal-dialog p { margin: 0; line-height: 1.6; }
+.native-terminal-dialog button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border, #dfe3e7); border-radius: 8px; background: transparent; color: inherit; padding: 7px 10px; cursor: pointer; }
+.native-terminal-dialog button:disabled { opacity: .5; cursor: wait; }
+.native-terminal-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.native-terminal-actions label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.native-terminal-actions small { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.native-terminal-surface { flex: 1; min-height: 120px; min-width: 0; background: #181b1f; border-radius: 10px; padding: 12px; overflow: hidden; }
+.native-terminal-error { font-size: 12px; color: var(--muted, #737b85); }
+@media (max-width: 640px) { .native-terminal-backdrop { padding: 8px; } .native-terminal-dialog { padding: 12px; width: calc(100vw - 16px); max-width: calc(100vw - 16px); height: calc(100dvh - 16px); } .native-terminal-actions small { max-width: 100%; } }

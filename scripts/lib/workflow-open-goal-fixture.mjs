@@ -1,0 +1,14 @@
+export const invoiceExportReadme = "# Invoice CSV export\nexportInvoices(rows) exports columns name and amount with a header. CSV fields containing comma, quotes or newlines must use RFC 4180 quoting. Numeric zero must remain zero. Keep the public API synchronous and do not mutate input rows.\n";
+export const brokenInvoiceExportSource = 'export function exportInvoices(rows) { return "name,amount\\n" + rows.map(row => [row.name || "", row.amount || ""].join(",")).join("\\n"); }\n';
+export const invoiceExportOracle = String.raw`import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+const {exportInvoices}=await import(pathToFileURL(process.argv[2]));
+const rows=[{name:'Acme, Ltd',amount:0},{name:'Say "hi"',amount:2},{name:'Line\nBreak',amount:3}];
+const before=JSON.stringify(rows);
+const actual=exportInvoices(rows);
+assert.equal(typeof actual,'string','Public API stays synchronous');
+assert.equal(actual.replaceAll('\r\n','\n').replace(/\n$/,''),'name,amount\n"Acme, Ltd",0\n"Say ""hi""",2\n"Line\nBreak",3');
+assert.equal(JSON.stringify(rows),before,'Do not mutate source rows');
+assert.equal(exportInvoices([]).replace(/\r?\n$/,''),'name,amount');
+console.log('Independent CSV behavior checks passed');
+`;

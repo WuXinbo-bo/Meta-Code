@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -101,6 +102,9 @@ await fsp.writeFile(path.join(runtime, "package-lock.json"), await fsp.readFile(
 
 console.log("[desktop] installing isolated production dependencies");
 await runNpm(["install", "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts"], runtime);
+// Set native helper permissions before signing the application bundle.
+const { prepareNativePty } = await import(pathToFileURL(path.join(runtime, "dist-server", "engines", "nativePtyRuntime.js")).href);
+prepareNativePty(path.join(runtime, "node_modules", "node-pty"));
 
 const desktopPackage = {
   name: "meta-code-desktop",

@@ -7,8 +7,8 @@ function argumentsFrom(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === "--help" || value === "-h") result.help = true;
-    else if (value.startsWith("--")) result[value.slice(2)] = argv[index + 1] ?? "";
-    if (value.startsWith("--")) index += 1;
+    else if (value === "--stdin") result.stdin = true;
+    else if (value.startsWith("--")) { result[value.slice(2)] = argv[index + 1] ?? ""; index += 1; }
   }
   return result;
 }
@@ -19,7 +19,8 @@ function help() {
     "",
     "用法：",
     "  node scripts/delegate-agent.mjs --provider codex --task \"实现并测试接口\" --cwd .",
-    "  node scripts/delegate-agent.mjs --provider claude --file .claude-codex/tasks/review.json",
+    "  node scripts/delegate-agent.mjs --provider claude --stdin < request.json",
+    "  --stdin 接收 JSON 标准输入，可使用管道或终端 here-document，无需创建文件。",
     "",
     "JSON 字段：providerId、taskId、nickname、mode、prompt、cwd、acceptance、capabilityRequirements"
   ].join("\n"));
@@ -37,7 +38,18 @@ async function main() {
   }
 
   let task = {};
-  if (args.file) task = JSON.parse(await fs.readFile(String(args.file), "utf8"));
+  if (args.file && args.stdin) { console.error("--file 和 --stdin 不能同时使用"); return 2; }
+  if (args.stdin) {
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of process.stdin) {
+      bytes += chunk.length;
+      if (bytes > 1024 * 1024) throw new Error("委派请求不能超过 1 MB");
+      chunks.push(chunk);
+    }
+    task = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } else if (args.file) task = JSON.parse(await fs.readFile(String(args.file), "utf8"));
+  if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("委派请求必须是 JSON 对象");
   const providerId = String(args.provider || task.providerId || task.provider || "").trim().toLowerCase();
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(providerId)) { console.error("缺少或无效的 --provider"); return 2; }
   const prompt = String(args.task || task.prompt || "").trim();
@@ -92,4 +104,5 @@ async function main() {
   }
 }
 
-process.exitCode = await main();
+try { process.exitCode = await main(); }
+catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 2; }

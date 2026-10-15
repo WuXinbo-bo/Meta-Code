@@ -65,6 +65,7 @@ export type AgentCapabilities = {
     stream: boolean;
     cancel: boolean;
     steer: boolean;
+    interactiveTerminal?: boolean;
   };
   workspace: {
     read: boolean;
@@ -91,6 +92,95 @@ export type AgentCapabilities = {
   };
 };
 
+/**
+ * A capability patch is used for surfaces that are discovered at runtime.
+ * Keeping every field optional lets legacy manifests continue to publish the
+ * original `capabilities` object while native, workbench, and transport
+ * capabilities are introduced incrementally.
+ */
+export type AgentCapabilityPatch = {
+  sessions?: Partial<AgentCapabilities["sessions"]>;
+  execution?: Partial<AgentCapabilities["execution"]>;
+  workspace?: Partial<AgentCapabilities["workspace"]>;
+  tools?: Partial<AgentCapabilities["tools"]>;
+  delegation?: Partial<AgentCapabilities["delegation"]>;
+  workflow?: Partial<AgentCapabilities["workflow"]>;
+  configuration?: Partial<Omit<AgentCapabilities["configuration"], "reasoningEffortValues">> & {
+    reasoningEffortValues?: string[];
+  };
+};
+
+export type AgentCapabilityMode = "native" | "managed" | "degraded";
+
+export type AgentTransportKind = "native" | "acp" | "unknown";
+
+export type AgentTransportCapabilities = {
+  kind: AgentTransportKind;
+  /** Whether this transport is the provider's enhanced/native integration. */
+  enhanced: boolean;
+  standard: "native" | "acp-v1" | "unknown";
+  protocolVersion?: string | number;
+  /** Capabilities negotiated by the transport handshake. */
+  capabilities?: AgentCapabilityPatch;
+  [key: string]: unknown;
+};
+
+export type AgentVersionRequirements = {
+  /** Minimum adapter SDK contract understood by the workbench. */
+  minAdapterSdkVersion?: number;
+  /** Minimum provider/runtime version, when the adapter requires one. */
+  minRuntimeVersion?: string;
+  /** Compatibility alias used by older capability reports. */
+  minimum?: string;
+  maxRuntimeVersion?: string;
+  runtimeId?: string;
+  requiredFeatures?: string[];
+};
+
+export type AgentRuntimeProbeStatus = "ready" | "unavailable" | "unknown" | "error";
+
+/** A serializable result of probing the selected CLI/SDK runtime. */
+export type AgentRuntimeProbe = {
+  status: AgentRuntimeProbeStatus;
+  available: boolean;
+  command?: string;
+  executablePath?: string;
+  version?: string;
+  source?: string;
+  checkedAt: string;
+  latencyMs?: number;
+  error?: string;
+  details?: Record<string, unknown>;
+};
+
+export type AgentCapabilityRestriction = {
+  capability: string;
+  reason: string;
+  scope?: "native" | "managed" | "transport" | "version" | "runtime" | "unknown";
+};
+
+export type AgentCapabilitySnapshot = {
+  schemaVersion: 1;
+  providerId: AgentProviderId;
+  mode: AgentCapabilityMode;
+  requestedMode: Exclude<AgentCapabilityMode, "degraded">;
+  nativeCapabilities: AgentCapabilities;
+  workbenchCapabilities: AgentCapabilities;
+  transportCapabilities: AgentTransportCapabilities;
+  versionRequirements: AgentVersionRequirements;
+  runtimeProbe: AgentRuntimeProbe;
+  restrictions: AgentCapabilityRestriction[];
+  degradedReasons: string[];
+  modes: Record<AgentCapabilityMode, {
+    available: boolean;
+    restrictions: AgentCapabilityRestriction[];
+    reasons: string[];
+  }>;
+  /** Capabilities that are safe to expose for this exact runtime and mode. */
+  effectiveCapabilities: AgentCapabilities;
+  capturedAt: string;
+};
+
 export type AgentBranding = {
   icon: string;
   accent: string;
@@ -113,6 +203,16 @@ export type AgentDescriptor = {
   capabilities: AgentCapabilities;
   branding: AgentBranding;
   skillProjection: AgentSkillProjection;
+  /**
+   * Optional capability surfaces. Legacy descriptors use `capabilities` for
+   * both surfaces and are normalized by the capability probe.
+   */
+  nativeCapabilities?: AgentCapabilityPatch;
+  workbenchCapabilities?: AgentCapabilityPatch;
+  transportCapabilities?: Partial<AgentTransportCapabilities>;
+  versionRequirements?: AgentVersionRequirements;
+  restrictions?: AgentCapabilityRestriction[];
+  degradedReasons?: string[];
   /** Present for V1 manifests; omitted only by legacy persisted descriptors. */
   sdkVersion?: AgentAdapterSdkVersion;
   configurationSchema?: AgentProviderConfigurationSchema;

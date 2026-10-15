@@ -4,15 +4,17 @@ import { App } from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { HelpProvider } from "./help/HelpProvider";
 import { ConfirmationProvider } from "./components/ConfirmationProvider";
-import { applyTheme, getInitialTheme } from "./branding/ThemeToggle";
+import { startThemeSynchronization } from "./branding/ThemeToggle";
 import "./styles.css";
 import "./design/tokens.css";
 import "./design/shell.css";
 import "./design/conversation.css";
 import "./design/features.css";
 import "./design/workflow.css";
+import "./design/task-navigation.css";
 
-applyTheme(getInitialTheme());
+const stopThemeSynchronization = startThemeSynchronization();
+import.meta.hot?.dispose(stopThemeSynchronization);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

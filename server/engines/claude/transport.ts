@@ -12,6 +12,7 @@ export function claudeRetryAllowed(value: unknown, status?: unknown, policy = CL
 }
 
 export type ClaudeConnectionSettings = {
+  credentialKind?: "api-key" | "auth-token";
   baseUrl?: string;
   apiKey?: string;
   model?: string;

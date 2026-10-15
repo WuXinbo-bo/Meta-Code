@@ -189,7 +189,7 @@ export class ManagedSkillManager {
 
   listPublic(): PublicSkillSummary[] {
     return fs.readdirSync(this.root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name !== LEGACY_SKILL_MANAGER_NAME)
+      .filter((entry) => entry.isDirectory() && entry.name !== LEGACY_SKILL_MANAGER_NAME && entry.name !== BUILTIN_DELEGATION_SKILL_NAME)
       .map((entry) => this.readMetadata(entry.name))
       .filter((item): item is PublicSkillSummary => Boolean(item))
       .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));

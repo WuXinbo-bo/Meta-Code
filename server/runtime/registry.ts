@@ -44,8 +44,8 @@ function codexCandidates(root: string) {
     path.join(root, "node_modules", ".bin", "codex.cmd")
   ];
   if (process.platform === "darwin") return [
-    path.join(base, "codex-darwin-arm64", "vendor", "aarch64-apple-darwin", "codex", "codex"),
-    path.join(base, "codex-darwin-x64", "vendor", "x86_64-apple-darwin", "codex", "codex")
+    path.join(base, "codex-darwin-arm64", "vendor", "aarch64-apple-darwin", "bin", "codex"),
+    path.join(base, "codex-darwin-x64", "vendor", "x86_64-apple-darwin", "bin", "codex")
   ];
   return [
     path.join(root, "node_modules", ".bin", "codex"),

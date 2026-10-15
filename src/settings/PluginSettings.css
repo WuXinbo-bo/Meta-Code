@@ -1,0 +1,10 @@
+.plugin-capabilities { display: flex; flex-wrap: wrap; gap: 5px; }
+.plugin-capabilities span { padding: 4px 7px; border: 1px solid var(--mc-line); border-radius: 6px; font-size: 11px; color: var(--mc-text-secondary); }
+.plugin-runtime-status { display: flex; align-items: flex-start; gap: 6px; color: var(--mc-text-secondary); font-size: 11px; line-height: 1.5; }
+.plugin-runtime-status svg { flex: 0 0 auto; margin-top: 2px; }
+.plugin-runtime-status small { display: block; color: var(--mc-text-tertiary); }
+.plugin-refresh { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--mc-line); padding: 5px 8px; border-radius: 6px; background: var(--mc-surface); color: var(--mc-text-secondary); font: inherit; font-size: 11px; cursor: pointer; }
+
+.plugin-settings .plugin-refresh { width: fit-content; justify-self: start; }
+.plugin-settings .settings-provider-panel .settings-grid > p { margin: 0; font-size: 12px; line-height: 1.6; }
+.plugin-settings .settings-provider-panel .settings-grid { gap: 15px; }

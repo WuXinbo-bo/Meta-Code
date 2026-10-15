@@ -1,30 +1,24 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { AlertTriangle, Bot, Brain, Check, ChevronDown, CircleAlert, CircleCheck, CircleMinus, Clock3, Copy, ExternalLink, FileCheck2, FileJson2, FileOutput, FolderOpen, GitBranch, Layers3, LayoutGrid, ListChecks, LoaderCircle, LocateFixed, Maximize2, PanelRightClose, Pause, Pencil, Play, Plus, RefreshCw, Route, Send, StopCircle, Wrench, X } from "lucide-react";
-import { AgentConversation, useAgentOutputFollow } from "../components/AgentConversation";
-import { AgentDrawer, AgentTaskDescription } from "../components/AgentDrawer";
-import { agentStreamVersion } from "../components/activityModel";
+import { AlertTriangle, Bot, Brain, Check, ChevronDown, CircleAlert, CircleCheck, CircleMinus, Clock3, Copy, ExternalLink, FileCheck2, FileJson2, FileOutput, FolderOpen, GitBranch, Layers3, LayoutGrid, ListChecks, LoaderCircle, LocateFixed, Maximize2, MessageCircle, PanelRightClose, Pause, Pencil, Play, Plus, RefreshCw, Route, Send, StopCircle, Wrench, X } from "lucide-react";
+import { type SharedAgentLog } from "../components/activityModel";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import { HelpButton } from "../help/HelpProvider";
 import { confirmAction } from "../components/ConfirmationProvider";
 import { realtimeCoordinator } from "../realtimeCoordinator";
 import type { AgentProviderDescriptor } from "../agents/types";
+import { workflowConversationSource, type ConversationHandoff, type WorkflowTaskContext } from "../tasks/workflowConversationSource";
+import { ExecutionTargetSelect, WorkflowDefinitionPicker, WorkflowExtensions, type ExecutionTarget } from "./WorkflowExtensions";
+import "./WorkflowExperience.css";
+import { publicWorkflowActivity } from "./publicActivity";
+import { coalescedWorkflowRefresh } from "./eventRefresh";
+import { WorkflowAgentDrawer } from "./WorkflowAgentDrawer";
+import { workflowAgentPresentation, workflowFolderLabel, workflowTargetLabel, type WorkflowAgentResult } from "./agentPresentation";
 
 type Engine = string;
-type Log = { id: string; createdAt: string; kind: "status" | "message" | "reasoning" | "tool" | "error"; title: string; text: string; attempt?: number; runId?: string; contextId?: string | null };
-type Result = {
-  outcome: "completed" | "partial" | "blocked" | "failed";
-  humanSummary: string;
-  outputs: Array<{ id: string; type: string; path: string | null; mediaType: string | null; description: string; consumableBy: string[] }>;
-  changedFiles: string[];
-  checks: Array<{ name: string; command: string | null; status: "passed" | "failed" | "not_run"; exitCode: number | null; evidence: string }>;
-  decisions: Array<{ key: string; value: string; reason: string }>;
-  handoff: { facts: string[]; constraints: string[]; nextAgentInstructions: string[] };
-  warnings: string[];
-  unresolved: string[];
-  machineResultPath: string | null;
-};
+type Log = SharedAgentLog & { attempt?: number; runId?: string; contextId?: string | null };
+type Result = WorkflowAgentResult;
 type Node = { id: string; title: string; objective: string; nonGoals: string[]; constraints: string[]; dependsOn: string[]; provider: Engine | "auto"; providerReason: string; skills: string[]; mcpServers: string[]; mcpRequired: boolean; workspaceAccess: "read" | "write"; writeScope: string[]; requiredArtifacts: string[]; deliverables: string[]; acceptance: string[]; verificationCommands: string[]; status: string; attempt: number; summary: Result | null; logs: Log[]; error: string | null; resultRepairable: boolean };
 type PlanNode = Omit<Node, "status" | "attempt" | "summary" | "logs" | "error" | "resultRepairable">;
 type GraphEdge = { id: string; from: string; to: string; status: string };
@@ -33,13 +27,29 @@ type Point = { x: number; y: number };
 type NodeOffsets = Record<string, Point>;
 type CanvasLayout = { version: 2; viewport: { x: number; y: number; zoom: number }; nodes: NodeOffsets };
 type PlanAudit = { status: "passed" | "revised" | "needs_input"; checks: Array<{ key: string; status: "passed" | "revised" | "warning"; note: string }>; changes: string[] };
+type ValidationMode = "standard" | "strict" | "deterministic";
 type FinalDelivery = { required: boolean; directory: string; primary: string | null; format: string; additional: string[]; producerNodeId: string | null; reason: string };
-type Workflow = { id: string; workDirectory: string; originId: string; parentWorkflowId: string | null; branchIndex: number; branchLabel: string; title: string; originalPrompt: string; plannerEngine: Engine; maxConcurrentAgents: number | null; status: string; pausedFromStatus: string | null; pausedPlanningMode: "initial" | "refine" | "fresh" | null; pausedPlanningMaintenance: boolean; revision: number; activePlanVersion: number; reviewNote: string | null; finalResult: Result | null; plannerLogs: Log[]; plannerStartedAt: string | null; plannerFinishedAt: string | null; integrationLogs: Log[]; integrationStartedAt: string | null; integrationFinishedAt: string | null; plan: { title: string; summary: string; assumptions: string[]; questions: string[]; risks: string[]; finalDelivery: FinalDelivery; audit: PlanAudit; nodes: PlanNode[] } | null; nodes: Node[] };
+type Workflow = { id: string; createdAt?: string; workDirectory: string; executionTarget?: ExecutionTarget; executionRoot?: string; workspaceRoot?: string; worktreeId?: string | null; pauseMode?: "checkpoint" | "immediate" | null; pendingMaintenance?: { note: string; intent: "question" | "adjust"; plannerEngine: string; requestedAt: string; resumeAfter: boolean } | null; originId: string; parentWorkflowId: string | null; branchIndex: number; branchLabel: string; title: string; originalPrompt: string; plannerEngine: Engine; maxConcurrentAgents: number | null; status: string; pausedFromStatus: string | null; pausedPlanningMode: "initial" | "refine" | "fresh" | null; pausedPlanningMaintenance: boolean; revision: number; activePlanVersion: number; reviewNote: string | null; finalResult: Result | null; plannerLogs: Log[]; plannerStartedAt: string | null; plannerFinishedAt: string | null; integrationLogs: Log[]; integrationStartedAt: string | null; integrationFinishedAt: string | null; plan: { title: string; summary: string; assumptions: string[]; questions: string[]; risks: string[]; finalDelivery: FinalDelivery; validationMode?: ValidationMode; audit: PlanAudit; nodes: PlanNode[] } | null; nodes: Node[] };
 type Runtime = { codex: { available: boolean }; claude: { available: boolean }; providers: Record<string, { available: boolean }> };
 type PlanImpact = { reused: string[]; rerun: string[]; added: string[]; removed: string[]; requiresIntegration: boolean };
 type MaintenanceBranch = { id: string; status: "idle" | "planning" | "ready" | "failed"; basePlanVersion: number; messages: Array<{ id: string; role: "user" | "assistant" | "system"; text: string; createdAt: string; planVersion?: number }>; candidatePlan: Workflow["plan"]; impact: PlanImpact | null; updatedAt: string };
-type PlannerAccepted = { accepted: true; alreadyRunning: boolean; workflow: Workflow };
+type PlannerAccepted = { accepted: true; alreadyRunning: boolean; queuedUntilCheckpoint?: boolean; queriedSnapshot?: boolean; queryAnswer?: string; workflow: Workflow };
 type ArtifactStatus = { path: string; relativePath: string | null; exists: boolean; kind: "file" | "directory" | "missing" | "invalid"; size: number | null };
+function WorkflowConversationSource({ handoff }: { handoff: ConversationHandoff }) {
+  const latest = handoff.latestUserRequest?.text.trim() || "";
+  const excerpt = (value: string, limit = 1200) => value.length > limit ? `${value.slice(0, limit)}…` : value;
+  return <details key={`${handoff.source.id}:${handoff.sourceRevision}:${handoff.createdAt}`} className="workflow-conversation-source" aria-label="对话转入编排的上下文">
+    <summary><MessageCircle size={13} /><span><strong>从对话进入编排</strong><small>{excerpt(latest || handoff.goal, 220)}</small></span><ChevronDown size={13} /></summary>
+    <dl>
+      <div><dt>初始目标</dt><dd>{excerpt(handoff.goal)}</dd></div>
+      {latest && latest !== handoff.goal && <div><dt>最近要求</dt><dd>{excerpt(latest, 1800)}</dd></div>}
+      {!!handoff.decisions?.length && <div><dt>参考决定</dt><dd>{handoff.decisions.slice(0, 3).map((value) => excerpt(value, 240)).join("；")}</dd></div>}
+      {!!handoff.files?.length && <div><dt>已有成果</dt><dd>{handoff.files.slice(0, 4).map((value) => excerpt(value, 180)).join("、")}</dd></div>}
+      {!!handoff.unresolved?.length && <div><dt>待处理</dt><dd>{handoff.unresolved.slice(0, 3).map((value) => excerpt(value, 240)).join("；")}</dd></div>}
+      {!!handoff.attachments?.length && <div><dt>附件</dt><dd>{handoff.attachments.slice(0, 4).map((attachment) => excerpt(attachment.name, 120)).join("、")}</dd></div>}
+    </dl>
+  </details>;
+}
 
 async function request<T>(url: string, options: RequestInit = {}) {
   const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
@@ -67,7 +77,7 @@ function readCanvasLayout(workflowId: string): CanvasLayout {
   } catch { return { version: 2, viewport: defaultViewport, nodes: {} }; }
 }
 
-function WorkflowReviewCard({ workflow, nodes, reviewNote, busy, onReviewNoteChange, onRefine, onFresh, onApprove, onSelectNode, onCollapse }: { workflow: Workflow; nodes: Node[]; reviewNote: string; busy: boolean; onReviewNoteChange: (value: string) => void; onRefine: () => void; onFresh: () => void; onApprove: () => void; onSelectNode: (id: string) => void; onCollapse: () => void }) {
+function WorkflowReviewCard({ workflow, nodes, impact, reviewNote, validationMode, onValidationModeChange, busy, onReviewNoteChange, onRefine, onFresh, onApprove, onSelectNode, onCollapse }: { workflow: Workflow; nodes: Node[]; impact?: PlanImpact | null; reviewNote: string; validationMode: ValidationMode; onValidationModeChange: (value: ValidationMode) => void; busy: boolean; onReviewNoteChange: (value: string) => void; onRefine: () => void; onFresh: () => void; onApprove: () => void; onSelectNode: (id: string) => void; onCollapse: () => void }) {
   const parallel = nodes.filter((node) => node.dependsOn.length === 0).length;
   const writes = nodes.filter((node) => node.workspaceAccess === "write").length;
   const dependent = nodes.filter((node) => node.dependsOn.length > 0).length;
@@ -75,10 +85,13 @@ function WorkflowReviewCard({ workflow, nodes, reviewNote, busy, onReviewNoteCha
     <header><div><span className="workflow-review-kicker"><ListChecks size={14} />计划审查</span><h3>{workflow.title}</h3></div><button type="button" className="workflow-review-log" title="查看规划 Agent 日志" onClick={() => onSelectNode("planner")}><Bot size={14} /></button><span className="workflow-review-version">v{workflow.activePlanVersion || 1}</span><button type="button" className="workflow-review-collapse" title="收起计划审查" onClick={onCollapse}><PanelRightClose size={14} /></button></header>
     <div className="workflow-review-scroll">
       <p className="workflow-review-summary">{workflow.plan?.summary || "规划 Agent 尚未提供拆分摘要"}</p>
+      <div className="workflow-review-write-range"><FolderOpen size={14} /><span>{workflow.executionTarget === "worktree" ? "方案 Worktree" : workflow.executionTarget === "isolated" ? "隔离任务" : "当前项目"}</span><code>{nodes.filter((node) => node.workspaceAccess === "write").flatMap((node) => node.writeScope).filter((scope, index, all) => all.indexOf(scope) === index).join(" · ") || "只读执行"}</code></div>
+      {impact && <div className="workflow-impact-summary"><span><strong>{impact.reused.length}</strong>复用</span><span><strong>{impact.rerun.length}</strong>重跑</span><span><strong>{impact.added.length}</strong>新增</span><span><strong>{impact.removed.length}</strong>移除</span><details><summary>影响范围<ChevronDown size={13} /></summary>{[["复用", impact.reused], ["重跑", impact.rerun], ["新增", impact.added], ["移除", impact.removed]].map(([label, ids]) => <p key={String(label)}><strong>{label}</strong>{(ids as string[]).map((id) => workflow.plan?.nodes.find((node) => node.id === id)?.title || id).join("、") || "无"}</p>)}</details></div>}
       {!!workflow.plan?.questions.length && <div className="workflow-review-notes questions"><strong>待确认</strong>{workflow.plan.questions.map((item, index) => <p key={`question-${index}`}>{item}</p>)}</div>}
       {!!workflow.plan?.assumptions.length && <div className="workflow-review-notes"><strong>规划假设</strong>{workflow.plan.assumptions.map((item, index) => <p key={`assumption-${index}`}>{item}</p>)}</div>}
       {!!workflow.plan?.risks.length && <div className="workflow-review-notes risks"><strong>风险</strong>{workflow.plan.risks.map((item, index) => <p key={`risk-${index}`}>{item}</p>)}</div>}
       {workflow.plan?.finalDelivery && <div className="workflow-review-notes"><strong>最终交付</strong><p>{workflow.plan.finalDelivery.required ? `${workflow.plan.finalDelivery.primary} · ${workflow.plan.finalDelivery.format} · ${workflow.plan.finalDelivery.producerNodeId}` : workflow.plan.finalDelivery.reason}</p></div>}
+      <div className="workflow-review-notes workflow-validation-mode"><label>验收方式 <select aria-label="验收方式" value={validationMode} disabled={busy} onChange={(event) => onValidationModeChange(event.target.value as ValidationMode)}><option value="standard">标准 · 保留独立验收</option><option value="strict">严格 · 完整整合与验收</option><option value="deterministic">机器验收 · 证据不足时保留审查</option></select></label><p>{validationMode === "deterministic" ? "仅当全部标准都有真实命令证据且没有待判断语义时使用机器验收；其余情况自动保留模型审查。" : validationMode === "strict" ? "所有任务均经过整合与独立验收，适合复杂或重要交付。" : "单节点直接复用成果并独立验收；多节点保留整合与验收。"}</p></div>
       {workflow.plan?.audit && <div className={`workflow-review-audit ${workflow.plan.audit.status}`}><strong>规划自审 · {workflow.plan.audit.status === "revised" ? "已修正" : workflow.plan.audit.status === "needs_input" ? "需要确认" : "已通过"}</strong>{workflow.plan.audit.checks.slice(0, 5).map((item) => <p key={item.key}><i className={item.status} />{item.note}</p>)}{!!workflow.plan.audit.changes.length && <small>{workflow.plan.audit.changes.join("；")}</small>}</div>}
       <div className="workflow-review-stats"><span><Layers3 size={13} /><strong>{nodes.length}</strong> 个节点</span><span><GitBranch size={13} /><strong>{parallel}</strong> 个可先行</span><span><FileCheck2 size={13} /><strong>{dependent}</strong> 个有依赖</span><span><ShieldIcon /><strong>{writes}</strong> 个写入</span><span><Bot size={13} /><strong>{workflow.maxConcurrentAgents || 5}</strong> 并行 Agent</span></div>
       <div className="workflow-review-list">{nodes.map((node, index) => <button type="button" key={node.id} onClick={() => onSelectNode(node.id)}><span className="workflow-review-index">{index + 1}</span><span className="workflow-review-node-copy"><strong>{node.title}</strong><small>{providerLabel(node.provider)} · {node.workspaceAccess === "write" ? "可写入" : "只读"}{node.dependsOn.length ? ` · 依赖 ${node.dependsOn.length} 项` : " · 可并行"}</small>{node.providerReason && <em className="workflow-provider-reason" title={node.providerReason}>{node.providerReason}</em>}<em>{node.acceptance.length} 条验收 · {node.verificationCommands.length} 条机器检查 · {node.deliverables.length} 个产物{node.mcpServers.length ? ` · MCP ${node.mcpServers.length}${node.mcpRequired ? "（必需）" : ""}` : ""}</em></span></button>)}</div>
@@ -136,28 +149,32 @@ function WorkflowDeliveryPanel({ workflow, nodes, onSelectNode, onOpenFile, onCo
       <details className="workflow-delivery-section workflow-delivery-group"><summary><span><strong>验收检查</strong><small>{passedChecks} 通过 · {failedChecks.length} 失败 · {pendingChecks.length} 未运行</small></span><ChevronDown size={14} /></summary><div className="workflow-delivery-checks">{checks.map((check, index) => <div className={check.status} key={`${check.name}-${index}`}>{check.status === "passed" ? <CircleCheck size={13} /> : check.status === "failed" ? <CircleAlert size={13} /> : <CircleMinus size={13} />}<span><strong>{check.name}</strong><small>{check.evidence || check.command || "未提供检查证据"}</small></span></div>)}{!checks.length && <p className="workflow-delivery-empty">尚未登记验收检查。</p>}</div></details>
       {(warnings.length > 0 || unresolvedItems.length > 0) && <details className="workflow-delivery-section workflow-delivery-group warnings" open={unresolvedItems.length > 0}><summary><span><strong>风险与待处理</strong><small>{unresolvedItems.length} 待处理 · {warnings.length} 提醒</small></span><ChevronDown size={14} /></summary><div>{unresolvedItems.map((item) => <p className="unresolved" key={`unresolved:${item}`}><CircleAlert size={12} />{item}</p>)}{warnings.map((item) => <p key={`warning:${item}`}><AlertTriangle size={12} />{item}</p>)}</div></details>}
     </div>
-    <footer><button type="button" title="打开任务成果文件夹" onClick={onOpenFolder}><FolderOpen size={14} />打开成果文件夹</button></footer>
+    <footer><button type="button" title="打开任务成果文件夹" onClick={onOpenFolder}><FolderOpen size={14} />{workflowFolderLabel(workflow.executionTarget)}</button></footer>
   </aside>;
 }
 
 function ShieldIcon() { return <span className="workflow-review-shield" aria-hidden="true" />; }
 
-function WorkflowMaintenancePanel({ branch, value, busy, onChange, onSubmit }: { branch: MaintenanceBranch | null; value: string; busy: boolean; onChange: (value: string) => void; onSubmit: () => void }) {
+function WorkflowMaintenancePanel({ branch, workflow, providers, runtime, engine, intent, value, busy, onEngineChange, onIntentChange, onChange, onSubmit }: { branch: MaintenanceBranch | null; workflow: Workflow; providers: AgentProviderDescriptor[]; runtime: Runtime; engine: string; intent: "question" | "adjust"; value: string; busy: boolean; onEngineChange: (value: string) => void; onIntentChange: (value: "question" | "adjust") => void; onChange: (value: string) => void; onSubmit: () => void }) {
+  const pending = Boolean(workflow.pendingMaintenance);
+  const processing = busy || intent === "adjust" && (branch?.status === "planning" || pending);
+  const latestQuery = workflow.plannerLogs.filter((log) => log.title === "任务问答").at(-1);
   return <aside className="workflow-maintenance-panel" onPointerDown={(event) => event.stopPropagation()}>
     {!!branch?.messages.length && <div className="workflow-maintenance-history">
       {branch.messages.slice(-3).map((message) => <div key={message.id} className={message.role}><span>{message.role === "user" ? "你" : message.role === "assistant" ? "Planner" : "系统"}</span><p>{message.text}</p></div>)}
     </div>}
-    <footer><textarea rows={1} value={value} onChange={(event) => onChange(event.target.value)} placeholder="询问或调整当前规划" /><button type="button" className="send" title="发送" disabled={busy || branch?.status === "planning" || !value.trim()} onClick={onSubmit}>{busy || branch?.status === "planning" ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}</button></footer>
+    {latestQuery && <div className="workflow-maintenance-history" aria-label="最近编排回复"><div className="assistant"><span>任务回复</span><p>{latestQuery.text}</p></div></div>}
+    {pending && <div className="workflow-checkpoint-feedback" role="status"><LoaderCircle className="spin" size={13} />等待运行节点完成后{workflow.pendingMaintenance?.intent === "question" ? "回答问题" : "调整计划"}</div>}
+    <footer><div className="workflow-maintenance-modes" role="group" aria-label="编排输入类型"><button type="button" aria-pressed={intent === "question"} className={intent === "question" ? "active" : ""} disabled={busy} onClick={() => onIntentChange("question")} title="询问当前进度与成果"><MessageCircle size={13} />询问</button><button type="button" aria-pressed={intent === "adjust"} className={intent === "adjust" ? "active" : ""} disabled={busy} onClick={() => onIntentChange("adjust")} title="提交候选计划调整"><Pencil size={13} />调整</button><label title="本轮规划 Agent"><ProviderIcon provider={engine} size={13} /><select aria-label="维护规划 Agent" value={engine} disabled={processing} onChange={(event) => onEngineChange(event.target.value)}>{providers.filter((provider) => provider.capabilities.workflow.planner).map((provider) => <option key={provider.id} value={provider.id} disabled={!runtime.providers[provider.id]?.available}>{provider.shortName}</option>)}</select></label></div><textarea rows={1} value={value} onChange={(event) => onChange(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !processing && value.trim()) { event.preventDefault(); onSubmit(); } }} placeholder={intent === "question" ? "询问任务进度、结果或下一步" : "修改范围、更换节点 Agent 或局部重做"} /><button type="button" className="send" title={intent === "question" ? "发送问题" : "提交调整"} disabled={processing || !value.trim()} onClick={onSubmit}>{processing ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}</button></footer>
   </aside>;
 }
 
-type CardProps = { id: string; title: string; provider: Engine | "auto"; status: string; attempt?: number; logs: Log[]; skills: string[]; mcpServers: string[]; result?: Result | null; offset?: Point; dragging: boolean; icon: ReactNode; subtitle?: string; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; registerRef: (id: string, element: HTMLElement | null) => void; emptyText: string; className?: string };
-const WorkflowAgentCard = memo(function WorkflowAgentCard({ id, title, provider, status, attempt, logs, skills, mcpServers, result, offset, dragging, icon, subtitle, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, registerRef, emptyText, className = "" }: CardProps) {
-  return <button ref={(element) => registerRef(id, element)} style={offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined} type="button" className={`workflow-agent-card ${className} ${status} ${dragging ? "dragging" : ""}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onClick={onClick}><header><span className={`workflow-agent-icon ${provider}`}>{icon}</span><span><strong>{title}</strong><small>{subtitle || `${providerLabel(provider)} · ${statusLabel(status)}`}{attempt && attempt > 1 ? ` · 第 ${attempt} 次` : ""}</small></span>{status === "running" && <LoaderCircle className="spin" size={15} />}</header><div className="workflow-card-meta"><span title="当前任务图涉及的 Skill">Skill {skills.length}</span><span title="当前任务图涉及的 MCP">MCP {mcpServers.length}</span>{result && <span>{statusLabel(result.outcome)}</span>}</div><div className="workflow-card-logs">{logs.slice(-5).map((log) => <p key={log.id} title={log.text}><span />{log.title}</p>)}{!logs.length && <p><span />{emptyText}</p>}</div></button>;
-}, (a, b) => {
-  const sameStrings = (left: string[], right: string[]) => left.length === right.length && left.every((value, index) => value === right[index]);
-  const sameLogs = a.logs.length === b.logs.length && a.logs.every((log, index) => { const other = b.logs[index]; return log.id === other?.id && log.title === other?.title && log.text === other?.text; });
-  return a.id === b.id && a.title === b.title && a.provider === b.provider && a.status === b.status && sameLogs && sameStrings(a.skills, b.skills) && sameStrings(a.mcpServers, b.mcpServers) && a.offset?.x === b.offset?.x && a.offset?.y === b.offset?.y && a.dragging === b.dragging;
+type CardProps = { id: string; title: string; provider: Engine | "auto"; status: string; attempt?: number; logs: Log[]; objective?: string; skills: string[]; mcpServers: string[]; result?: Result | null; offset?: Point; dragging: boolean; icon: ReactNode; subtitle?: string; executionTarget?: string; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; registerRef: (id: string, element: HTMLElement | null) => void; emptyText: string; className?: string };
+const WorkflowAgentCard = memo(function WorkflowAgentCard({ id, title, provider, status, attempt, logs, objective, skills, mcpServers, result, offset, dragging, icon, subtitle, executionTarget, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, registerRef, emptyText, className = "" }: CardProps) {
+  logs = useMemo(() => publicWorkflowActivity(logs), [logs]);
+  const presentation = useMemo(() => workflowAgentPresentation({ status, provider, logs, objective, result }), [status, provider, logs, objective, result]);
+  const displayProvider = provider === "auto" ? "Agent" : providerLabel(provider);
+  return <button ref={(element) => registerRef(id, element)} style={offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined} type="button" className={`workflow-agent-card ${className} ${status} ${dragging ? "dragging" : ""}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onClick={onClick}><header><span className={`workflow-agent-icon ${provider}`}>{icon}</span><span><strong>{title}</strong><small>{subtitle || `${displayProvider} · ${presentation.stage}`}{attempt && attempt > 1 ? ` · 第 ${attempt} 次` : ""}</small></span>{status === "running" && <LoaderCircle className="spin" size={15} />}</header><p className="workflow-card-summary" title={presentation.summary}>{presentation.summary}</p><div className="workflow-card-meta"><span>{workflowTargetLabel(executionTarget)}</span>{presentation.progress && <span>{presentation.progress.completed}/{presentation.progress.total} 项</span>}{presentation.outputs > 0 && <span>{presentation.outputs} 项成果</span>}{presentation.files > 0 && <span>{presentation.files} 个文件</span>}{presentation.checks && <span>{presentation.checks}</span>}{presentation.issues > 0 && <span>{presentation.issues} 项待处理</span>}{!presentation.progress && !presentation.outputs && !presentation.files && !presentation.checks && (skills.length > 0 || mcpServers.length > 0) && <span>{[skills.length > 0 ? `${skills.length} Skill` : "", mcpServers.length > 0 ? `${mcpServers.length} MCP` : ""].filter(Boolean).join(" · ")}</span>}</div><div className="workflow-card-logs">{presentation.activity ? <p title={presentation.activity}><span />{presentation.activity}</p> : <p><span />{logs.length ? presentation.stage : emptyText}</p>}</div></button>;
 });
 type PlanCardProps = { id: string; workflow: Workflow; offset?: Point; dragging: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; registerRef: (id: string, element: HTMLElement | null) => void };
 const WorkflowPlanCard = memo(function WorkflowPlanCard({ id, workflow, offset, dragging, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, registerRef }: PlanCardProps) {
@@ -190,13 +207,13 @@ const WorkflowPlanCard = memo(function WorkflowPlanCard({ id, workflow, offset, 
     </footer>
   </button>;
 }, (a, b) => a.id === b.id && a.workflow === b.workflow && a.offset?.x === b.offset?.x && a.offset?.y === b.offset?.y && a.dragging === b.dragging);
-const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, workDirectory, branchCount, offset, dragging, editorMode, editorPrompt, branchNote, branchEngine, runtime, providers, busy, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, onContextMenu, onEditorModeChange, onEditorPromptChange, onBranchNoteChange, onBranchEngineChange, onCancel, onSubmit, registerRef }: { prompt: string; workDirectory: string; branchCount: number; offset?: Point; dragging: boolean; editorMode: "edit" | "branch" | null; editorPrompt: string; branchNote: string; branchEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; busy: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; onContextMenu: (event: React.MouseEvent<HTMLElement>) => void; onEditorModeChange: (mode: "edit" | "branch") => void; onEditorPromptChange: (value: string) => void; onBranchNoteChange: (value: string) => void; onBranchEngineChange: (engine: Engine) => void; onCancel: () => void; onSubmit: () => void; registerRef: (id: string, element: HTMLElement | null) => void }) {
+const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, executionTarget, conversationHandoff, branchCount, offset, dragging, editorMode, editorPrompt, branchNote, branchEngine, runtime, providers, busy, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onClick, onContextMenu, onEditorModeChange, onEditorPromptChange, onBranchNoteChange, onBranchEngineChange, onCancel, onSubmit, registerRef }: { prompt: string; executionTarget?: ExecutionTarget; conversationHandoff: ConversationHandoff | null; branchCount: number; offset?: Point; dragging: boolean; editorMode: "edit" | "branch" | null; editorPrompt: string; branchNote: string; branchEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; busy: boolean; onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void; onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void; onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void; onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void; onClick: () => void; onContextMenu: (event: React.MouseEvent<HTMLElement>) => void; onEditorModeChange: (mode: "edit" | "branch") => void; onEditorPromptChange: (value: string) => void; onBranchNoteChange: (value: string) => void; onBranchEngineChange: (engine: Engine) => void; onCancel: () => void; onSubmit: () => void; registerRef: (id: string, element: HTMLElement | null) => void }) {
   const expanded = editorMode !== null;
-  const interactiveTarget = (target: EventTarget) => (target as HTMLElement).closest("button, textarea, select, input, label");
+  const interactiveTarget = (target: EventTarget) => (target as HTMLElement).closest("button, textarea, select, input, label, .workflow-conversation-source");
   return <article
     ref={(element) => registerRef("origin", element)}
     style={offset ? { transform: `translate(${offset.x}px, ${offset.y}px)` } : undefined}
-    className={`workflow-origin-card ${expanded ? "expanded" : ""} ${dragging ? "dragging" : ""}`}
+    className={`workflow-origin-card ${conversationHandoff ? "with-conversation-source" : ""} ${expanded ? "expanded" : ""} ${dragging ? "dragging" : ""}`}
     onPointerDown={(event) => { if (interactiveTarget(event.target)) { event.stopPropagation(); return; } onPointerDown(event); }}
     onPointerMove={onPointerMove}
     onPointerUp={onPointerUp}
@@ -205,7 +222,7 @@ const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, workDirect
     onContextMenu={(event) => { event.preventDefault(); if (!expanded) onContextMenu(event); }}
   >
     <span className="workflow-card-kicker"><Route size={13} />初始任务 <em>{branchCount} 个方案</em>{expanded && <button type="button" title="收起编辑" onClick={onCancel}><X size={14} /></button>}</span>
-    {!expanded ? <><strong>{prompt}</strong><small>{workDirectory}</small></> : <div className="workflow-origin-editor">
+    {!expanded ? <><strong>{prompt}</strong><small>{executionTarget === "worktree" ? "方案 Worktree" : executionTarget === "isolated" ? "隔离任务" : "当前项目"}</small>{conversationHandoff && <WorkflowConversationSource handoff={conversationHandoff} />}</> : <div className="workflow-origin-editor">
       <div className="workflow-origin-editor-tabs" role="tablist" aria-label="初始任务操作">
         <button type="button" className={editorMode === "edit" ? "active" : ""} onClick={() => onEditorModeChange("edit")}><Pencil size={13} />编辑任务</button>
         <button type="button" className={editorMode === "branch" ? "active" : ""} onClick={() => onEditorModeChange("branch")}><GitBranch size={13} />规划分支</button>
@@ -215,40 +232,22 @@ const WorkflowOriginCard = memo(function WorkflowOriginCard({ prompt, workDirect
         <label>规划模型<select value={branchEngine} onChange={(event) => onBranchEngineChange(event.target.value as Engine)}>{providers.filter((provider) => provider.capabilities.workflow.planner).map((provider) => <option key={provider.id} value={provider.id} disabled={!runtime.providers[provider.id]?.available}>{provider.shortName} CLI</option>)}</select></label>
         <label className="workflow-origin-branch-note">方案方向<input value={branchNote} onChange={(event) => onBranchNoteChange(event.target.value)} placeholder="可选：说明新方案采用的不同方向" /></label>
       </div>}
-      <footer><span>{editorMode === "edit" ? "保存后将重置未执行的规划并重新分析" : "新方案将在独立任务目录中规划"}</span><button type="button" onClick={onCancel}>取消</button><button type="button" className="primary" disabled={busy || !editorPrompt.trim()} onClick={onSubmit}>{busy ? <LoaderCircle className="spin" size={14} /> : editorMode === "edit" ? <Pencil size={14} /> : <GitBranch size={14} />}{editorMode === "edit" ? "保存并规划" : "创建并规划"}</button></footer>
+      <footer><span>{editorMode === "edit" ? "保存后重新规划" : "独立方案 · Git 项目使用 Worktree"}</span><button type="button" onClick={onCancel}>取消</button><button type="button" className="primary" disabled={busy || !editorPrompt.trim()} onClick={onSubmit}>{busy ? <LoaderCircle className="spin" size={14} /> : editorMode === "edit" ? <Pencil size={14} /> : <GitBranch size={14} />}{editorMode === "edit" ? "保存并规划" : "创建并规划"}</button></footer>
     </div>}
   </article>;
 });
 const WorkflowEdgeLayer = memo(function WorkflowEdgeLayer({ edges }: { edges: RenderedGraphEdge[] }) { return <svg className="workflow-graph-edges" aria-hidden="true"><defs><marker id="workflow-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" /></marker></defs>{edges.map((edge) => <path key={edge.id} className={edge.status} d={edge.path} markerEnd="url(#workflow-arrow)" />)}</svg>; });
 
-function WorkflowAgentDrawer({ title, provider, status, task, logs, result, error, workspaceId, renderMessage, busy = false, onPause, onResume, onRestart, onCancel, onRepairResult, onCopyMachineResult, onOpenFile, onOpenFolder, onCopyPath, onClose }: { title: string; provider: Engine | "auto"; status: string; task: string; logs: Log[]; result?: Result | null; error?: string | null; workspaceId?: string; renderMessage?: (text: string) => ReactNode; busy?: boolean; onPause?: () => void; onResume?: () => void; onRestart?: () => void; onCancel?: () => void; onRepairResult?: () => void; onCopyMachineResult?: () => void; onOpenFile?: (path: string) => void; onOpenFolder?: () => void; onCopyPath?: (path: string) => void; onClose: () => void }) {
-  const followOutput = useAgentOutputFollow(agentStreamVersion(logs), title);
-  const header = <>
-      <header><div className="agent-drawer-title"><span className={`subagent-mark ${provider}`}>{provider === "auto" ? <Bot size={18} /> : <ProviderIcon provider={provider} size={18} />}</span><span><strong>{title}<em className={`agent-provider-badge ${provider}`}>{providerLabel(provider)}</em></strong><small>按执行顺序显示 · {statusLabel(status)} · {logs.length} 条</small></span></div><div className="workflow-drawer-actions">{onCopyMachineResult && <button type="button" className="workflow-drawer-close" title="复制机器结果文件地址" onClick={onCopyMachineResult}><FileJson2 size={16} /></button>}{onRepairResult && <button type="button" className="workflow-drawer-close" title="保留 Agent 输出，仅修复机器结果" disabled={busy} onClick={onRepairResult}>{busy ? <LoaderCircle className="spin" size={16} /> : <Wrench size={16} />}</button>}{onPause && <button type="button" className="workflow-drawer-close" title="暂停当前 Agent" disabled={busy} onClick={onPause}>{busy ? <LoaderCircle className="spin" size={16} /> : <Pause size={16} />}</button>}{onResume && <button type="button" className="workflow-drawer-close" title="继续当前 Agent" disabled={busy} onClick={onResume}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}</button>}{onRestart && <button type="button" className="workflow-drawer-close" title="重新执行此节点" disabled={busy} onClick={onRestart}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}</button>}{onCancel && <button type="button" className="workflow-drawer-close" title="终止当前 Agent" disabled={busy} onClick={onCancel}>{busy ? <LoaderCircle className="spin" size={16} /> : <StopCircle size={16} />}</button>}<button type="button" className="workflow-drawer-close" title="关闭日志" onClick={onClose}><X size={18} /></button></div></header>
-  </>;
-  return <AgentDrawer title={title} className="workflow-agent-drawer" onClose={onClose} header={header} followOutput={followOutput}>
-        {result && <div className="workflow-result-view">
-          <section className="agent-task"><span>执行结果 · {statusLabel(result.outcome)}</span><p>{result.humanSummary}</p></section>
-          {!!result.outputs.length && <section><span>交付产物</span><div className="workflow-result-list">{result.outputs.map((output) => <div key={output.id}>{output.path && onOpenFile ? <button type="button" onClick={() => onOpenFile(output.path!)}><strong>{output.description}</strong><small>{output.path}</small></button> : <><strong>{output.description}</strong><small>{output.path || `${output.type} · 无文件`}</small></>}{output.path && onCopyPath && <button type="button" title="复制路径" onClick={() => onCopyPath(output.path!)}><Copy size={12} /></button>}</div>)}</div></section>}
-          {!!result.changedFiles.length && <section><span>实际文件变更</span><div className="workflow-result-list">{result.changedFiles.map((file) => <div key={file}><code>{file}</code></div>)}</div></section>}
-          {!!result.checks.length && <section><span>验收检查</span><div className="workflow-result-list">{result.checks.map((check, index) => <div key={`${check.name}-${index}`}><strong><i className={`workflow-check-dot ${check.status}`} />{check.name}{check.exitCode !== null ? ` · exit ${check.exitCode}` : ""}</strong>{check.command && <small>{check.command}</small>}{check.evidence && <small>{check.evidence}</small>}</div>)}</div></section>}
-          {!!result.decisions.length && <section><span>关键决策</span><div className="workflow-result-list">{result.decisions.map((decision) => <div key={decision.key}><strong>{decision.key}：{decision.value}</strong><small>{decision.reason}</small></div>)}</div></section>}
-          {(result.handoff.facts.length > 0 || result.handoff.constraints.length > 0 || result.handoff.nextAgentInstructions.length > 0) && <section><span>下游交接</span><div className="workflow-result-list">{result.handoff.facts.map((fact, index) => <div key={`fact-${index}`}><strong>{fact}</strong></div>)}{result.handoff.constraints.map((constraint, index) => <div key={`constraint-${index}`}><small>{constraint}</small></div>)}{result.handoff.nextAgentInstructions.map((instruction, index) => <div key={`instruction-${index}`}><small>{instruction}</small></div>)}</div></section>}
-          {(result.warnings.length > 0 || result.unresolved.length > 0) && <section><span>注意事项</span><div className="workflow-result-list warnings">{[...result.warnings, ...result.unresolved].map((item, index) => <div key={index}><small>{item}</small></div>)}</div></section>}
-        </div>}
-        <AgentTaskDescription key={title} text={task} />
-        {error && <div className="workflow-error"><AlertTriangle size={14} />{error}</div>}
-        <section className="agent-log-section"><AgentConversation key={title} scrollRef={followOutput.containerRef} className="agent-conversation workflow-drawer-logs" logs={logs} status={status} provider={provider === "auto" ? "agent" : provider} providerLabel={providerLabel(provider)} messageLabel={title} workspaceId={workspaceId} renderMessage={renderMessage} showProvider={false} emptyText="尚无活动日志" /></section>
-        {onOpenFolder && <button type="button" className="workflow-open-result-folder" onClick={onOpenFolder}><FolderOpen size={14} />打开成果目录</button>}
-  </AgentDrawer>;
-}
-
-export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, providers, workspaceId, renderAgentMessage, onCreate, onOpenWorkflow, onOpenLocalFile, onChanged, onNotice }: { workflowId?: string; defaultPlannerEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; workspaceId?: string; renderAgentMessage?: (text: string) => ReactNode; onCreate: (engine: Engine, prompt: string, maxConcurrentAgents: number | null) => Promise<unknown>; onOpenWorkflow: (id: string) => void; onOpenLocalFile?: (path: string) => void; onChanged: () => Promise<void>; onNotice: (message: string, tone?: "success" | "warning" | "error" | "info") => void }) {
+export function WorkflowWorkbench({ enabled = true, onOpenPluginSettings, workflowId, defaultPlannerEngine, runtime, providers, workspaceId, renderAgentMessage, onCreate, onOpenWorkflow, onOpenLocalFile, onChanged, onNotice }: { enabled?: boolean; onOpenPluginSettings?: () => void; workflowId?: string; defaultPlannerEngine: Engine; runtime: Runtime; providers: AgentProviderDescriptor[]; workspaceId?: string; renderAgentMessage?: (text: string) => ReactNode; onCreate: (engine: Engine, prompt: string, maxConcurrentAgents: number | null, options?: { executionTarget: ExecutionTarget }) => Promise<unknown>; onOpenWorkflow: (id: string) => void; onOpenLocalFile?: (path: string) => void; onChanged: () => Promise<void>; onNotice: (message: string, tone?: "success" | "warning" | "error" | "info") => void }) {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  const [loadError, setLoadError] = useState("");
   const [branches, setBranches] = useState<Workflow[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [taskPrompt, setTaskPrompt] = useState("");
+  const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [plannerEngine, setPlannerEngine] = useState<Engine>(defaultPlannerEngine);
+  const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>("workspace");
+  const [createMode, setCreateMode] = useState<"new" | "definition">("new");
   const [concurrencyMode, setConcurrencyMode] = useState<"auto" | "custom">("auto");
   const [maxConcurrentAgents, setMaxConcurrentAgents] = useState(5);
   const [busy, setBusy] = useState(false);
@@ -261,7 +260,10 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
   const [branchNote, setBranchNote] = useState("");
   const [branchEngine, setBranchEngine] = useState<Engine>(defaultPlannerEngine);
   const [maintenance, setMaintenance] = useState<MaintenanceBranch | null>(null);
+  const [conversationHandoff, setConversationHandoff] = useState<ConversationHandoff | null>(null);
   const [maintenanceInput, setMaintenanceInput] = useState("");
+  const [maintenanceIntent, setMaintenanceIntent] = useState<"question" | "adjust">("question");
+  const [maintenanceEngine, setMaintenanceEngine] = useState(defaultPlannerEngine);
   const [selectedAgent, setSelectedAgent] = useState<"planner" | string>("");
   const [zoom, setZoom] = useState(defaultViewport.zoom);
   const [pan, setPan] = useState({ x: defaultViewport.x, y: defaultViewport.y });
@@ -277,10 +279,15 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
   const layoutWorkflowRef = useRef("");
   const layoutSaveTimerRef = useRef<number | null>(null);
   const workflowIdRef = useRef(workflowId || "");
+  const mountedRef = useRef(true);
   const loadRequestRef = useRef<{ generation: number; workflowId: string; controller: AbortController | null; promise: Promise<void> | null }>({ generation: 0, workflowId: "", controller: null, promise: null });
   workflowIdRef.current = workflowId || "";
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const acceptWorkflow = useCallback((candidate: Workflow, expectedId = workflowIdRef.current) => {
-    if (!expectedId || candidate.id !== expectedId || workflowIdRef.current !== expectedId) return false;
+    if (!mountedRef.current || !expectedId || candidate.id !== expectedId || workflowIdRef.current !== expectedId) return false;
     setWorkflow((current) => current?.id === expectedId && current.revision > candidate.revision ? current : candidate);
     return true;
   }, []);
@@ -297,6 +304,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
       catch (error) { if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return; throw error; }
       if (controller.signal.aborted || loadRequestRef.current.generation !== generation || workflowIdRef.current !== expectedId || current.id !== expectedId) return;
       acceptWorkflow(current, expectedId);
+      setLoadError("");
       const [maintenanceResult, branchesResult] = await Promise.allSettled([
         request<MaintenanceBranch | null>(`/api/workflows/${encodeURIComponent(expectedId)}/maintenance`, { signal: controller.signal }),
         request<unknown>(`/api/workflows/${encodeURIComponent(expectedId)}/branches`, { signal: controller.signal })
@@ -308,6 +316,10 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     })();
     loadRequestRef.current = { generation, workflowId: expectedId, controller, promise };
     try { await promise; }
+    catch (error) {
+      if (!controller.signal.aborted && loadRequestRef.current.generation === generation && workflowIdRef.current === expectedId) setLoadError(error instanceof Error ? error.message : "无法读取编排任务");
+      throw error;
+    }
     finally {
       if (loadRequestRef.current.generation === generation) loadRequestRef.current = { generation, workflowId: expectedId, controller: null, promise: null };
     }
@@ -315,29 +327,42 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
   useEffect(() => {
     loadRequestRef.current.controller?.abort();
     loadRequestRef.current = { generation: loadRequestRef.current.generation + 1, workflowId: workflowId || "", controller: null, promise: null };
-    setWorkflow(null); setBranches([]); setMaintenance(null); setMaintenanceInput(""); setSelectedAgent(""); setOriginDialog(null); setOriginMenu(null); setDeliveryOpen(false);
+    setWorkflow(null); setLoadError(""); setBranches([]); setMaintenance(null); setMaintenanceInput(""); setSelectedAgent(""); setOriginDialog(null); setOriginMenu(null); setDeliveryOpen(false);
     if (workflowId) load().catch((error) => { if (error?.name !== "AbortError") onNotice(error.message, "error"); });
     return () => { loadRequestRef.current.controller?.abort(); };
   }, [workflowId, load]);
-  useEffect(() => { setReviewCollapsed(false); }, [workflowId, workflow?.activePlanVersion]);
+  useEffect(() => { setValidationMode(workflow?.plan?.validationMode || "strict"); }, [workflow?.id, workflow?.activePlanVersion, workflow?.plan?.validationMode]);
   useEffect(() => {
-    if (!workflow || workflow.id !== workflowId || (!["planning", "queued", "running", "integrating"].includes(workflow.status) && maintenance?.status !== "planning")) return;
+    setConversationHandoff(null);
+    const expectedId = workflowId;
+    const executionRoot = workflow?.executionRoot || workflow?.workDirectory;
+    if (!expectedId || workflow?.id !== expectedId || !executionRoot || !Number.isFinite(Date.parse(workflow.createdAt || ""))) return;
+    const controller = new AbortController();
+    void request<WorkflowTaskContext>(`/api/task-contexts/lookup?workflowId=${encodeURIComponent(expectedId)}`, { signal: controller.signal }).then((context) => {
+      if (controller.signal.aborted || workflowIdRef.current !== expectedId) return;
+      setConversationHandoff(workflowConversationSource(context, workflow));
+    }).catch(() => { /* Source context is optional for historical workflows. */ });
+    return () => controller.abort();
+  }, [workflowId, workflow?.id, workflow?.createdAt, workflow?.executionRoot, workflow?.workDirectory]);
+  useEffect(() => { setReviewCollapsed(false); }, [workflowId, workflow?.activePlanVersion]);
+  useEffect(() => { if (workflow) setMaintenanceEngine(workflow.plannerEngine); }, [workflow?.id, workflow?.plannerEngine]);
+  useEffect(() => {
+    if (!workflow || workflow.id !== workflowId || (!["planning", "queued", "running", "integrating"].includes(workflow.status) && !workflow.pendingMaintenance && maintenance?.status !== "planning")) return;
     const timer = window.setInterval(() => {
       if (!document.hidden) load().catch(() => undefined);
     }, 15_000);
     return () => window.clearInterval(timer);
-  }, [workflow?.id, workflow?.status, maintenance?.status, workflowId, load]);
+  }, [workflow?.id, workflow?.status, workflow?.pendingMaintenance, maintenance?.status, workflowId, load]);
   useEffect(() => {
     if (!workflowId) return;
-    let timer: number | undefined;
+    const refresh = coalescedWorkflowRefresh(load, 180);
     const changed = (detail: Record<string, unknown>) => {
       if (detail.workflowId !== workflowId) return;
-      if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void load().catch(() => undefined), 80);
+      refresh.schedule();
     };
     const unsubscribeChanged = realtimeCoordinator.subscribe("workflow.changed", changed);
-    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(() => void load().catch(() => undefined));
-    return () => { if (timer) window.clearTimeout(timer); unsubscribeChanged(); unsubscribeReconcile(); };
+    const unsubscribeReconcile = realtimeCoordinator.subscribeReconcile(refresh.schedule);
+    return () => { refresh.dispose(); unsubscribeChanged(); unsubscribeReconcile(); };
   }, [workflowId, load]);
   useEffect(() => {
     if (!originMenu) return;
@@ -446,19 +471,19 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     return () => { if (edgeFrameRef.current !== null) window.cancelAnimationFrame(edgeFrameRef.current); edgeFrameRef.current = null; observer.disconnect(); };
   }, [scheduleGraphEdgeUpdate]);
 
-  const create = async () => { if (!taskPrompt.trim()) return onNotice("请输入完整任务", "warning"); setBusy(true); try { await onCreate(plannerEngine, taskPrompt.trim(), concurrencyMode === "custom" ? maxConcurrentAgents : null); setTaskPrompt(""); setCreateOpen(false); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
+  const create = async () => { if (!enabled || busy) return; if (!taskPrompt.trim()) return onNotice("请输入完整任务", "warning"); setBusy(true); try { await onCreate(plannerEngine, taskPrompt.trim(), concurrencyMode === "custom" ? maxConcurrentAgents : null, { executionTarget }); setTaskPrompt(""); setCreateOpen(false); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const plan = async (mode: "initial" | "refine" | "fresh" = "initial", note = "", source?: "maintenance") => {
-    if (!workflow || workflow.id !== workflowIdRef.current || workflow.status === "planning") return;
+    if (!workflow || workflow.id !== workflowIdRef.current || (workflow.status === "planning" && !(source === "maintenance" && maintenanceIntent === "question"))) return;
     const targetId = workflow.id;
     setBusy(true);
     try {
-      const accepted = await request<PlannerAccepted>(`/api/workflows/${targetId}/plan`, { method: "POST", body: JSON.stringify({ mode, note, source }) });
-      acceptWorkflow(accepted.workflow, targetId);
+      const accepted = await request<PlannerAccepted>(`/api/workflows/${targetId}/plan`, { method: "POST", body: JSON.stringify({ mode, note, source, ...(source === "maintenance" ? { intent: maintenanceIntent, plannerEngine: maintenanceEngine } : {}) }) });
+      if (!acceptWorkflow(accepted.workflow, targetId)) return;
       if (source === "maintenance") setMaintenanceInput("");
       await load();
       setReviewNote("");
       await onChanged();
-      onNotice(accepted.alreadyRunning ? "规划任务已在运行" : source === "maintenance" ? "规划维护已受理" : "规划任务已受理", "success");
+      onNotice(accepted.queriedSnapshot ? "已回复，任务继续运行" : accepted.queuedUntilCheckpoint ? "请求已受理，等待当前节点完成" : accepted.alreadyRunning ? "规划任务已在运行" : source === "maintenance" ? maintenanceIntent === "question" ? "问题已发送" : "计划调整已受理" : "规划任务已受理", "success");
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error), "error");
       await load().catch(() => undefined);
@@ -466,15 +491,15 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
       setBusy(false);
     }
   };
-  const approve = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/approve`, { method: "POST", body: JSON.stringify({ revision: workflow.revision }) }); acceptWorkflow(next, targetId); await onChanged(); onNotice("计划已批准，开始按依赖调度", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
+  const approve = async () => { if (!workflow || workflow.id !== workflowIdRef.current) return; const targetId = workflow.id; setBusy(true); try { const next = await request<Workflow>(`/api/workflows/${targetId}/approve`, { method: "POST", body: JSON.stringify({ revision: workflow.revision, validationMode }) }); acceptWorkflow(next, targetId); await onChanged(); onNotice("计划已批准，开始按依赖调度", "success"); } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); } finally { setBusy(false); } };
   const refinePlan = async () => { if (!reviewNote.trim()) return onNotice("请填写需要追加调整的内容", "warning"); await plan("refine", reviewNote.trim()); };
   const freshPlan = async () => { if (!workflow || !await confirmAction("重新生成会创建完整的新计划版本，当前计划仍保留在历史中。继续吗？", { title: "重新生成计划" })) return; await plan("fresh", reviewNote.trim()); };
   const maintainPlan = async () => {
-    if (!maintenanceInput.trim()) return onNotice("请输入规划调整内容", "warning");
+    if (!maintenanceInput.trim()) return onNotice("请输入内容", "warning");
     await plan("refine", maintenanceInput.trim(), "maintenance");
   };
   const openOriginDialog = (mode: "edit" | "branch") => {
-    if (!workflow) return;
+    if (!workflow || !enabled) return;
     if (!originDialog) {
       setOriginPrompt(workflow.originalPrompt);
       setBranchEngine(workflow.plannerEngine);
@@ -495,11 +520,13 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     finally { setBusy(false); }
   };
   const createBranch = async () => {
-    if (!workflow || !originPrompt.trim()) return onNotice("初始任务不能为空", "warning");
+    if (!workflow || workflow.id !== workflowIdRef.current || !originPrompt.trim()) return onNotice("初始任务不能为空", "warning");
+    const targetId = workflow.id;
     setBusy(true);
     try {
-      const branch = await request<Workflow>(`/api/workflows/${workflow.id}/branches`, { method: "POST", body: JSON.stringify({ prompt: originPrompt.trim(), plannerEngine: branchEngine, note: branchNote.trim(), maxConcurrentAgents: workflow.maxConcurrentAgents }) });
-      setOriginDialog(null); await onChanged(); onNotice(`${branch.branchLabel} 已创建，规划 Agent 正在分析`, "success"); onOpenWorkflow(branch.id);
+      const branch = await request<Workflow>(`/api/workflows/${targetId}/branches`, { method: "POST", body: JSON.stringify({ prompt: originPrompt.trim(), plannerEngine: branchEngine, note: branchNote.trim(), maxConcurrentAgents: workflow.maxConcurrentAgents }) });
+      setOriginDialog(null); await onChanged(); onNotice(`${branch.branchLabel} 已创建，规划 Agent 正在分析`, "success");
+      if (mountedRef.current && workflowIdRef.current === targetId) onOpenWorkflow(branch.id);
       void request<PlannerAccepted>(`/api/workflows/${branch.id}/plan`, { method: "POST", body: JSON.stringify({ mode: "initial", note: branchNote.trim() }) }).then(() => onChanged()).catch((error) => { onNotice(error instanceof Error ? error.message : String(error), "error"); void onChanged(); });
     } catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
     finally { setBusy(false); }
@@ -530,6 +557,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     localStorage.setItem(workflowLayoutKey(workflowId), JSON.stringify({ version: 2, viewport: { ...panRef.current, zoom: zoomRef.current }, nodes: nodeOffsetsRef.current } satisfies CanvasLayout));
   }, [workflowId]);
   const startNodeDrag = useCallback((id: string, event: ReactPointerEvent<HTMLElement>) => {
+    if (window.matchMedia("(max-width: 700px)").matches) return;
     if (event.button !== 0) return;
     event.stopPropagation();
     const origin = nodeOffsetsRef.current[id] || { x: 0, y: 0 };
@@ -585,7 +613,7 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     const shell = canvasRef.current;
     if (!shell) return;
     const onWheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement).closest("aside, textarea, select, input")) return;
+      if ((event.target as HTMLElement).closest("aside, textarea, select, input, .workflow-conversation-source")) return;
       event.preventDefault();
       event.stopPropagation();
       if (!event.ctrlKey) {
@@ -627,13 +655,8 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => { fitViewport(); scheduleGraphEdgeUpdate(); persistNodeOffsets(); }));
   };
   const workspaceArtifactPath = useCallback((artifactPath: string) => {
-    if (!workflow) return artifactPath;
-    const normalized = artifactPath.replaceAll("\\", "/").replace(/^\.\//, "");
-    if (/^[A-Za-z]:\//.test(normalized)) return normalized;
-    const taskDirectory = workflow.workDirectory.replaceAll("\\", "/").split("/").filter(Boolean).at(-1) || "";
-    if (taskDirectory && (normalized === taskDirectory || normalized.startsWith(`${taskDirectory}/`))) return normalized;
-    return [taskDirectory, normalized].filter(Boolean).join("/");
-  }, [workflow]);
+    return artifactPath.replaceAll("\\", "/").replace(/^\.\//, "");
+  }, []);
   const openArtifact = useCallback((artifactPath: string) => onOpenLocalFile?.(workspaceArtifactPath(artifactPath)), [onOpenLocalFile, workspaceArtifactPath]);
   const copyArtifactPath = useCallback((artifactPath: string) => navigator.clipboard.writeText(artifactPath).then(() => onNotice("已复制产物路径", "success")), [onNotice]);
   const openWorkflowFolder = useCallback(async () => {
@@ -642,35 +665,39 @@ export function WorkflowWorkbench({ workflowId, defaultPlannerEngine, runtime, p
     catch (error) { onNotice(error instanceof Error ? error.message : String(error), "error"); }
   }, [workflow, onNotice]);
 
-  return <section className="workflow-workbench">
-    <div ref={canvasRef} className={`workflow-canvas-shell ${dragRef.current ? "dragging" : ""} ${draggingNodeId ? "node-dragging" : ""}`} onPointerDown={(event) => { if ((event.target as HTMLElement).closest("button, textarea, select, input, aside, .workflow-origin-card")) return; if (originDialog) setOriginDialog(null); dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const drag = dragRef.current; if (drag) setPan({ x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y }); }} onPointerUp={(event) => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }}>
+  const showMaintenance = enabled && Boolean(workflow?.plan && !["planning", "canceled"].includes(workflow.status));
+  return <section className={`workflow-workbench ${showMaintenance ? "workflow-continuous" : ""}`}>
+    <div ref={canvasRef} className={`workflow-canvas-shell ${dragRef.current ? "dragging" : ""} ${draggingNodeId ? "node-dragging" : ""}`} onPointerDown={(event) => { if (window.matchMedia("(max-width: 700px)").matches || (event.target as HTMLElement).closest("button, textarea, select, input, aside, .workflow-origin-card")) return; if (originDialog) setOriginDialog(null); dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const drag = dragRef.current; if (drag) setPan({ x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y }); }} onPointerUp={(event) => { dragRef.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { dragRef.current = null; }}>
+      {loadError && workflow && <div className="workflow-load-notice" role="status">进度刷新暂未成功，已有内容仍可查看。<button type="button" onClick={() => void load().catch(() => undefined)}>重试</button></div>}
+      {!enabled && <div className="workflow-plugin-notice" role="status">任务编排插件已停用，历史计划、日志和成果可继续查看。{onOpenPluginSettings && <button type="button" onClick={onOpenPluginSettings}>插件设置</button>}</div>}
       <div className="workflow-canvas-hint"><Route size={15} /><span>Meta 任务编排{workflow ? ` · ${statusLabel(workflow.status)}` : " · 空画布"}</span><HelpButton topic="task-orchestration" />{workflow && <button type="button" title="刷新" onClick={() => void load()}><RefreshCw size={14} /></button>}</div>
       <div className="workflow-canvas-stage" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
-        {!workflowId ? <button type="button" className="workflow-start-card" onClick={() => setCreateOpen(true)}><span><Plus size={24} /></span><strong>创建初始任务</strong><small>从一个完整目标开始构建任务图</small></button> : !workflow ? <div className="workflow-loading-card"><LoaderCircle className="spin" size={18} />正在加载任务</div> : <div className="workflow-graph-root" ref={graphRef}>
+        {!workflowId ? <button type="button" className="workflow-start-card" disabled={!enabled} onClick={() => setCreateOpen(true)}><span><Plus size={24} /></span><strong>创建初始任务</strong><small>从一个完整目标开始构建任务图</small></button> : !workflow ? <div className="workflow-loading-card" role="status">{loadError ? <><span>{loadError}</span><button type="button" onClick={() => void load().catch(() => undefined)}>重试</button></> : <><LoaderCircle className="spin" size={18} />正在加载任务</>}</div> : <div className="workflow-graph-root" ref={graphRef}>
           <WorkflowEdgeLayer edges={renderedEdges} />
-          <WorkflowOriginCard prompt={workflow.originalPrompt} workDirectory={workflow.workDirectory} branchCount={branches.length || 1} offset={nodeOffsets.origin} dragging={draggingNodeId === "origin"} editorMode={originDialog} editorPrompt={originPrompt} branchNote={branchNote} branchEngine={branchEngine} runtime={runtime} providers={providers} busy={busy} onPointerDown={(event) => startNodeDrag("origin", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={openOrigin} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setOriginMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 160) }); }} onEditorModeChange={openOriginDialog} onEditorPromptChange={setOriginPrompt} onBranchNoteChange={setBranchNote} onBranchEngineChange={setBranchEngine} onCancel={() => setOriginDialog(null)} onSubmit={() => void (originDialog === "edit" ? saveOriginEdit() : createBranch())} registerRef={registerGraphNode} />
+          <WorkflowOriginCard prompt={workflow.originalPrompt} executionTarget={workflow.executionTarget} conversationHandoff={conversationHandoff} branchCount={branches.length || 1} offset={nodeOffsets.origin} dragging={draggingNodeId === "origin"} editorMode={originDialog} editorPrompt={originPrompt} branchNote={branchNote} branchEngine={branchEngine} runtime={runtime} providers={providers} busy={busy || !enabled} onPointerDown={(event) => startNodeDrag("origin", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={openOrigin} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setOriginMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 160) }); }} onEditorModeChange={openOriginDialog} onEditorPromptChange={setOriginPrompt} onBranchNoteChange={setBranchNote} onBranchEngineChange={setBranchEngine} onCancel={() => setOriginDialog(null)} onSubmit={() => void (originDialog === "edit" ? saveOriginEdit() : createBranch())} registerRef={registerGraphNode} />
           {siblingBranches.length > 0 && <div className="workflow-branch-rail">{siblingBranches.map((branch) => <WorkflowPlanCard key={branch.id} id={`branch:${branch.id}`} workflow={branch} offset={nodeOffsets[`branch:${branch.id}`]} dragging={draggingNodeId === `branch:${branch.id}`} onPointerDown={(event) => startNodeDrag(`branch:${branch.id}`, event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => { if (suppressNodeClickRef.current === `branch:${branch.id}`) { suppressNodeClickRef.current = ""; return; } onOpenWorkflow(branch.id); }} registerRef={registerGraphNode} />)}</div>}
           <div className="workflow-planner-stack">
-            <WorkflowAgentCard id="planner" title="规划 Agent" provider={workflow.plannerEngine} status={plannerStatus} logs={workflow.plannerLogs} skills={workflowSkills} mcpServers={workflowMcpServers} offset={nodeOffsets.planner} dragging={draggingNodeId === "planner"} icon={<Brain size={17} />} onPointerDown={(event) => startNodeDrag("planner", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode("planner")} registerRef={registerGraphNode} emptyText="等待开始规划" className="planner" />
+          <WorkflowAgentCard id="planner" title="规划 Agent" provider={workflow.plannerEngine} status={plannerStatus} logs={workflow.plannerLogs} objective={workflow.plan?.summary || workflow.originalPrompt} executionTarget={workflow.executionTarget} skills={workflowSkills} mcpServers={workflowMcpServers} offset={nodeOffsets.planner} dragging={draggingNodeId === "planner"} icon={<ProviderIcon provider={workflow.plannerEngine} size={17} />} onPointerDown={(event) => startNodeDrag("planner", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode("planner")} registerRef={registerGraphNode} emptyText="等待开始规划" className="planner" />
           </div>
-          {columns.length > 0 && <div className="workflow-plan-columns">{columns.map((column, index) => <div className="workflow-column" key={index}>{column.map((node) => <WorkflowAgentCard key={node.id} id={node.id} title={node.title} provider={node.provider} status={node.status} attempt={node.attempt} logs={node.logs} skills={node.skills} mcpServers={node.mcpServers} result={node.summary} offset={nodeOffsets[node.id]} dragging={draggingNodeId === node.id} icon={<Bot size={15} />} onPointerDown={(event) => startNodeDrag(node.id, event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode(node.id)} registerRef={registerGraphNode} emptyText={node.dependsOn.length ? `等待 ${node.dependsOn.length} 项依赖` : "等待执行"} className="workflow-node" />)}</div>)}</div>}
-          {workflow.integrationStartedAt && <WorkflowAgentCard id="integration" title="最终交付" provider={workflow.plannerEngine} status={integrationStatus} logs={workflow.integrationLogs} skills={workflowSkills} mcpServers={workflowMcpServers} result={workflow.finalResult} offset={nodeOffsets.integration} dragging={draggingNodeId === "integration"} icon={<Check size={17} />} subtitle={workflow.finalResult ? `${statusLabel(workflow.finalResult.outcome)} · 点击查看全部成果` : undefined} onPointerDown={(event) => startNodeDrag("integration", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode("integration")} registerRef={registerGraphNode} emptyText="等待最终整合" className="integrator delivery" />}
+          {columns.length > 0 && <div className="workflow-plan-columns">{columns.map((column, index) => <div className="workflow-column" key={index}>{column.map((node) => <WorkflowAgentCard key={node.id} id={node.id} title={node.title} provider={node.provider} status={node.status} attempt={node.attempt} logs={node.logs} objective={node.objective} executionTarget={workflow.executionTarget} skills={node.skills} mcpServers={node.mcpServers} result={node.summary} offset={nodeOffsets[node.id]} dragging={draggingNodeId === node.id} icon={<ProviderIcon provider={node.provider === "auto" ? "agent" : node.provider} size={16} />} onPointerDown={(event) => startNodeDrag(node.id, event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode(node.id)} registerRef={registerGraphNode} emptyText={node.dependsOn.length ? `等待 ${node.dependsOn.length} 项依赖` : "等待执行"} className="workflow-node" />)}</div>)}</div>}
+          {workflow.integrationStartedAt && <WorkflowAgentCard id="integration" title="最终交付" provider={workflow.plannerEngine} status={integrationStatus} logs={workflow.integrationLogs} objective="汇总节点成果并执行最终验收" executionTarget={workflow.executionTarget} skills={workflowSkills} mcpServers={workflowMcpServers} result={workflow.finalResult} offset={nodeOffsets.integration} dragging={draggingNodeId === "integration"} icon={<Check size={17} />} onPointerDown={(event) => startNodeDrag("integration", event)} onPointerMove={moveNode} onPointerUp={finishNodeDrag} onPointerCancel={finishNodeDrag} onClick={() => openNode("integration")} registerRef={registerGraphNode} emptyText="等待最终整合" className="integrator delivery" />}
         </div>}
       </div>
 
-      {createOpen && !workflowId && <div className="workflow-create-popover"><header><span><Plus size={16} /></span><strong>创建初始任务</strong><button type="button" title="关闭" onClick={() => setCreateOpen(false)}><X size={15} /></button></header><textarea value={taskPrompt} onChange={(event) => setTaskPrompt(event.target.value)} onKeyDown={(event) => { if (event.ctrlKey && event.key === "Enter") { event.preventDefault(); void create(); } }} rows={10} placeholder="描述希望多个 Agent 共同完成的完整任务……" autoFocus /><div><label>规划模型<select value={plannerEngine} onChange={(event) => setPlannerEngine(event.target.value as Engine)}>{providers.filter((provider) => provider.capabilities.workflow.planner).map((provider) => <option key={provider.id} value={provider.id} disabled={!runtime.providers[provider.id]?.available}>{provider.shortName} CLI</option>)}</select></label><label>并行 Agent<select value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value as "auto" | "custom")}><option value="auto">自动（5）</option><option value="custom">自定义</option></select></label>{concurrencyMode === "custom" && <label>上限<input type="number" min={1} max={20} value={maxConcurrentAgents} onChange={(event) => setMaxConcurrentAgents(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /></label>}<button type="button" className="primary" disabled={busy || !taskPrompt.trim()} onClick={() => void create()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}创建并规划</button></div></div>}
+      {enabled && createOpen && !workflowId && <div className="workflow-create-popover"><header><span><Plus size={16} /></span><strong>创建任务</strong><button type="button" title="关闭" onClick={() => setCreateOpen(false)}><X size={15} /></button></header><div className="workflow-create-mode" role="group" aria-label="任务来源"><button type="button" className={createMode === "new" ? "active" : ""} onClick={() => setCreateMode("new")}><Plus size={14} />新任务</button><button type="button" className={createMode === "definition" ? "active" : ""} onClick={() => setCreateMode("definition")}><Layers3 size={14} />工作流程</button><ExecutionTargetSelect value={executionTarget} onChange={setExecutionTarget} disabled={busy || !enabled} /></div>{createMode === "definition" ? <WorkflowDefinitionPicker workspaceId={workspaceId} target={executionTarget} onNotice={onNotice} onCreated={(id) => { setCreateOpen(false); void onChanged(); onOpenWorkflow(id); }} /> : <><textarea value={taskPrompt} onChange={(event) => setTaskPrompt(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); void create(); } }} rows={8} placeholder="描述希望完成的目标，规划经确认后开始执行……" autoFocus /><div><label title="规划 Agent"><ProviderIcon provider={plannerEngine} size={14} /><select aria-label="规划 Agent" value={plannerEngine} onChange={(event) => setPlannerEngine(event.target.value as Engine)}>{providers.filter((provider) => provider.capabilities.workflow.planner).map((provider) => <option key={provider.id} value={provider.id} disabled={!runtime.providers[provider.id]?.available}>{provider.shortName}</option>)}</select></label><label title="并行 Agent 上限"><Bot size={14} /><select aria-label="并行 Agent" value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value as "auto" | "custom")}><option value="auto">自动并行</option><option value="custom">自定义</option></select></label>{concurrencyMode === "custom" && <label><input aria-label="并行 Agent 上限" type="number" min={1} max={20} value={maxConcurrentAgents} onChange={(event) => setMaxConcurrentAgents(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /></label>}<button type="button" className="primary" disabled={!enabled || busy || !taskPrompt.trim()} onClick={() => void create()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />}创建并规划</button></div></>}</div>}
 
-      {workflow?.status === "awaiting_approval" && !originDialog && !reviewCollapsed && <WorkflowReviewCard workflow={workflow} nodes={displayNodes} reviewNote={reviewNote} busy={busy} onReviewNoteChange={setReviewNote} onRefine={() => void refinePlan()} onFresh={() => void freshPlan()} onApprove={() => void approve()} onSelectNode={setSelectedAgent} onCollapse={() => setReviewCollapsed(true)} />}
+      {workflow?.status === "awaiting_approval" && !originDialog && !reviewCollapsed && <WorkflowReviewCard workflow={workflow} nodes={displayNodes} impact={maintenance?.impact} reviewNote={reviewNote} validationMode={validationMode} onValidationModeChange={setValidationMode} busy={busy || !enabled} onReviewNoteChange={setReviewNote} onRefine={() => void refinePlan()} onFresh={() => void freshPlan()} onApprove={() => void approve()} onSelectNode={setSelectedAgent} onCollapse={() => setReviewCollapsed(true)} />}
       {workflow && deliveryOpen && <WorkflowDeliveryPanel workflow={workflow} nodes={displayNodes} onSelectNode={(id) => { setDeliveryOpen(false); setSelectedAgent(id); }} onOpenFile={openArtifact} onCopyPath={copyArtifactPath} onOpenFolder={() => void openWorkflowFolder()} onCollapse={() => setDeliveryOpen(false)} />}
-      {workflow && ["draft", "needs_review"].includes(workflow.status) && <div className={`workflow-dock ${workflow.plan ? "with-maintenance" : ""}`}><span>{workflow.status === "needs_review" ? workflow.integrationStartedAt ? "最终验收未通过，请查看整合与验收日志" : "规划或执行遇到问题，请查看 Agent 日志" : "审批前不会启动子 Agent"}</span>{workflow.integrationStartedAt ? <button type="button" className="primary" onClick={() => void retryIntegration()} disabled={busy}><RefreshCw size={15} />重新验收</button> : workflow.nodes.some((node) => ["failed", "blocked"].includes(node.status)) ? <><button type="button" className="primary" onClick={() => void retryFailedNodes()} disabled={busy}><RefreshCw size={15} />恢复异常节点</button><button type="button" onClick={() => void plan("fresh")} disabled={busy}>重新规划</button></> : <button type="button" className="primary" onClick={() => void plan(workflow.activePlanVersion ? "fresh" : "initial")} disabled={busy}><RefreshCw size={15} />重新规划</button>}</div>}
-      {workflow && ["planning", "queued", "running", "integrating", "paused"].includes(workflow.status) && <div className="workflow-dock"><span><Clock3 size={15} />{workflow.nodes.filter((node) => node.status === "completed").length} / {workflow.nodes.length} 个节点完成</span>{workflow.status === "paused" ? <button type="button" title="继续全部 Agent" disabled={busy} onClick={() => void resumeWorkflow()}><Play size={15} /></button> : <button type="button" title="暂停全部 Agent" disabled={busy} onClick={() => void pauseWorkflow()}><Pause size={15} /></button>}<button type="button" title="终止整个工作流" disabled={busy} onClick={() => void cancel()}><StopCircle size={15} /></button></div>}
+      {workflow && ["draft", "needs_review"].includes(workflow.status) && <div className={`workflow-dock ${workflow.plan ? "with-maintenance" : ""}`}><span>{workflow.status === "needs_review" ? workflow.integrationStartedAt ? "最终验收未通过，请查看整合与验收日志" : "规划或执行遇到问题，请查看 Agent 日志" : "审批前不会启动子 Agent"}</span>{workflow.integrationStartedAt ? <button type="button" className="primary" onClick={() => void retryIntegration()} disabled={busy || !enabled}><RefreshCw size={15} />重新验收</button> : workflow.nodes.some((node) => ["failed", "blocked"].includes(node.status)) ? <><button type="button" className="primary" onClick={() => void retryFailedNodes()} disabled={busy || !enabled}><RefreshCw size={15} />恢复异常节点</button><button type="button" onClick={() => void plan("fresh")} disabled={busy || !enabled}>重新规划</button></> : <button type="button" className="primary" onClick={() => void plan(workflow.activePlanVersion ? "fresh" : "initial")} disabled={busy || !enabled}><RefreshCw size={15} />重新规划</button>}</div>}
+      {workflow && ["planning", "queued", "running", "integrating", "paused"].includes(workflow.status) && <div className="workflow-dock"><span><Clock3 size={15} />{workflow.pendingMaintenance ? "等待检查点" : `${workflow.nodes.filter((node) => node.status === "completed").length} / ${workflow.nodes.length} 个节点完成`}</span>{workflow.status === "paused" ? <button type="button" title="继续全部 Agent" disabled={!enabled || busy || Boolean(workflow.pendingMaintenance) || maintenance?.status === "planning"} onClick={() => void resumeWorkflow()}><Play size={15} /></button> : <button type="button" title="完成当前节点后暂停" disabled={busy || !enabled} onClick={() => void pauseWorkflow()}><Pause size={15} /></button>}<button type="button" title="终止整个工作流" disabled={busy || !enabled} onClick={() => void cancel()}><StopCircle size={15} /></button></div>}
       {workflow?.status === "completed" && <div className="workflow-dock with-maintenance"><span><Check size={15} />全部节点完成并已整合</span><button type="button" title="查看成果交付" onClick={() => setDeliveryOpen(true)}><FileCheck2 size={15} /></button><button type="button" title={workflow.plan?.finalDelivery?.primary ? "复制最终文件路径" : "复制成果摘要"} onClick={() => navigator.clipboard.writeText(workflow.plan?.finalDelivery?.primary || workflow.finalResult?.humanSummary || "").then(() => onNotice(workflow.plan?.finalDelivery?.primary ? "已复制最终文件路径" : "已复制最终结果", "success"))}><Copy size={15} /></button></div>}
-      {workflow?.plan && !["planning", "queued", "running", "integrating"].includes(workflow.status) && <WorkflowMaintenancePanel branch={maintenance} value={maintenanceInput} busy={busy} onChange={setMaintenanceInput} onSubmit={() => void maintainPlan()} />}
+      {workflow && showMaintenance && <WorkflowMaintenancePanel branch={maintenance} workflow={workflow} providers={providers} runtime={runtime} engine={maintenanceEngine} intent={maintenanceIntent} value={maintenanceInput} busy={busy || !enabled} onEngineChange={setMaintenanceEngine} onIntentChange={setMaintenanceIntent} onChange={setMaintenanceInput} onSubmit={() => void maintainPlan()} />}
+      {workflow && enabled && <WorkflowExtensions workflow={workflow} workspaceId={workspaceId} onNotice={onNotice} onChanged={onChanged} />}
       <div className="workflow-zoom">{workflow?.status === "awaiting_approval" && <button type="button" className={`workflow-review-toggle pending ${reviewCollapsed ? "" : "active"}`} title={reviewCollapsed ? "打开计划审查" : "收起计划审查"} aria-pressed={!reviewCollapsed} onClick={() => { setDeliveryOpen(false); setReviewCollapsed((value) => !value); }}><ListChecks size={14} /></button>}{workflow && (workflow.integrationStartedAt || workflow.finalResult || displayNodes.some((node) => node.summary)) && <button type="button" className={`workflow-delivery-toggle ${deliveryOpen ? "active" : ""} ${workflow.status === "completed" ? "ready" : ""}`} title={deliveryOpen ? "收起成果交付" : "查看成果交付"} aria-pressed={deliveryOpen} onClick={() => { setReviewCollapsed(true); setDeliveryOpen((value) => !value); }}><FileCheck2 size={14} /></button>}<button type="button" title="适应全部节点" onClick={fitViewport}><Maximize2 size={14} /></button><button type="button" title="整理画布" onClick={arrangeCanvas}><LayoutGrid size={14} /></button><button type="button" title="重置视图" onClick={resetLayout}><LocateFixed size={14} /></button><button type="button" title="缩小" onClick={() => setZoom((value) => Math.max(.4, value - .1))}>−</button><span>{Math.round(zoom * 100)}%</span><button type="button" title="放大" onClick={() => setZoom((value) => Math.min(2, value + .1))}>＋</button></div>
     </div>
-    {originMenu && workflow && <div className="session-context-menu workflow-origin-menu" style={{ left: originMenu.x, top: originMenu.y }} onPointerDown={(event) => event.stopPropagation()}><button type="button" onClick={() => openOriginDialog("edit")}><Pencil size={14} />编辑初始任务</button><button type="button" onClick={() => openOriginDialog("branch")}><GitBranch size={14} />新建规划分支</button><button type="button" onClick={() => { navigator.clipboard.writeText(workflow.originalPrompt); setOriginMenu(null); onNotice("已复制初始任务", "success"); }}><Copy size={14} />复制任务内容</button></div>}
-    {workflow && selectedAgent === "planner" && <WorkflowAgentDrawer title="规划 Agent" provider={workflow.plannerEngine} status={plannerStatus} task={workflow.originalPrompt} logs={workflow.plannerLogs} error={workflow.status === "needs_review" && !workflow.integrationStartedAt ? workflow.reviewNote || "规划未完成" : null} workspaceId={workspaceId} renderMessage={renderAgentMessage} onClose={() => setSelectedAgent("")} />}
-    {workflow && selectedAgent === "integration" && <WorkflowAgentDrawer title="最终交付与验收" provider={workflow.plannerEngine} status={integrationStatus} task={workflow.originalPrompt} logs={workflow.integrationLogs} result={workflow.finalResult} error={workflow.status === "needs_review" ? workflow.finalResult?.unresolved.join("；") || "最终验收未通过" : null} workspaceId={workspaceId} renderMessage={renderAgentMessage} onOpenFile={openArtifact} onOpenFolder={() => void openWorkflowFolder()} onCopyPath={copyArtifactPath} onClose={() => setSelectedAgent("")} />}
-    {selectedNode && <WorkflowAgentDrawer title={selectedNode.title} provider={selectedNode.provider} status={selectedNode.status} task={selectedNode.objective} logs={selectedNode.logs} result={selectedNode.summary} error={selectedNode.error} workspaceId={workspaceId} renderMessage={renderAgentMessage} busy={busy} onOpenFile={openArtifact} onOpenFolder={() => void openWorkflowFolder()} onCopyPath={copyArtifactPath} onCopyMachineResult={selectedNode.summary?.machineResultPath ? () => navigator.clipboard.writeText(selectedNode.summary!.machineResultPath!).then(() => onNotice("已复制机器结果地址", "success")) : undefined} onRepairResult={selectedNode.resultRepairable && ["failed", "blocked"].includes(selectedNode.status) ? () => void repairNodeResult(selectedNode.id) : undefined} onPause={workflow?.status !== "canceled" && ["running", "queued", "pending", "ready", "retry_wait", "interrupted"].includes(selectedNode.status) ? () => void pauseNode(selectedNode.id) : undefined} onResume={workflow?.status !== "canceled" && selectedNode.status === "paused" ? () => void resumeNode(selectedNode.id) : undefined} onRestart={workflow?.status !== "canceled" && ["running", "paused", "retry_wait", "interrupted", "failed", "blocked", "canceled", "completed"].includes(selectedNode.status) ? () => void restartNode(selectedNode.id) : undefined} onCancel={workflow?.status !== "canceled" && ["running", "queued", "pending", "ready", "pause_requested", "paused", "restart_requested", "retry_wait", "interrupted", "failed", "blocked"].includes(selectedNode.status) ? () => void cancelNode(selectedNode.id) : undefined} onClose={() => setSelectedAgent("")} />}
+    {originMenu && workflow && <div className="session-context-menu workflow-origin-menu" style={{ left: originMenu.x, top: originMenu.y }} onPointerDown={(event) => event.stopPropagation()}><button type="button" disabled={!enabled} onClick={() => openOriginDialog("edit")}><Pencil size={14} />编辑初始任务</button><button type="button" disabled={!enabled} onClick={() => openOriginDialog("branch")}><GitBranch size={14} />新建规划分支</button><button type="button" onClick={() => { navigator.clipboard.writeText(workflow.originalPrompt); setOriginMenu(null); onNotice("已复制初始任务", "success"); }}><Copy size={14} />复制任务内容</button></div>}
+    {workflow && selectedAgent === "planner" && <WorkflowAgentDrawer executionId={`${workflow.id}:planner`} title="规划 Agent" provider={workflow.plannerEngine} status={plannerStatus} task={workflow.originalPrompt} logs={workflow.plannerLogs} summary={workflow.plan?.summary} attempt={workflow.activePlanVersion} executionTarget={workflow.executionTarget} error={workflow.status === "needs_review" && !workflow.integrationStartedAt ? workflow.reviewNote || "规划未完成" : null} workspaceId={workflow.id} renderMessage={renderAgentMessage} onClose={() => setSelectedAgent("")} />}
+    {workflow && selectedAgent === "integration" && <WorkflowAgentDrawer executionId={`${workflow.id}:integration`} title="最终交付与验收" provider={workflow.plannerEngine} status={integrationStatus} task={workflow.originalPrompt} logs={workflow.integrationLogs} executionTarget={workflow.executionTarget} result={workflow.finalResult} error={workflow.status === "needs_review" ? workflow.finalResult?.unresolved.join("；") || "最终验收未通过" : null} workspaceId={workflow.id} renderMessage={renderAgentMessage} onOpenFile={openArtifact} onOpenFolder={() => void openWorkflowFolder()} onCopyPath={copyArtifactPath} onClose={() => setSelectedAgent("")} />}
+    {selectedNode && <WorkflowAgentDrawer executionId={`${workflow?.id || "workflow"}:${selectedNode.id}`} title={selectedNode.title} provider={selectedNode.provider} status={selectedNode.status} task={selectedNode.objective} logs={selectedNode.logs} attempt={selectedNode.attempt} executionTarget={workflow?.executionTarget} result={selectedNode.summary} error={selectedNode.error} workspaceId={workflow?.id || workspaceId} renderMessage={renderAgentMessage} busy={busy || !enabled} onOpenFile={openArtifact} onOpenFolder={() => void openWorkflowFolder()} onCopyPath={copyArtifactPath} onCopyMachineResult={selectedNode.summary?.machineResultPath ? () => navigator.clipboard.writeText(selectedNode.summary!.machineResultPath!).then(() => onNotice("已复制机器结果地址", "success")) : undefined} onRepairResult={selectedNode.resultRepairable && ["failed", "blocked"].includes(selectedNode.status) ? () => void repairNodeResult(selectedNode.id) : undefined} onPause={workflow?.status !== "canceled" && ["running", "queued", "pending", "ready", "retry_wait", "interrupted"].includes(selectedNode.status) ? () => void pauseNode(selectedNode.id) : undefined} onResume={workflow?.status !== "canceled" && selectedNode.status === "paused" ? () => void resumeNode(selectedNode.id) : undefined} onRestart={workflow?.status !== "canceled" && ["running", "paused", "retry_wait", "interrupted", "failed", "blocked", "canceled", "completed"].includes(selectedNode.status) ? () => void restartNode(selectedNode.id) : undefined} onCancel={workflow?.status !== "canceled" && ["running", "queued", "pending", "ready", "pause_requested", "paused", "restart_requested", "retry_wait", "interrupted", "failed", "blocked"].includes(selectedNode.status) ? () => void cancelNode(selectedNode.id) : undefined} onClose={() => setSelectedAgent("")} />}
   </section>;
 }

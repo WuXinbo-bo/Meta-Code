@@ -37,10 +37,17 @@ try {
   const refreshed = await index.related("parent");
   assert.equal(refreshed.some((item) => item.threadId === "late-child"), true);
 
+  const partial = path.join(nested, "partial.jsonl");
+  const partialTranscript = transcript("partial-child", "parent");
+  await fsp.writeFile(partial, partialTranscript.slice(0, 20));
+  assert.equal((await index.related("parent")).some((item) => item.threadId === "partial-child"), false);
+  await fsp.appendFile(partial, partialTranscript.slice(20));
+  assert.equal((await index.related("parent")).some((item) => item.threadId === "partial-child"), true, "a partially written metadata header must be retried");
+
   const persisted = JSON.parse(await fsp.readFile(cacheFile, "utf8"));
   assert.equal(persisted.some((item) => item.threadId === "child"), true);
   const restored = new AgentTranscriptIndex(root, 0, cacheFile);
-  assert.deepEqual((await restored.related("parent")).map((item) => item.threadId).sort(), ["child", "grandchild", "late-child"]);
+  assert.deepEqual((await restored.related("parent")).map((item) => item.threadId).sort(), ["child", "grandchild", "late-child", "partial-child"]);
   console.log("Agent transcript index tests passed");
 } finally {
   await fsp.rm(root, { recursive: true, force: true });
