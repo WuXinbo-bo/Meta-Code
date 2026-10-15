@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CodexLinkThread } from "../codexLink/types.js";
 import type { SessionInventoryItem } from "./types.js";
+import { pathKey } from "../pathBoundary.js";
 
 type WorkspaceRef = { id: string; name: string; root: string };
 
@@ -105,13 +106,13 @@ export async function listClaudeNativeSessions(root: string, knownThreadIds: Set
 }
 
 export function codexOfficialInventory(threads: CodexLinkThread[], workspaces: WorkspaceRef[], knownThreadIds: Set<string>, includeUnmatched = false) {
-  const byPath = new Map(workspaces.map((workspace) => [path.resolve(workspace.root).toLowerCase(), workspace]));
+  const byPath = new Map(workspaces.map((workspace) => [pathKey(workspace.root), workspace]));
   return threads.filter((thread) => {
     if (knownThreadIds.has(thread.id)) return false;
     if (includeUnmatched) return true;
-    return Boolean(thread.cwd && byPath.has(path.resolve(thread.cwd).toLowerCase()));
+    return Boolean(thread.cwd && byPath.has(pathKey(thread.cwd)));
   }).map((thread): SessionInventoryItem => {
-    const workspace = thread.cwd ? byPath.get(path.resolve(thread.cwd).toLowerCase()) : undefined;
+    const workspace = thread.cwd ? byPath.get(pathKey(thread.cwd)) : undefined;
     const workspaceMissing = Boolean(thread.cwd && !fs.existsSync(thread.cwd));
     const active = thread.status.type === "active";
     return {

@@ -12,6 +12,6 @@ manager.discover = () => toolchainAt(destination);
 const toolchain = await manager.ensure(DEFAULT_RUNTIME_CONFIGURATION.network, (progress) => {
   if (progress.totalBytes) console.log(`[node] ${Math.round(progress.downloadedBytes / progress.totalBytes * 100)}%`);
 });
-if (toolchain.root !== destination) await fsp.cp(toolchain.root, destination, { recursive: true });
+if (toolchain.root !== destination) await fsp.cp(toolchain.root, destination, { recursive: true, verbatimSymlinks: true });
 await verifyNodeToolchain(toolchainAt(destination));
 console.log("[node] isolated Node/npm toolchain certified");

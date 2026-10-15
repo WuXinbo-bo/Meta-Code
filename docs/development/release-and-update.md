@@ -2,12 +2,14 @@
 
 Meta Code 当前产品版本为 `0.1.6`。`package.json` 是唯一版本源；代码、发布清单和设置页不得各自维护版本常量。
 
+当前发布包和 CI 验证覆盖 Windows 10/11 与 macOS Apple Silicon；源码和本地桌面打包同时支持 macOS Intel。Linux 仍支持从源码运行，暂未纳入桌面安装包矩阵。
+
 ## 运行边界
 
 - 工作台负责版本检查、频道偏好、更新公告、跳过版本和稍后提醒。
 - 独立 Launcher 负责下载、SHA-256/签名校验、进程退出、原子切换和失败回滚。
 - 工作台不会对正在运行的源码执行 `git pull`，也不会覆盖自身目录。
-- 个人数据始终位于 `%USERPROFILE%\.metacode`，卸载或替换程序版本不会删除个人数据。
+- 个人数据始终位于 Windows 的 `%USERPROFILE%\.metacode` 或 macOS 的 `~/.metacode`，卸载或替换程序版本不会删除个人数据。
 - 程序版本的目标安装位置为 `%LOCALAPPDATA%\MetaCode\versions\<version>`；活动版本由 Launcher 指针选择。
 
 ## 更新来源
@@ -30,7 +32,7 @@ Meta Code 当前产品版本为 `0.1.6`。`package.json` 是唯一版本源；�
 npm run release:prepare -- --asset <package.zip> --asset-url <https-url> --release-url <https-url> --build-id <git-sha> --signing-key <private.pem> --signing-key-id meta-code-release-2026
 ```
 
-生成物写入被 Git 忽略的 `release-artifacts/`。推送 `v*` 标签后，GitHub Actions 会在隔离的 Windows Runner 中校验版本、执行发布测试、构建安装包，并生成 `latest.json` 与 `SHA256SUMS.txt` 后发布 Release。重复执行同一标签时会覆盖同名资产，不会因 Release 已存在而失败。签名密钥不进入工作台进程或源码仓库。
+生成物写入被 Git 忽略的 `release-artifacts/`。推送 `v*` 标签后，GitHub Actions 会在隔离的 Windows 与 macOS Runner 中校验版本、执行发布测试、构建对应安装包，并生成 `latest.json` 与 `SHA256SUMS.txt` 后发布 Release。重复执行同一标签时会覆盖同名资产，不会因 Release 已存在而失败。签名密钥不进入工作台进程或源码仓库。
 
 ## 兼容与回滚
 

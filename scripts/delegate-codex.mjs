@@ -7,7 +7,7 @@ function help() {
     "Claude-Codex Codex 委派桥接",
     "",
     "用法：",
-    "  node scripts/delegate-codex.mjs --file .claude-codex/tasks/task-001.json",
+    "  node scripts/delegate-codex.mjs --file task-001.json",
     "  node scripts/delegate-codex.mjs --task \"实现并测试登录接口\" --cwd .",
     "",
     "JSON 文件字段：taskId、prompt、cwd、acceptance（字符串数组）"

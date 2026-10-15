@@ -41,7 +41,18 @@ const exitCode = await new Promise((resolve, reject) => {
   child.once("error", reject);
   child.once("exit", (code) => { clearTimeout(timer); resolve(code); });
 });
-await new Promise((resolve) => server.close(resolve));
+async function stdinRequest(input) {
+  const process = spawn(child.spawnfile, [path.join(root, "scripts", "delegate-agent.mjs"), "--stdin"], {
+    cwd: root, env: { ...globalThis.process.env, WORKBENCH_AGENT_BRIDGE_URL: `http://127.0.0.1:${address.port}/delegate`, WORKBENCH_AGENT_BRIDGE_TOKEN: "fixture-token", WORKBENCH_PARENT_TASK_ID: "fixture-parent" }, stdio: ["pipe", "pipe", "pipe"]
+  });
+  let error = ""; process.stderr.on("data", (chunk) => { error += chunk; });
+  process.stdout.resume(); process.stdin.on("error", () => {});
+  const exited = new Promise((resolve) => process.once("exit", resolve));
+  const timer = setTimeout(() => process.kill(), 10_000);
+  process.stdin.end(input);
+  try { return { code: await exited, error }; } finally { clearTimeout(timer); }
+}
+
 
 assert.equal(exitCode, 1);
 assert.equal(stdout, "");
@@ -50,4 +61,13 @@ assert.doesNotMatch(stderr, /Assertion failed|UV_HANDLE_CLOSING/);
 assert.equal(received.mode, "implementation");
 assert.deepEqual(received.capabilityRequirements, ["workspace-write", "terminal", "network"]);
 
-console.log("delegation bridge CLI compatibility and graceful failure passed");
+try {
+  const stdin = await stdinRequest(JSON.stringify({ providerId: "claude", prompt: "stdin research", mode: "analysis" }));
+  assert.equal(stdin.code, 1); assert.match(stdin.error, /fixture rejection/);
+  assert.equal(received.providerId, "claude"); assert.equal(received.prompt, "stdin research");
+  const invalid = await stdinRequest("{malformed");
+  assert.equal(invalid.code, 2); assert.match(invalid.error, /JSON|Unexpected|Expected/);
+  const oversized = await stdinRequest("x".repeat(1024 * 1024 + 1));
+  assert.equal(oversized.code, 2); assert.match(oversized.error, /1 MB|1MB|过大/);
+} finally { await new Promise((resolve) => server.close(resolve)); }
+console.log("delegation bridge stdin, legacy CLI compatibility and graceful failure passed");

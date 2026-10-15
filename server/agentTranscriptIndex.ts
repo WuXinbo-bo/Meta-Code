@@ -27,7 +27,7 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-async function transcriptHeader(file: string): Promise<AgentTranscriptDescriptor | null> {
+async function transcriptHeader(file: string): Promise<AgentTranscriptDescriptor | null | false> {
   const stat = await fsp.stat(file);
   const handle = await fsp.open(file, "r");
   try {
@@ -36,10 +36,13 @@ async function transcriptHeader(file: string): Promise<AgentTranscriptDescriptor
     await handle.read(buffer, 0, readSize, 0);
     const lines = buffer.toString("utf8").split(/\r?\n/);
     if (stat.size > readSize) lines.pop();
+    let sawCompleteRecord = false;
+    let sawParseError = false;
     for (const line of lines) {
-      if (!line.includes('"session_meta"')) continue;
       try {
         const record = JSON.parse(line) as Record<string, unknown>;
+        sawCompleteRecord = true;
+        if (!line.includes('"session_meta"')) continue;
         if (record.type !== "session_meta") continue;
         const meta = recordOf(record.payload);
         const source = recordOf(meta?.source);
@@ -47,7 +50,7 @@ async function transcriptHeader(file: string): Promise<AgentTranscriptDescriptor
         const spawn = recordOf(subagent?.thread_spawn);
         const parentThreadId = String(spawn?.parent_thread_id || meta?.parent_thread_id || "");
         const isSubagent = meta?.thread_source === "subagent" || Boolean(spawn);
-        if (!isSubagent || !parentThreadId) return null;
+        if (!isSubagent || !parentThreadId) return false;
         return {
           file,
           parentThreadId,
@@ -57,9 +60,13 @@ async function transcriptHeader(file: string): Promise<AgentTranscriptDescriptor
         };
       } catch {
         // Ignore a partially written metadata line and retry on the next refresh.
+        if (line.trim()) sawParseError = true;
       }
     }
-    return null;
+    // A complete, non-agent transcript is stable and need not be rescanned on
+    // every refresh. A file with no valid record may still be mid-write and is
+    // deliberately retried on the next pass.
+    return sawCompleteRecord && !sawParseError ? false : null;
   } finally {
     await handle.close();
   }
@@ -140,8 +147,15 @@ export class AgentTranscriptIndex {
       try { return await transcriptHeader(file); }
       catch { return null; }
     });
-    unseen.forEach((file) => this.knownFiles.add(file));
-    for (const header of headers) if (header) this.entries.set(header.file, header);
+    // Only mark files as known after a valid metadata header was found. A
+    // transcript can be created before its session_meta line is flushed; if we
+    // remembered that path as "seen" here, the index would never discover it.
+    for (let index = 0; index < unseen.length; index += 1) {
+      const header = headers[index];
+      if (header === null) continue;
+      this.knownFiles.add(unseen[index]);
+      if (header) this.entries.set(header.file, header);
+    }
     const liveFiles = new Set(files);
     let removed = false;
     for (const file of this.knownFiles) {

@@ -15,6 +15,7 @@ type Props = {
   model: string;
   effort: string;
   executionMode: ExecutionMode;
+  collaborationEnabled?: boolean;
   loadModels: (provider: EngineName) => Promise<ModelOption[]>;
   onModelChange: (provider: EngineName, model: string, effort: string) => Promise<void>;
   loadSessionConfiguration: (sessionId: string) => Promise<ProviderSessionConfiguration>;
@@ -31,6 +32,7 @@ export function ComposerRuntimeControl({
   model,
   effort,
   executionMode,
+  collaborationEnabled = true,
   loadModels,
   onModelChange,
   loadSessionConfiguration,
@@ -52,7 +54,7 @@ export function ComposerRuntimeControl({
   const label = descriptor?.shortName || (provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : provider);
   const modeLabel = executionMode === "collaborative" ? "协作" : "原生";
   const isAcp = control?.identity.transport === "acp";
-  const collaborationAvailable = !control || control.identity.transport === "native" || control.capabilities.tools.shell;
+  const collaborationAvailable = collaborationEnabled && (!control || control.identity.transport === "native" || control.capabilities.tools.shell);
   const efforts = control ? reasoningChoices(control.configuration.reasoning) : [];
   const modelOptions = [...new Map([{ id: selectedModel, displayName: selectedModel }, ...models].filter((item) => item.id).map((item) => [item.id, item])).values()];
   const sessionOptions = orderedAcpConfigOptions(sessionConfiguration?.options || control?.configuration.sessionOptions || []);
@@ -157,7 +159,7 @@ export function ComposerRuntimeControl({
     {open && <section className="composer-runtime-popover" role="dialog" aria-label={`${label} 运行配置`}>
       <div className="composer-runtime-mode-heading"><span>运行模式</span><HelpButton topic="delegation-protocol" /></div>
       <div className="composer-runtime-mode" role="radiogroup" aria-label="运行模式">
-        {(["native", "collaborative"] as ExecutionMode[]).map((mode) => <button type="button" role="radio" aria-checked={executionMode === mode} className={executionMode === mode ? "selected" : ""} disabled={saving || (mode === "collaborative" && !collaborationAvailable)} title={mode === "collaborative" && !collaborationAvailable ? "该 Agent 未声明终端能力，无法调用工作台委派桥接" : undefined} key={mode} onClick={() => requestModeChange(mode)}><span>{mode === "native" ? "原生" : "协作"}</span>{executionMode === mode && <Check size={12} />}</button>)}
+        {(["native", "collaborative"] as ExecutionMode[]).map((mode) => <button type="button" role="radio" aria-checked={executionMode === mode} className={executionMode === mode ? "selected" : ""} disabled={saving || (mode === "collaborative" && !collaborationAvailable)} title={mode === "collaborative" && !collaborationAvailable ? (collaborationEnabled ? "该 Agent 未声明终端能力，无法调用工作台委派桥接" : "请在设置中启用协作委派插件") : undefined} key={mode} onClick={() => requestModeChange(mode)}><span>{mode === "native" ? "原生" : "协作"}</span>{executionMode === mode && <Check size={12} />}</button>)}
       </div>
       {!collaborationAvailable && <div className="composer-runtime-empty">该 Agent 当前仅支持原生运行</div>}
       {!isAcp && (control?.capabilities.configuration.models !== false || efforts.length > 0) && <div className="composer-runtime-fields">

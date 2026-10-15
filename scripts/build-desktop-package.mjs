@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -15,6 +16,9 @@ const staging = path.join(versionRoot, ".staging");
 const runtime = path.join(staging, "runtime");
 const artifacts = path.join(versionRoot, "artifacts");
 const dirOnly = process.argv.includes("--dir-only");
+const isWindows = process.platform === "win32";
+const isMac = process.platform === "darwin";
+if (!isWindows && !isMac) throw new Error("桌面打包当前支持 Windows 和 macOS");
 
 function assertPackagingPath(target) {
   const relative = path.relative(packagesRoot, target);
@@ -31,7 +35,12 @@ async function run(command, args, cwd) {
 
 async function runNpm(args, cwd) {
   const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-  await run(process.execPath, [npmCli, ...args], cwd);
+  if (fs.existsSync(npmCli)) {
+    await run(process.execPath, [npmCli, ...args], cwd);
+    return;
+  }
+  const command = process.platform === "win32" ? "npm.cmd" : "npm";
+  await run(command, args, cwd);
 }
 
 async function copy(source, destination) {
@@ -60,27 +69,43 @@ await runNpm(["run", "build"], root);
 await copy(path.join(root, "desktop", "main.cjs"), path.join(staging, "desktop", "main.cjs"));
 await copy(path.join(root, "desktop", "preload.cjs"), path.join(staging, "desktop", "preload.cjs"));
 await copy(path.join(root, "desktop", "backend-recovery.cjs"), path.join(staging, "desktop", "backend-recovery.cjs"));
-await copy(path.join(root, "public", "workbench.ico"), path.join(staging, "build", "icon.ico"));
-await copy(path.join(root, "desktop", "installer.nsh"), path.join(staging, "build", "installer.nsh"));
-await run(path.join(root, "node_modules", "electron", "dist", "electron.exe"), [
+const electronExecutable = isWindows
+  ? path.join(root, "node_modules", "electron", "dist", "electron.exe")
+  : path.join(root, "node_modules", "electron", "dist", "Electron.app", "Contents", "MacOS", "Electron");
+const iconPngOutput = path.join(staging, "build", isWindows ? "installerLogo.png" : "icon.png");
+const iconOutput = path.join(staging, "build", isWindows ? "icon.ico" : "icon.icns");
+if (isWindows) {
+  await copy(path.join(root, "public", "workbench.ico"), iconOutput);
+  await copy(path.join(root, "desktop", "installer.nsh"), path.join(staging, "build", "installer.nsh"));
+}
+await run(electronExecutable, [
   path.join(root, "scripts", "render-installer-logo.cjs"),
   "--source", path.join(root, "public", "meta-code-mark.svg"),
-  "--output", path.join(staging, "build", "installerLogo.png")
+  "--output", iconPngOutput
 ], root);
-await run("powershell.exe", [
-  "-NoProfile",
-  "-NonInteractive",
-  "-ExecutionPolicy", "Bypass",
-  "-File", path.join(root, "scripts", "generate-installer-assets.ps1"),
+if (isMac) {
+  const iconset = path.join(staging, "build", "icon.iconset");
+  await fsp.rm(iconset, { recursive: true, force: true });
+  await fsp.mkdir(iconset, { recursive: true });
+  for (const size of [16, 32, 128, 256, 512]) {
+    await run("sips", ["-z", String(size), String(size), iconPngOutput, "--out", path.join(iconset, `icon_${size}x${size}.png`)], root);
+    await run("sips", ["-z", String(size * 2), String(size * 2), iconPngOutput, "--out", path.join(iconset, `icon_${size}x${size}@2x.png`)], root);
+  }
+  await run("iconutil", ["-c", "icns", "-o", iconOutput, iconset], root);
+  await fsp.rm(iconset, { recursive: true, force: true });
+}
+if (isWindows) await run("powershell.exe", [
+  "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+  path.join(root, "scripts", "generate-installer-assets.ps1"),
   "-SourceLogo", path.join(staging, "build", "installerLogo.png"),
-  "-OutputDirectory", path.join(staging, "build"),
-  "-Version", version
+  "-OutputDirectory", path.join(staging, "build"), "-Version", version
 ], root);
 await copy(path.join(root, "dist"), path.join(runtime, "dist"));
 await copy(path.join(root, "dist-server"), path.join(runtime, "dist-server"));
 await copy(path.join(root, "skills"), path.join(runtime, "skills"));
 await copy(path.join(root, "server-assets"), path.join(runtime, "server-assets"));
 await copy(path.join(root, "public"), path.join(runtime, "public"));
+if (isMac) await copy(iconPngOutput, path.join(runtime, "public", "meta-code-mark.png"));
 await fsp.mkdir(path.join(runtime, "scripts"), { recursive: true });
 await copy(path.join(root, "scripts", "delegate-agent.mjs"), path.join(runtime, "scripts", "delegate-agent.mjs"));
 await copy(path.join(root, "release.config.json"), path.join(runtime, "release.config.json"));
@@ -101,6 +126,9 @@ await fsp.writeFile(path.join(runtime, "package-lock.json"), await fsp.readFile(
 
 console.log("[desktop] installing isolated production dependencies");
 await runNpm(["install", "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts"], runtime);
+// Set native helper permissions before signing the application bundle.
+const { prepareNativePty } = await import(pathToFileURL(path.join(runtime, "dist-server", "engines", "nativePtyRuntime.js")).href);
+prepareNativePty(path.join(runtime, "node_modules", "node-pty"));
 
 const desktopPackage = {
   name: "meta-code-desktop",
@@ -131,6 +159,11 @@ const config = {
     executableName: "Meta Code",
     requestedExecutionLevel: "asInvoker"
   },
+  mac: {
+    icon: iconOutput,
+    category: "public.app-category.developer-tools",
+    artifactName: "Meta-Code-${version}-${arch}.${ext}"
+  },
   nsis: {
     artifactName: "Meta-Code-Setup-${version}-${arch}.${ext}",
     oneClick: false,
@@ -158,7 +191,11 @@ const config = {
 };
 
 console.log(`[desktop] building ${dirOnly ? "unpacked application" : "installer and portable application"}`);
-const targets = dirOnly ? Platform.WINDOWS.createTarget(["dir"], Arch.x64) : Platform.WINDOWS.createTarget(["nsis", "portable"], Arch.x64);
+const targetPlatform = isMac ? Platform.MAC : Platform.WINDOWS;
+const targetArch = process.arch === "arm64" ? Arch.arm64 : Arch.x64;
+const targets = dirOnly
+  ? targetPlatform.createTarget(["dir"], targetArch)
+  : targetPlatform.createTarget(isMac ? ["dmg", "zip"] : ["nsis", "portable"], targetArch);
 await build({ projectDir: staging, targets, config });
 
 // electron-builder writes local absolute paths here; it is diagnostic output, not a release asset.

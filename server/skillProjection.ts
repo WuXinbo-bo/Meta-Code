@@ -89,7 +89,7 @@ export class WorkspaceSkillProjectionManager {
   private readonly workspaces = new Map<string, WorkspaceProjection>();
   private readonly targets: SkillProjectionTarget[];
 
-  constructor(private readonly managedRoot: string, targets: SkillProjectionTarget[] = DEFAULT_PROJECTION_TARGETS) {
+  constructor(private readonly managedRoot: string, targets: SkillProjectionTarget[] = DEFAULT_PROJECTION_TARGETS, private readonly contextOnly = false) {
     this.targets = targets.map((target) => {
       const providerId = String(target.providerId || "").trim().toLowerCase();
       const workspacePath = String(target.workspacePath || "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
@@ -150,11 +150,13 @@ export class WorkspaceSkillProjectionManager {
     } catch {
       return;
     }
-    const desired = this.desiredSkills(state);
+    const desired = this.contextOnly ? new Set<string>() : this.desiredSkills(state);
     const roots = projectionRoots(state.root, this.targets);
     const projectedPaths: string[] = [];
     for (const root of Object.values(roots)) {
       try {
+        // Never reconcile through a user-owned directory symlink.
+        if ([root, path.dirname(root)].some((directory) => { try { return fs.lstatSync(directory).isSymbolicLink(); } catch { return false; } })) continue;
         if (fs.existsSync(root)) {
           for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
             if (!desired.has(entry.name)) this.removeManagedLink(path.join(root, entry.name));
@@ -194,6 +196,7 @@ export class WorkspaceSkillProjectionManager {
   }
 
   isAvailable(workspaceRoot: string, engine: SkillProjectionEngine, name: string) {
+    if (this.contextOnly) return false;
     const managed = this.managedSkillRoot(name);
     if (!managed) return false;
     const root = projectionRoots(workspaceRoot, this.targets)[engine];

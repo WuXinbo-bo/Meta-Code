@@ -2,8 +2,10 @@ export type HelpTopicId =
   | "getting-started"
   | "delegation-protocol"
   | "task-orchestration"
+  | "scheduled-tasks"
   | "capability-profiles"
   | "provider-connections"
+  | "capability-compatibility"
   | "cli-runtime"
   | "execution-permissions"
   | "mcp"
@@ -56,6 +58,17 @@ export const HELP_TOPICS: HelpTopic[] = [
     ]
   },
   {
+    id: "scheduled-tasks",
+    title: "Scheduled Tasks 与例程",
+    summary: "按时间自动创建普通 Meta Code 任务，并可暂停、恢复和立即运行。",
+    group: "Agent",
+    sections: [
+      { title: "执行方式", body: "例程只保存提示词、Provider、工作区和调度时间。到期后会创建普通会话，继续使用 Native/Managed 能力、权限和活动日志。" },
+      { title: "恢复与失败", body: "工作台重启时正在运行的例程会标记为已中断；周期例程在成功或失败后计算下一次运行时间，一次性例程完成后自动暂停。" },
+      { title: "安全边界", body: "例程按用户和工作区隔离，不能访问其他用户的目录；API Key、会话内容和执行输出不会写入例程配置文件。" }
+    ]
+  },
+  {
     id: "capability-profiles",
     title: "能力方案与 Skill 策略",
     summary: "保存一组 Skill 调用策略，并在不同工作任务间快速切换。",
@@ -77,6 +90,17 @@ export const HELP_TOPICS: HelpTopic[] = [
       { title: "探测模型", body: "连接信息保存后，探测模型会读取服务端或 Agent 暴露的模型列表。服务不提供列表时仍可手动填写。" },
       { title: "任务前检查", body: "创建任务和每次发送前都会重新检查 CLI、连接状态、主任务能力和工作区权限，避免任务进入运行态后才发现配置不可用。" },
       { title: "ACP 配置", body: "ACP Agent 的模型、模式和思考强度由会话能力协商动态提供，工作台不会硬编码不存在的选项。" }
+    ]
+  },
+  {
+    id: "capability-compatibility",
+    title: "原生能力与兼容模式",
+    summary: "理解 Native、Managed、Degraded 三种运行状态和能力边界。",
+    group: "能力",
+    sections: [
+      { title: "能力来源", body: "Claude 和 Codex 的官方线程、权限、工具与子 Agent 能力由各自原生适配器提供；Meta Code 的协作委派和任务编排是独立插件，使用共享 Provider 合约接入。" },
+      { title: "三种模式", body: "Native 表示使用官方运行时的原生适配（不是所有功能已实测），Managed 表示由工作台负责委派、日志和编排，Degraded 表示运行时、版本或传输握手未满足要求。工作台会显示受限原因，具体能力受版本、账号和交互方式限制。Agent Teams 和官方交互审批可在任务菜单的“原生终端”使用；Meta Code 编排插件与 Claude Dynamic Workflow 是独立能力。" },
+      { title: "排查方式", body: "在 Agent 设置中查看能力快照、运行时探测、传输握手和限制项。先修复 CLI、连接或版本问题，再重新探测；临时降级状态不会覆盖官方 CLI 配置。" }
     ]
   },
   {

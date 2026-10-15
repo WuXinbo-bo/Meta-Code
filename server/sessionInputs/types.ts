@@ -15,6 +15,7 @@ export type PendingInput<TAttachment = unknown, TSkillPolicies = Record<string, 
   skillNames?: string[];
   agentMode?: "auto" | "all" | "off";
   skillPolicies?: TSkillPolicies;
+  executionMode?: "native" | "collaborative";
   attachments?: TAttachment[];
 };
 

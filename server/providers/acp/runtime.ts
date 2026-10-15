@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { CliDefinition } from "../../runtime/types.js";
-import { runtimePlatform } from "../../runtime/registry.js";
+import { commandOnPath, runtimePlatform } from "../../runtime/registry.js";
 import { AGENT_ADAPTER_SDK_VERSION, type AgentProviderManifestV1 } from "../../agents/types.js";
 import { acpRegistryPlatform, type AcpRegistryAgent } from "./registry.js";
 import type { AcpLaunchSpec } from "../types.js";
@@ -49,11 +49,7 @@ function npmBinCandidates(root: string, packageName: string) {
 }
 
 async function systemCandidates(command: string) {
-  try {
-    const resolver = process.platform === "win32" ? "where.exe" : "which";
-    const { stdout } = await execFileAsync(resolver, [command], { encoding: "utf8", timeout: 5_000, windowsHide: true });
-    return stdout.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-  } catch { return []; }
+  return commandOnPath(command);
 }
 
 export function safeAcpRegistryEnv(input: Record<string, string> | undefined) {

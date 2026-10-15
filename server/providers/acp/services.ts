@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { assertPathInsideRoot } from "../../pathBoundary.js";
+import { randomUUID } from "node:crypto";
+import { registerProcessTree, terminateProcessTree } from "../../processTree.js";
 import type {
   CreateTerminalRequest,
   CreateTerminalResponse,
@@ -54,6 +56,7 @@ export class RestrictedAcpClientServices implements AcpClientServices {
   private readonly roots: string[];
   private readonly terminals = new Map<string, TerminalRecord>();
   private terminalSequence = 0;
+  private readonly processOwnerId = `acp-terminals:${randomUUID()}`;
 
   constructor(private readonly options: RestrictedAcpClientServicesOptions) {
     this.roots = options.roots.map((root) => path.resolve(root));
@@ -94,7 +97,14 @@ export class RestrictedAcpClientServices implements AcpClientServices {
     );
     const env = { ...process.env };
     for (const item of request.env || []) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(item.name)) env[item.name] = item.value;
-    const child = spawn(request.command, request.args || [], { cwd, env, shell: false, windowsHide: true });
+    const child = spawn(request.command, request.args || [], {
+      cwd,
+      env,
+      shell: false,
+      windowsHide: true,
+      detached: process.platform !== "win32"
+    });
+    registerProcessTree(this.processOwnerId, child);
     const terminalId = `acp-terminal-${++this.terminalSequence}`;
     let resolveExit!: (status: { exitCode: number | null; signal: string | null }) => void;
     const exited = new Promise<{ exitCode: number | null; signal: string | null }>((resolve) => { resolveExit = resolve; });
@@ -127,17 +137,23 @@ export class RestrictedAcpClientServices implements AcpClientServices {
 
   async killTerminal(request: KillTerminalRequest): Promise<void> {
     const record = this.requireTerminal(request.terminalId);
-    if (!record.exitStatus) record.child.kill();
+    if (!record.exitStatus) terminateProcessTree(record.child);
   }
 
   async releaseTerminal(request: ReleaseTerminalRequest): Promise<void> {
     const record = this.requireTerminal(request.terminalId);
-    if (!record.exitStatus) record.child.kill();
+    if (!record.exitStatus) terminateProcessTree(record.child);
     this.terminals.delete(request.terminalId);
   }
 
   async close() {
-    for (const [terminalId] of this.terminals) await this.releaseTerminal({ sessionId: "closing", terminalId });
+    // Snapshot the map before yielding so an Agent disconnect and an explicit
+    // backend close can safely race without one observing a deleted terminal.
+    for (const [terminalId, record] of [...this.terminals]) {
+      if (!this.terminals.has(terminalId)) continue;
+      if (!record.exitStatus) terminateProcessTree(record.child);
+      this.terminals.delete(terminalId);
+    }
   }
 
   private assertPath(input: string, allowMissing = false) {

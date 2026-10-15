@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ProviderIcon } from "../branding/ProviderIcon";
 import type { ProviderControlSnapshot } from "../providers/types";
+import { CapabilityCompatibilityPanel, CapabilityModeBadge, capabilitySnapshotForControl, useProviderCapabilitySnapshot } from "../providers/CapabilityCompatibility";
 import { HelpButton } from "../help/HelpProvider";
 import { ChevronDown } from "lucide-react";
 
@@ -26,6 +27,9 @@ export function ProviderSettingsPanel({
   children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(focused);
+  const fallbackCapabilities = useMemo(() => capabilitySnapshotForControl(control), [control]);
+  const capabilityState = useProviderCapabilitySnapshot(control.providerId, expanded, fallbackCapabilities);
+  const capabilitySnapshot = capabilityState.snapshot || fallbackCapabilities;
   useEffect(() => { if (focused) setExpanded(true); }, [focused]);
   return <section
     className={`settings-provider-panel unified-provider-panel ${focused ? "focused" : ""} ${expanded ? "expanded" : "collapsed"}`}
@@ -38,6 +42,7 @@ export function ProviderSettingsPanel({
         <strong>{control.identity.shortName}</strong>
         <small>{subtitle || control.identity.description}</small>
       </span>
+      <CapabilityModeBadge snapshot={capabilitySnapshot} loading={capabilityState.loading} />
       <HelpButton topic="provider-connections" />
       <div className="provider-panel-state">
         <i className={control.connection.status === "ready" ? "ready" : control.connection.status}>{statusLabel(control)}</i>
@@ -45,6 +50,6 @@ export function ProviderSettingsPanel({
       </div>
       <button type="button" className="provider-panel-toggle" aria-expanded={expanded} aria-label={expanded ? "收起配置" : "展开配置"} onClick={(event) => { event.stopPropagation(); setExpanded((value) => !value); onFocus?.(); }}><ChevronDown size={15} /></button>
     </header>
-    {expanded && <div className="provider-panel-content">{children}</div>}
+    {expanded && <div className="provider-panel-content"><CapabilityCompatibilityPanel snapshot={capabilitySnapshot} loading={capabilityState.loading} error={capabilityState.error} />{children}</div>}
   </section>;
 }

@@ -22,6 +22,7 @@ try {
   const summaries = repository.listNavigation(ownerUserId);
   const durationMs = performance.now() - started;
   assert.equal(summaries.length, 80);
+  assert.ok(summaries.every((item) => item.activePlanVersion === 0), "plan versions are available without loading logs");
   assert.equal("plannerLogs" in summaries[0], false, "navigation summaries must not hydrate historical logs");
   assert.ok(durationMs < 250, `navigation summary query took ${durationMs.toFixed(1)}ms`);
 } finally {

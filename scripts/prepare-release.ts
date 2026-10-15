@@ -20,9 +20,17 @@ const required = (name: string) => {
 const channel = (value("--channel") || "stable") as AppUpdateChannel;
 if (channel !== "stable" && channel !== "beta") throw new Error("--channel 只能是 stable 或 beta");
 const config = loadAppUpdateConfig(root);
-const assetFile = path.resolve(required("--asset"));
+const assetArgument = value("--asset");
+const assetFile = assetArgument ? path.resolve(assetArgument) : "";
 const signingKeyFile = path.resolve(required("--signing-key"));
 const outputRoot = path.resolve(value("--out") || path.join(root, "release-artifacts"));
+const assetsFile = value("--assets-file");
+const assets = assetsFile
+  ? JSON.parse(await fsp.readFile(path.resolve(assetsFile), "utf8")) as Array<{ file: string; url: string; platform: string; arch: string }>
+  : [{ file: assetFile || required("--asset"), url: required("--asset-url"), platform: value("--platform") || process.platform, arch: value("--arch") || process.arch }];
+if (!Array.isArray(assets) || !assets.length || assets.some((asset) => !asset || typeof asset.file !== "string" || typeof asset.url !== "string" || typeof asset.platform !== "string" || typeof asset.arch !== "string")) {
+  throw new Error("--assets-file 必须是包含 file、url、platform、arch 的非空数组");
+}
 const manifest = await createReleaseManifest({
   config,
   channel,
@@ -32,12 +40,7 @@ const manifest = await createReleaseManifest({
   buildId: value("--build-id") || process.env.METACODE_SOURCE_COMMIT || `${config.currentVersion}-${Date.now()}`,
   signingKeyId: value("--signing-key-id") || "meta-code-release-2026",
   signingPrivateKey: await fsp.readFile(signingKeyFile),
-  assets: [{
-    file: assetFile,
-    url: required("--asset-url"),
-    platform: value("--platform") || process.platform,
-    arch: value("--arch") || process.arch
-  }]
+  assets: assets.map((asset) => ({ ...asset, file: path.resolve(asset.file) }))
 });
 const destination = path.join(outputRoot, `${config.productId}-${config.currentVersion}`, channel, "latest.json");
 await writeReleaseManifest(destination, manifest);

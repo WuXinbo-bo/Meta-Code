@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import {
   PROTOCOL_VERSION,
@@ -18,6 +19,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { AcpLaunchSpec } from "../types.js";
 import type { AcpClientServices } from "./services.js";
+import { registerProcessTree, terminateProcessTree } from "../../processTree.js";
 import {
   ACP_SESSION_MODEL_OPTION_ID,
   ACP_SESSION_MODE_OPTION_ID,
@@ -44,6 +46,7 @@ export class AcpStdioBackend {
   private initialization: InitializeResponse | null = null;
   private transportFailure: Error | null = null;
   private readonly updates = new Map<string, Set<(notification: SessionNotification) => void>>();
+  private readonly processOwnerId = `acp-provider:${randomUUID()}`;
 
   constructor(readonly providerId: string, private readonly launch: AcpLaunchSpec, private readonly services: AcpClientServices) {}
 
@@ -54,9 +57,11 @@ export class AcpStdioBackend {
       env: { ...process.env, ...(this.launch.env || {}) },
       shell: false,
       windowsHide: true,
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.child = child;
+    registerProcessTree(this.processOwnerId, child);
     const stderr: string[] = [];
     child.stderr.on("data", (chunk) => { stderr.push(String(chunk)); if (stderr.length > 40) stderr.shift(); });
     const application = client({ name: `workbench:${this.providerId}` })
@@ -87,6 +92,10 @@ export class AcpStdioBackend {
         this.context = null;
         this.initialization = null;
       }
+      // If the Agent disappears unexpectedly, its terminal subprocesses are
+      // still owned by the ACP client services.  Reap them as part of the
+      // same lifecycle so macOS/Linux do not retain orphaned process groups.
+      void this.services.close().catch(() => undefined);
     };
     child.once("exit", (code) => disconnect(new Error(`ACP Agent 已退出（${code ?? "unknown"}）：${stderr.join("").trim()}`)));
     child.once("error", (error) => disconnect(error));
@@ -220,7 +229,10 @@ export class AcpStdioBackend {
     await this.services.close();
     if (child && child.exitCode === null) {
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-      child.kill();
+      // ACP agents may spawn terminals or other helpers.  Terminate their
+      // process group on macOS/Linux and use taskkill on Windows via the
+      // shared process-tree utility.
+      terminateProcessTree(child);
       await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
     }
     this.child = null;

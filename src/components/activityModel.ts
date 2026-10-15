@@ -10,6 +10,7 @@ export type SharedAgentLog = {
   detail?: unknown;
   rawType?: string;
   provider?: string;
+  role?: "user" | "assistant" | "system";
   actor?: { kind: "main" | "native" | "delegated" | "workflow" | "unknown"; id?: string; parentId?: string; name?: string };
   scope?: { sessionId?: string; threadId?: string; turnId?: string; workflowId?: string; nodeId?: string; attempt?: number };
   artifactRefs?: Array<{ id: string; kind: string; mediaType?: string; size?: number; path?: string }>;
@@ -61,9 +62,32 @@ const normalized = (value: string) => value.toLocaleLowerCase().replace(/\s+/g, 
 const LOG_KINDS = new Set<SharedAgentLog["kind"]>(["status", "message", "tool", "result", "error", "reasoning"]);
 const LOG_PHASES = new Set<NonNullable<SharedAgentLog["phase"]>>(["started", "running", "completed", "failed"]);
 const ACTIVITY_CATEGORIES = new Set<ActivityCategory>(["command", "tool", "file", "read", "search", "reasoning", "mcp", "todo", "status", "result", "error", "message", "unknown"]);
+const GENERIC_AGENT_PROVIDERS = new Set(["unknown", "auto", "agent"]);
+
+/** Transport placeholders are roles, never provider brands. */
+export function activityMessageIdentity(log: SharedAgentLog, fallbackProvider: string): { role: "agent" | "system" | "user"; provider?: string } {
+  const provider = (log.provider || log.activity?.provider || "").trim();
+  if (log.role === "user" || provider.toLowerCase() === "user") return { role: "user" };
+  if (log.role === "system" || ["workbench", "system"].includes(provider.toLowerCase())) return { role: "system" };
+  const candidate = provider && !GENERIC_AGENT_PROVIDERS.has(provider.toLowerCase()) ? provider : fallbackProvider.trim();
+  return candidate && !GENERIC_AGENT_PROVIDERS.has(candidate.toLowerCase()) && !["workbench", "system", "user"].includes(candidate.toLowerCase())
+    ? { role: "agent", provider: candidate }
+    : { role: "agent" };
+}
 
 function recordOf(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** Empty reply evidence applies to main chat without rewriting stored history. */
+export function isEmptyAssistantMessage(value: unknown) {
+  const source = recordOf(value);
+  if (source.role !== "assistant") return false;
+  const activity = recordOf(source.activity);
+  const payload = recordOf(source.payload);
+  const items = [payload, recordOf(payload.item), recordOf(recordOf(source.activityDetail).item), recordOf(recordOf(activity.detail).item)];
+  if (items.some((item) => item.type === "agent_message" && typeof item.text === "string" && !item.text.trim())) return true;
+  return typeof source.text === "string" && !source.text.trim() && (typeof activity.summary !== "string" || !activity.summary.trim());
 }
 
 function planItemStatus(value: unknown, completed: unknown): AgentPlanItemStatus {
@@ -112,7 +136,7 @@ export function agentPlanSnapshot(log: ActivityViewLog, provider: string): Agent
 }
 
 function validTimestamp(value: unknown, index: number) {
-  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return new Date(value).toISOString();
   return new Date(index).toISOString();
 }
 
@@ -128,18 +152,23 @@ export function normalizeAgentStreamLog(value: unknown, index = 0): SharedAgentL
     ? source.title
     : kind === "message" ? "Agent 回复" : kind === "error" ? "执行失败" : "状态更新";
   const phaseValue = typeof activity.phase === "string" ? activity.phase as NonNullable<SharedAgentLog["phase"]> : typeof source.phase === "string" ? source.phase as NonNullable<SharedAgentLog["phase"]> : undefined;
+  const detail = activity.detail ?? source.detail;
+  const messageItem = recordOf(recordOf(detail).item);
+  // Historical snapshots may contain a label in place of empty SDK item text.
+  const emptyMessageItem = kind === "message" && messageItem.type === "agent_message" && typeof messageItem.text === "string" && !messageItem.text.trim();
   return {
     schemaVersion: typeof activity.schemaVersion === "number" ? activity.schemaVersion : typeof source.schemaVersion === "number" ? source.schemaVersion : undefined,
     id: typeof activity.id === "string" && activity.id ? activity.id : typeof source.id === "string" && source.id ? source.id : `legacy-agent-log-${index}`,
     createdAt: validTimestamp(activity.occurredAt ?? source.createdAt, index),
     kind,
     title,
-    text: typeof activity.summary === "string" ? activity.summary : typeof source.text === "string" ? source.text : title,
+    text: emptyMessageItem ? "" : typeof activity.summary === "string" ? activity.summary : typeof source.text === "string" ? source.text : title,
     category: typeof activity.semanticType === "string" ? activity.semanticType : typeof source.category === "string" ? source.category : undefined,
     phase: phaseValue && LOG_PHASES.has(phaseValue) ? phaseValue : undefined,
-    detail: activity.detail ?? source.detail,
+    detail,
     rawType: typeof activity.rawType === "string" ? activity.rawType : typeof source.rawType === "string" ? source.rawType : undefined,
     provider: typeof (activity.provider ?? source.provider) === "string" && String(activity.provider ?? source.provider).trim() ? String(activity.provider ?? source.provider) : undefined,
+    role: source.role === "user" || source.role === "assistant" || source.role === "system" ? source.role : undefined,
     actor: activity.actor && typeof activity.actor === "object" && !Array.isArray(activity.actor) ? activity.actor as SharedAgentLog["actor"] : source.actor && typeof source.actor === "object" && !Array.isArray(source.actor) ? source.actor as SharedAgentLog["actor"] : undefined,
     scope: activity.scope && typeof activity.scope === "object" && !Array.isArray(activity.scope) ? activity.scope as SharedAgentLog["scope"] : source.scope && typeof source.scope === "object" && !Array.isArray(source.scope) ? source.scope as SharedAgentLog["scope"] : undefined,
     artifactRefs: Array.isArray(activity.artifactRefs) ? activity.artifactRefs as SharedAgentLog["artifactRefs"] : Array.isArray(source.artifactRefs) ? source.artifactRefs as SharedAgentLog["artifactRefs"] : undefined,
@@ -149,9 +178,28 @@ export function normalizeAgentStreamLog(value: unknown, index = 0): SharedAgentL
   };
 }
 
+const streamVersionCache = new WeakMap<object, string>();
+
+function logContentVersion(value: unknown, index: number) {
+  if (value && typeof value === "object") {
+    const cached = streamVersionCache.get(value);
+    if (cached) return cached;
+  }
+  const log = normalizeAgentStreamLog(value, index);
+  // Include phase and details: tool completions often keep the same id and
+  // timestamp, and equal-length edits must still invalidate the view.
+  const source = JSON.stringify([log.id, log.createdAt, log.provider, log.role, log.actor, log.scope, log.kind, log.title, log.text, log.category, log.phase, log.detail, log.artifactRefs]);
+  let hash = 2166136261;
+  for (let i = 0; i < source.length; i += 1) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+  const version = (hash >>> 0).toString(36);
+  if (value && typeof value === "object") streamVersionCache.set(value, version);
+  return version;
+}
+
+/** Callers use immutable log records; cached records are shared across snapshots. */
 export function agentStreamVersion(logs: readonly unknown[]) {
   const latest = normalizeAgentStreamLog(logs.at(-1), Math.max(0, logs.length - 1));
-  return `${logs.length}|${latest.id}|${latest.createdAt}|${latest.text.length}`;
+  return `${logs.length}|${latest.id}|${latest.createdAt}|${logs.map(logContentVersion).join(".")}`;
 }
 
 export function activityCategory(log: SharedAgentLog): ActivityCategory {
@@ -188,12 +236,12 @@ function logFingerprint(log: SharedAgentLog) {
 
 /**
  * Turns provider-specific event streams into one stable presentation stream.
- * Stable ids are updated in place, adjacent duplicate partials are removed,
+ * Stable identities are updated in place; repeated commands with different IDs
+ * remain distinct (parallel work and retries may legitimately be identical),
  * and timestamps are normalized to chronological order.
  */
 export function normalizeActivityLogs(logs: readonly unknown[]): ActivityViewLog[] {
   const byId = new Map<string, ActivityViewLog>();
-  const ordered: ActivityViewLog[] = [];
   for (const [index, value] of logs.entries()) {
     const raw = normalizeAgentStreamLog(value, index);
     const log: ActivityViewLog = {
@@ -202,21 +250,28 @@ export function normalizeActivityLogs(logs: readonly unknown[]): ActivityViewLog
       phase: activityPhase(raw),
       fingerprint: logFingerprint(raw)
     };
-    const existing = byId.get(log.id);
-    if (existing) {
-      const index = ordered.indexOf(existing);
-      if (index >= 0) ordered[index] = log;
-      byId.set(log.id, log);
-      continue;
+    const identity = JSON.stringify([log.provider || "", log.actor?.id || "", log.scope?.attempt ?? "", log.id]);
+    const existing = byId.get(identity);
+    if (log.kind === "message" && !log.text.trim()) {
+      if (!existing?.text.trim()) continue;
+      log.text = existing.text;
+      log.detail = existing.detail;
+      if (log.activity) log.activity = { ...log.activity, summary: existing.text, detail: existing.activity?.detail };
+      log.fingerprint = logFingerprint(log);
     }
-    const previous = ordered.at(-1);
-    const time = Date.parse(log.createdAt);
-    const previousTime = previous ? Date.parse(previous.createdAt) : Number.NaN;
-    if (previous && previous.fingerprint === log.fingerprint && Number.isFinite(time) && Number.isFinite(previousTime) && Math.abs(time - previousTime) < 2_000) continue;
-    byId.set(log.id, log);
-    ordered.push(log);
+    if (existing) {
+      if (Date.parse(log.createdAt) < Date.parse(existing.createdAt)) continue;
+      const terminal = (phase: ActivityPhase) => phase === "completed" || phase === "failed";
+      if (log.createdAt === existing.createdAt && terminal(existing.phase) && !terminal(log.phase)) continue;
+    }
+    byId.set(identity, log);
   }
-  return ordered.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const ordered = [...byId.values()];
+  const counts = new Map<string, number>();
+  for (const log of ordered) counts.set(log.id, (counts.get(log.id) || 0) + 1);
+  return ordered.map((log) => (counts.get(log.id) || 0) > 1
+    ? { ...log, id: JSON.stringify([log.provider, log.actor?.id, log.scope?.attempt, log.id]) }
+    : log).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
 const PAUSE_PATTERN = /(?:^|\b)(?:paused|pause requested)(?:\b|$)|已暂停|请求暂停|等待继续/i;

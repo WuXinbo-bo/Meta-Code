@@ -23,7 +23,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Verify release version
@@ -94,3 +94,92 @@ jobs:
           } else {
             gh release create $env:GITHUB_REF_NAME @assets --title "Meta Code $version" --generate-notes --verify-tag
           }
+
+  macos:
+    # Windows remains the primary release job above. Build macOS after it so
+    # the signed manifest can contain both Windows and Darwin assets.
+    needs: release
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      METACODE_PACKAGE_ROOT: ${{ github.workspace }}/release-artifacts
+      METACODE_SOURCE_COMMIT: ${{ github.sha }}
+      METACODE_BUILD_ID: ${{ github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          tag_version=${GITHUB_REF_NAME#v}
+          [[ "$tag_version" == "$package_version" ]] || { echo "Tag $GITHUB_REF_NAME does not match package version $package_version"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run macOS release checks
+        run: |
+          npm run typecheck
+          npm run test:macos-launcher
+          npm run test:release-manifest
+
+      - name: Build macOS desktop packages
+        run: npm run desktop:package
+
+      - name: Prepare and publish macOS release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          METACODE_MANIFEST_SIGNING_KEY_B64: ${{ secrets.METACODE_MANIFEST_SIGNING_KEY_B64 }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          artifact_root="$METACODE_PACKAGE_ROOT/$version"
+          artifact_dir="$artifact_root/artifacts"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+          if [[ -z "$METACODE_MANIFEST_SIGNING_KEY_B64" ]]; then
+            echo 'Missing METACODE_MANIFEST_SIGNING_KEY_B64 repository secret' >&2
+            exit 1
+          fi
+          signing_key="$artifact_root/manifest-signing-key.pem"
+          mkdir -p "$artifact_root" "$artifact_dir"
+          python3 - "$signing_key" <<'PY'
+          import base64, os, pathlib, sys
+          pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(os.environ["METACODE_MANIFEST_SIGNING_KEY_B64"]))
+          PY
+          arch=$(uname -m)
+          case "$arch" in
+            arm64|aarch64) arch=arm64 ;;
+            x86_64|amd64) arch=x64 ;;
+            *) echo "Unsupported macOS architecture: $arch" >&2; exit 1 ;;
+          esac
+          dmg="$artifact_dir/Meta-Code-$version-$arch.dmg"
+          zip="$artifact_dir/Meta-Code-$version-$arch.zip"
+          [[ -f "$dmg" && -f "$zip" ]] || { echo "macOS package artifacts are missing" >&2; exit 1; }
+          gh release download "$GITHUB_REF_NAME" --pattern "latest.json" --pattern "Meta-Code-Setup-$version-x64.exe" --dir "$artifact_root/windows" --clobber
+          windows_asset="$artifact_root/windows/Meta-Code-Setup-$version-x64.exe"
+          assets_file="$artifact_root/macos-assets.json"
+          python3 - "$assets_file" "$windows_asset" "$dmg" "$zip" "$version" <<'PY'
+          import json, pathlib, sys
+          out, windows, dmg, zip_file, version = sys.argv[1:]
+          base = f"https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/releases/download/{__import__('os').environ['GITHUB_REF_NAME']}"
+          arch = pathlib.Path(dmg).name.rsplit('-', 1)[-1].split('.', 1)[0]
+          pathlib.Path(out).write_text(json.dumps([
+              {"file": windows, "url": f"{base}/Meta-Code-Setup-{version}-x64.exe", "platform": "win32", "arch": "x64"},
+              {"file": dmg, "url": f"{base}/Meta-Code-{version}-{arch}.dmg", "platform": "darwin", "arch": arch},
+              {"file": zip_file, "url": f"{base}/Meta-Code-{version}-{arch}.zip", "platform": "darwin", "arch": arch}
+          ]), encoding="utf8")
+          PY
+          npm run release:prepare -- --assets-file "$assets_file" --release-url "$release_url" --out "$artifact_root" --build-id "$GITHUB_SHA" --signing-key "$signing_key" --signing-key-id meta-code-release-2026
+          manifest="$artifact_root/meta-code-$version/stable/latest.json"
+          cp "$manifest" "$artifact_dir/latest.json"
+          (cd "$artifact_dir" && shasum -a 256 Meta-Code-* latest.json > SHA256SUMS-macos.txt)
+          rm -f "$signing_key"
+          gh release upload "$GITHUB_REF_NAME" "$dmg" "$zip" "$artifact_dir/latest.json" "$artifact_dir/SHA256SUMS-macos.txt" --clobber

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { normalizeProviderConnection, providerConnectionConfigValues, providerConnectionEnvironment, publicProviderConnection } from "../server/providers/connections.ts";
 import { createProviderControlSnapshot, providerActiveEnvironment, providerConfiguration, providerManagedEnvironment } from "../server/providers/controlPlane.ts";
 
@@ -25,7 +26,7 @@ assert.deepEqual(codexControl.authMethods.map((method) => method.id), ["workbenc
 assert.ok(codexControl.fields.some((field) => field.env === "OPENAI_API_KEY" && field.kind === "secret"));
 const claudeControl = providerConfiguration("claude");
 assert.deepEqual(claudeControl.authMethods.map((method) => method.id), ["workbench-account", "system-account", "anthropic-api-key", "anthropic-compatible"]);
-assert.deepEqual(providerManagedEnvironment("gemini", "native-account", "C:/data/providers"), { GEMINI_CLI_HOME: "C:\\data\\providers\\gemini" });
+assert.deepEqual(providerManagedEnvironment("gemini", "native-account", "C:/data/providers"), { GEMINI_CLI_HOME: path.join("C:/data/providers", "gemini") });
 assert.deepEqual(providerManagedEnvironment("gemini", "system-profile", "C:/data/providers"), {});
 assert.deepEqual(providerActiveEnvironment("gemini", "gemini-api-key", { GEMINI_API_KEY: "key", GOOGLE_GENAI_USE_VERTEXAI: "true", GOOGLE_CLOUD_PROJECT: "project", GOOGLE_GEMINI_BASE_URL: "https://gateway.example" }), { GEMINI_API_KEY: "key", GOOGLE_GEMINI_BASE_URL: "https://gateway.example" });
 assert.deepEqual(providerActiveEnvironment("gemini", "vertex-ai", { GEMINI_API_KEY: "key", GOOGLE_API_KEY: "google", GOOGLE_GENAI_USE_VERTEXAI: "true", GOOGLE_CLOUD_PROJECT: "project" }), { GOOGLE_API_KEY: "google", GOOGLE_GENAI_USE_VERTEXAI: "true", GOOGLE_CLOUD_PROJECT: "project" });

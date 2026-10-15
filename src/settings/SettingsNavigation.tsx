@@ -1,10 +1,11 @@
-import { Bot, Boxes, CircleHelp, Database, History, LayoutDashboard, PanelsTopLeft, RefreshCw, Store, Terminal } from "lucide-react";
+import { Bot, Boxes, Puzzle, CircleHelp, Database, History, LayoutDashboard, PanelsTopLeft, RefreshCw, Store, Terminal } from "lucide-react";
 
-export type SettingsSectionName = "ai" | "sessions" | "pages" | "data" | "updates" | "help";
+export type SettingsSectionName = "ai" | "plugins" | "sessions" | "pages" | "data" | "updates" | "help";
 export type AgentSettingsPage = "overview" | "providers" | "market" | "runtime";
 
 const SETTINGS_SECTIONS = [
   { id: "ai", label: "Agent", icon: Bot },
+  { id: "plugins", label: "插件", icon: Puzzle },
   { id: "sessions", label: "会话", icon: History },
   { id: "pages", label: "页面与标签", icon: PanelsTopLeft },
   { id: "data", label: "数据", icon: Database },

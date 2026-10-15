@@ -1,8 +1,9 @@
+import { claudeNativeTerminalEnvironment } from "../nativeTerminalLaunch.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import readline from "node:readline";
 import type { EngineUsage, NormalizedEngineEvent } from "../types.js";
-import { claudeToolPermissionError, validateClaudeResult, type ClaudeTurnActivity } from "./result.js";
+import { claudeToolPermissionError, claudeToolResultFailed, validateClaudeResult, type ClaudeTurnActivity } from "./result.js";
 import { registerProcessTree, terminateProcessTree } from "../../processTree.js";
 import { WorkbenchTimeoutError } from "../../orchestration/timeouts.js";
 import { CLAUDE_PROCESS_RECONNECT_ATTEMPTS, ClaudeTransportError, claudeApiRetryExhaustsProcess, classifyClaudeFailure, type ClaudeConnectionSettings } from "./transport.js";
@@ -23,6 +24,7 @@ function systemStatusText(item: any, subtype: string) {
 }
 
 export type ClaudeRunOptions = {
+  credentialKind?: "api-key" | "auth-token";
   executable: string;
   executableArgs?: string[];
   cwd: string;
@@ -65,7 +67,10 @@ function textFromContent(content: any[]) {
 
 export function buildClaudeProcessArgs(options: Pick<ClaudeRunOptions, "executableArgs" | "model" | "effort" | "sessionId" | "permissionMode" | "mcpConfigPath" | "allowedTools" | "disallowedTools">, requestedSessionId: string) {
   const args = [...(options.executableArgs || []), "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", options.permissionMode];
-  const disallowedTools = [...new Set(["Task", "Agent", ...(options.disallowedTools || [])])];
+  // This one-shot process runner is used by bridge/workflow workers. Keep all
+  // native recursive entry points disabled so a worker cannot bypass the
+  // workbench scheduler through Claude's Workflow tool.
+  const disallowedTools = [...new Set(["Task", "Agent", "Workflow", ...(options.disallowedTools || [])])];
   if (disallowedTools.length) args.push("--disallowedTools", ...disallowedTools);
   const allowedTools = [...new Set(options.allowedTools || [])];
   if (allowedTools.length) args.push("--allowedTools", ...allowedTools);
@@ -82,7 +87,7 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
   const args = buildClaudeProcessArgs(options, requestedSessionId);
 
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...claudeNativeTerminalEnvironment(process.env, options.baseUrl || "", options.credentialKind === "auth-token" ? "" : options.apiKey || "", options.credentialKind === "auth-token" ? options.apiKey || "" : ""),
     CLAUDE_CONFIG_DIR: options.configDir,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     ANTHROPIC_MAX_RETRIES: "2"
@@ -98,8 +103,6 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
   delete env.WORKBENCH_AGENT_BRIDGE_URL;
   delete env.WORKBENCH_AGENT_BRIDGE_TOKEN;
   env.CLAUDE_WORKER_DEPTH = "1";
-  if (options.baseUrl) env.ANTHROPIC_BASE_URL = options.baseUrl.replace(/\/+$/, "");
-  if (options.apiKey) env.ANTHROPIC_API_KEY = options.apiKey;
 
   const child = spawn(options.executable, args, { cwd: options.cwd, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", shell: process.platform === "win32" && /\.cmd$/i.test(options.executable) });
   registerProcessTree(options.ownerId || requestedSessionId, child);
@@ -218,8 +221,9 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
             completedTools.add(toolId);
             const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content || "");
             const permissionError = claudeToolPermissionError(block);
+            const failed = claudeToolResultFailed(block);
             if (permissionError) activity.permissionError = permissionError;
-            await options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: toolId, toolName: toolNames.get(toolId) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: block, detail: { input: toolInputs.get(toolId), output: text, result: block } });
+            await options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "user.tool_result", sourceId: toolId, toolName: toolNames.get(toolId) || "工具", text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: block, phase: permissionError ? "failed" : failed ? "failed" : "completed", detail: { input: toolInputs.get(toolId), output: text, result: block } });
           }
         }
       } else if (item.type === "tool_progress") {
@@ -231,8 +235,9 @@ async function runClaudeProcess(options: ClaudeRunOptions): Promise<ClaudeRunRes
         const toolId = String(item.tool_use_id || item.uuid || crypto.randomUUID());
         const text = String(item.summary || item.message || "工具执行完成");
         const permissionError = claudeToolPermissionError(item);
+        const failed = claudeToolResultFailed(item);
         if (permissionError) activity.permissionError = permissionError;
-        await options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "tool_use_summary", sourceId: toolId, toolName: String(item.tool_name || toolNames.get(toolId) || "工具"), text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: item, detail: { input: toolInputs.get(toolId), output: text, result: item } });
+        await options.onEvent({ type: permissionError ? "error" : "tool.completed", rawType: "tool_use_summary", sourceId: toolId, toolName: String(item.tool_name || toolNames.get(toolId) || "工具"), text: permissionError ? `工具权限未授权：${permissionError}` : text, payload: item, phase: permissionError ? "failed" : failed ? "failed" : "completed", detail: { input: toolInputs.get(toolId), output: text, result: item } });
       } else if (item.type === "rate_limit_event" || item.type === "auth_status") {
         await options.onEvent({ type: "status", sourceId: String(item.uuid || item.type), toolName: item.type, text: String(item.message || (item.type === "rate_limit_event" ? "调用频率状态已更新" : "认证状态已更新")), payload: item });
       } else if (item.type === "result") {

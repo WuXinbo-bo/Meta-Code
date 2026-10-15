@@ -1,5 +1,5 @@
 import { AlertCircle, Check, ChevronRight, Circle, ListChecks, LoaderCircle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AgentPlanItem, AgentPlanSnapshot } from "./activityModel";
 
 function planItemIcon(item: AgentPlanItem) {
@@ -17,11 +17,16 @@ function planStatus(snapshot: AgentPlanSnapshot) {
   return "待执行";
 }
 
-export function AgentPlanView({ snapshot, history }: { snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] }) {
+export function AgentPlanView({ snapshot, history, expanded = false, onOpenChange }: { snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[]; expanded?: boolean; onOpenChange?: (open: boolean) => void }) {
   const complete = snapshot.total > 0 && snapshot.completed === snapshot.total;
-  const [open, setOpen] = useState(!complete);
+  const [open, setOpen] = useState(expanded);
+  useEffect(() => setOpen(expanded), [expanded]);
   const time = new Date(snapshot.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return <details className={`agent-plan-view ${complete ? "complete" : "active"}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`agent-plan-view ${complete ? "complete" : "active"}`} open={open} onToggle={(event) => {
+    if (event.target !== event.currentTarget) return;
+    setOpen(event.currentTarget.open);
+    onOpenChange?.(event.currentTarget.open);
+  }}>
     <summary>
       <span className="agent-plan-icon"><ListChecks size={14} /></span>
       <span className="agent-plan-heading"><strong>{snapshot.title}</strong><small>{planStatus(snapshot)}</small></span>

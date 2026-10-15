@@ -8,13 +8,27 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageIndex = process.argv.indexOf("--package-root");
-if (packageIndex >= 0 && !process.argv[packageIndex + 1]) throw new Error("--package-root requires a win-unpacked directory");
+if (packageIndex >= 0 && !process.argv[packageIndex + 1]) throw new Error("--package-root requires an unpacked desktop directory or .app bundle");
 const packageRoot = packageIndex >= 0 ? path.resolve(process.argv[packageIndex + 1]) : null;
 const bundled = Boolean(packageRoot) || process.argv.includes("--bundled");
 const output = path.join(root, "output", "cli-install-validation");
 await fsp.mkdir(output, { recursive: true });
 const sandbox = await fsp.mkdtemp(path.join(output, "desktop-"));
-const appRoot = packageRoot ? path.join(packageRoot, "resources", "workbench") : path.join(sandbox, "app");
+const isWindows = process.platform === "win32";
+const isMac = process.platform === "darwin";
+let appBundle = null;
+if (packageRoot && isMac) {
+  const candidates = [packageRoot, path.join(packageRoot, "Meta Code.app")];
+  for (const candidate of candidates) {
+    try {
+      if ((await fsp.stat(path.join(candidate, "Contents"))).isDirectory()) { appBundle = candidate; break; }
+    } catch { /* Try the next packaging layout. */ }
+  }
+  if (!appBundle) throw new Error(`未找到 macOS .app 包：${packageRoot}`);
+}
+const appRoot = packageRoot
+  ? isMac ? path.join(appBundle, "Contents", "Resources", "workbench") : path.join(packageRoot, "resources", "workbench")
+  : path.join(sandbox, "app");
 const dataRoot = path.join(sandbox, "data");
 const profile = path.join(sandbox, "profile");
 await fsp.mkdir(profile, { recursive: true });
@@ -31,12 +45,15 @@ const port = server.address().port;
 await new Promise((resolve) => server.close(resolve));
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:npm_|node_|metacode_|workbench_|path$|programfiles|appdata$|localappdata$|userprofile$|home$)/i.test(key)));
 Object.assign(env, {
-  PATH: path.join(process.env.SystemRoot, "System32"),
-  ProgramFiles: profile, LOCALAPPDATA: path.join(profile, "local"), APPDATA: path.join(profile, "roaming"), USERPROFILE: profile, HOME: profile,
+  PATH: isWindows ? path.join(process.env.SystemRoot || "C:\\Windows", "System32") : "/usr/bin:/bin",
+  ...(isWindows ? { ProgramFiles: profile, LOCALAPPDATA: path.join(profile, "local"), APPDATA: path.join(profile, "roaming"), USERPROFILE: profile } : {}),
+  HOME: profile,
   ELECTRON_RUN_AS_NODE: "1", NODE_ENV: "production", PORT: String(port), METACODE_HOME: dataRoot,
   METACODE_DESKTOP: "1", WORKBENCH_PACKAGED: "1", METACODE_API_TOKEN: "clean-desktop-installation-test-token", WORKSPACE_ROOT: profile
 });
-const executable = packageRoot ? path.join(packageRoot, "Meta Code.exe") : path.join(root, "node_modules", "electron", "dist", "electron.exe");
+const executable = packageRoot
+  ? isWindows ? path.join(packageRoot, "Meta Code.exe") : path.join(appBundle, "Contents", "MacOS", "Meta Code")
+  : isWindows ? path.join(root, "node_modules", "electron", "dist", "electron.exe") : path.join(root, "node_modules", "electron", "dist", "Electron.app", "Contents", "MacOS", "Electron");
 const backend = spawn(executable, [path.join(appRoot, "dist-server", "index.js")], {
   cwd: appRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"]
 });

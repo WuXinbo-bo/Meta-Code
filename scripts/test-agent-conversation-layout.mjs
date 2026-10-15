@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 // Load the real UI through Vite so branding assets resolve exactly as in the app.
-const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+const server = await createServer({ server: { middlewareMode: true }, appType: "custom", optimizeDeps: { noDiscovery: true, include: [] } });
 let AgentConversation, AssistantReply;
 try {
   ({ AgentConversation } = await server.ssrLoadModule("/src/components/AgentConversation.tsx"));
@@ -30,17 +30,68 @@ for (const provider of ["codex", "claude", "gemini", "codebuddy"]) {
 const live = render({ status: "running" });
 assert.match(live, /运行 2 个命令/, "historical commands remain visible during a later segment");
 assert.ok(live.indexOf("运行 2 个命令") < live.indexOf("第二条回复"));
-assert.match(live, /git diff/, "latest command rotates in the open segment");
-assert.doesNotMatch(live, /git status/, "earlier current-segment commands do not crowd the live preview");
+assert.doesNotMatch(live, /git diff|git status|file\.ts/, "normal tool bodies remain collapsed while activity streams");
+assert.equal((live.match(/运行 1 个命令/g) || []).length, 2, "single commands retain separate chronological disclosures");
+assert.match(live, /修改 1 项文件/, "completed file activity retains its collapsed disclosure");
+assert.match(live, /agent-work-progress__spinner/, "existing logs retain a working indicator at the tail");
+assert.doesNotMatch(render(), /agent-work-progress/, "completed transcripts do not keep a working animation");
 const resumed = render({ status: "running", logs: [...logs, log(8, "message", "完成检查")] });
 assert.doesNotMatch(resumed, /activity-live-current/, "a reply closes the previous rotating segment");
 assert.equal((resumed.match(/运行 1 个命令/g) || []).length, 2);
+const consecutive = render({ status: "running", logs: [...logs.slice(0, 4), log(9, "command", "first current"), { ...log(10, "command", "second current"), phase: "running" }] });
+assert.match(consecutive, /运行 2 个命令/, "same-turn completed and running tools stay in one collapsed group");
+assert.match(consecutive, /phase-running/, "the current grouped tool remains visibly active");
+const lifecycle = { id: "lifecycle", createdAt: "2026-09-17T00:01:00.000Z", kind: "status", category: "status", phase: "running", title: "正在运行", text: "子 Agent 正在工作" };
+assert.match(render({ status: "running", logs: [lifecycle] }), /子 Agent 正在工作/, "a single live lifecycle event remains visible");
+const bootLifecycle = [
+  { ...lifecycle, id: "created", phase: "completed", title: "任务状态", text: "Codex 会话已创建" },
+  { ...lifecycle, id: "started", title: "运行轮次", text: "开始运行" }
+];
+assert.doesNotMatch(render({ status: "running", logs: bootLifecycle }), /会话已创建|开始运行|暂无可展示的活动/, "routine bootstrap acknowledgements stay out of the default transcript");
+assert.match(render({ status: "running", logs: bootLifecycle }), /智能体正在工作/, "bootstrap-only activity still has clear progress feedback");
+assert.match(render({ status: "completed", logs: [{ ...lifecycle, phase: "completed", title: "已完成", text: "子 Agent 已完成" }] }), /子 Agent 已完成/, "a single completed lifecycle event remains visible");
+assert.doesNotMatch(render({ status: "completed", logs: [{ ...lifecycle, phase: "completed" }] }), /没有匹配的活动/, "lifecycle-only logs are not reported as a filter miss");
 assert.match(render({ showProvider: true }), /assistant-reply-heading/);
+for (const provider of ["codex", "claude", "gemini"]) {
+  const unknownReply = render({ provider, logs: [{ ...log(1, "message", "真实 Agent 回复"), provider: "unknown" }] });
+  assert.match(unknownReply, new RegExp(`provider-brand-icon ${provider}`), `${provider}: unknown transport identity inherits the current Agent`);
+  assert.doesNotMatch(unknownReply, /provider-brand-icon unknown|>U<|>W</, "transport placeholders never become letter avatars");
+}
+const systemReply = render({ showProvider: true, logs: [{ ...log(1, "message", "结果已记录"), provider: "workbench" }] });
+assert.match(systemReply, /data-message-role="system"/);
+assert.match(systemReply, /lucide-workflow/);
+assert.match(systemReply, /<strong>系统<\/strong>/);
+assert.doesNotMatch(systemReply, /provider-brand-monogram|provider-brand-icon codex/, "system receipts are not presented as model replies");
+const genericReply = render({ provider: "agent", logs: [{ ...log(1, "message", "未知 Agent 回复"), provider: "unknown" }] });
+assert.match(genericReply, /lucide-bot/);
+assert.doesNotMatch(genericReply, /provider-brand-monogram/, "an unbound Agent uses a semantic icon");
+const explicitClaudeReply = render({ provider: "codex", logs: [{ ...log(1, "message", "Claude 参与回复"), provider: "claude" }] });
+assert.match(explicitClaudeReply, /provider-brand-icon claude/, "explicit cross-provider identity takes precedence over the parent");
+const userReply = render({ showProvider: true, logs: [{ ...log(1, "message", "用户追加要求"), role: "user", provider: "unknown" }] });
+assert.match(userReply, /class="message user agent-user-message"/);
+assert.match(userReply, /data-message-role="user"/);
+assert.match(userReply, /lucide-user-round/);
+assert.match(userReply, /<strong>你<\/strong>/);
+assert.doesNotMatch(userReply, /provider-brand-icon|lucide-workflow/, "explicit user messages keep their identity");
 assert.match(render({ logs: [], loading: true }), /正在读取活动日志/);
 assert.doesNotMatch(render({ logs: [], loading: true }), /尚无活动日志/);
 assert.match(render({ loading: true, error: "连接中断" }), /第一条回复/, "a refresh failure preserves existing transcript");
 assert.match(render({ logs: [log(1, "unknown", "future event")] }), /未识别|unknown|future event/, "unknown events remain accessible");
 assert.match(render({ logs: [log(1, "error", "failed command")] }), /failed command/);
+const failedTool = render({ logs: [{ ...log(1, "command", "failed validation"), phase: "failed", detail: { command: "npm test", output: "Validation failed" } }] });
+assert.match(failedTool, /运行 1 个命令/, "failed executions retain the same compact command disclosure");
+assert.doesNotMatch(failedTool, /<details[^>]*open=""/, "failed command groups are initially collapsed");
+assert.doesNotMatch(failedTool, /Validation failed|npm test/, "failed output remains available only after manual expansion");
+for (const status of ["running", "completed", "failed"]) {
+  for (const category of ["command", "file", "read", "search", "tool", "mcp", "unknown", "error"]) {
+    const failed = render({ status, logs: [{ ...log(1, category, "failure summary"), phase: "failed", detail: { output: "failure output" } }] });
+    assert.doesNotMatch(failed, /<details[^>]*open=""/, `${category}: ${status} does not auto-reveal a failed entry`);
+    assert.doesNotMatch(failed, /failure output/, `${category}: ${status} keeps failure detail collapsed`);
+  }
+}
+const planLog = { ...log(1, "todo", "更新计划"), phase: "running", detail: { items: [{ text: "执行计划检查", completed: false }] } };
+assert.match(render({ status: "running", logs: [planLog] }), /agent-plan-view/, "plan tool updates retain their shared plan presentation");
+assert.doesNotMatch(render({ status: "running", logs: [planLog] }), /<details[^>]*open=""/, "plan tool updates also default collapsed");
 const reply = renderToStaticMarkup(React.createElement(AssistantReply, { text: "**正文**", avatar: "Agent", actions: React.createElement("button", null, "复制") }));
 assert.match(reply, /<strong>正文<\/strong>/);
 assert.match(reply, /复制/);

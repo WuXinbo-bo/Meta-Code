@@ -1,336 +1,198 @@
-import crypto from "node:crypto";
-import { execFile, spawn } from "node:child_process";
-import fs from "node:fs";
-import fsp from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
-import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
-import express from "express";
-import cors from "cors";
-import compression from "compression";
-import { Codex, type ThreadEvent, type ThreadOptions, type Usage } from "@openai/codex-sdk";
 import type { AgentCapabilities as AcpAgentCapabilities, SessionConfigOption } from "@agentclientprotocol/sdk";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import readXlsxFile from "read-excel-file/node";
+import { CodexSearchCompatibility } from "./engines/codex/searchCompatibility.js";
+import { canResumeNativeSession } from "./runtime/sessionCompatibility.js";
+import { CodexNativeSession } from "./engines/codex/appServerSession.js";
+import { NativeInteractionBroker, DEFAULT_NATIVE_OPTIONS } from "./engines/nativeInteraction.js";
+import { prepareNativeFork } from "./engines/nativeFork.js";
+import { registerNativeConversationRoutes } from "./engines/nativeConversationRoutes.js";
+import { Codex, type ThreadEvent, type ThreadOptions, type Usage } from "@openai/codex-sdk";
+import compression from "compression";
 import { parse as parseCsv } from "csv-parse/sync";
-import { pickFolder } from "./folderPicker.js";
-import { createAuth } from "./auth.js";
-import { ConfidentialSkillManager } from "./confidentialSkillManager.js";
-import { BUILTIN_DELEGATION_SKILL_NAME, BUILTIN_SKILL_MANAGER_NAME, ManagedSkillManager, type SkillPromptContext } from "./managedSkillManager.js";
-import { compactClaudeQuestionPayload, isClaudeQuestionTool } from "./engines/claude/questions.js";
-import { deleteWorkspaceEntries, moveWorkspaceEntries, searchWorkspaceFiles } from "./workspaceFiles.js";
-import type { EngineName, EngineRuntimeStatus, NormalizedEngineEvent } from "./engines/types.js";
-import { resolveClaudeCommand } from "./engines/claude/runtime.js";
-import { runClaude } from "./engines/claude/process.js";
-import { CLAUDE_PLANNER_DISALLOWED_TOOLS, ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
-import { classifyClaudeFailure } from "./engines/claude/transport.js";
-import { settleSupersededReasoning } from "./activity/lifecycle.js";
-import { codexActivityFromEvent, codexTurnFailure, consumeCodexTurnEvents, isCodexContextCompactionNotice, isCodexReconnectMessage, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
-import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
-import { assertPathInsideRoot, isPathInside } from "./pathBoundary.js";
-import { agentStatusForParent, codexTerminalStatusFromMarkers, delegationIdempotency, isNativeAgentProjection, mergeAgentRuntimeStatus, nativeAgentMessageCanReuse, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
-import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
-import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
-import { isNarrativeMessage, normalizedEventTextLimit } from "./messageTextPolicy.js";
-import { WorkbenchEventHub } from "./eventHub.js";
-import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
-import { WorkbenchDataOwnerLease } from "./dataOwnerLease.js";
-import { AppUpdateService } from "./appUpdate/service.js";
-import { CliRuntimeManager } from "./runtime/manager.js";
-import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
-import { DEFAULT_RUNTIME_CONFIGURATION, applyRuntimeNetworkEnvironment, normalizeRuntimeConfiguration, type RuntimeConfiguration } from "./runtime/config.js";
-import { RuntimeDetectionCache } from "./runtime/detectionCache.js";
-import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
-import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
-import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
-import { planStorageMaintenance, runStorageMaintenance, type StorageMaintenanceInput } from "./storageGovernance.js";
-import { WorkflowRepository } from "./workflows/repository.js";
-import { calculateWorkflowPlanImpact, WorkflowStateFiles } from "./workflows/stateFiles.js";
-import { normalizeWorkflowPlan, parsePlanJson, plannerTurnPrompt, planSystemPrompt, resolveWorkflowProvider, validateWorkflowPlan, workflowNodeContractDigest, type WorkflowProviderCapabilities } from "./workflows/plan.js";
-import { failedDependencyReason, missingRequiredArtifacts, parseWorkflowNodeResult, workflowAgentRetryAllowed, workflowCodexContextStrategy, workflowFailureCategory, workflowNodeCheckpointRoot, workflowNodeResultGateIssues, workflowResultArtifactPaths, workflowRetryLimit } from "./workflows/execution.js";
-import { abortWorkflowPlanTransaction, openWorkflowPlanTransaction, readWorkflowPlanTransaction } from "./workflows/plannerTransactions.js";
-import { commitWorkflowNodeResultTransaction, openWorkflowNodeResultTransaction, readWorkflowNodeResultTransaction, reopenWorkflowNodeResultTransaction, validateWorkflowNodeResultTransaction, type WorkflowNodeResultContract } from "./workflows/nodeResultTransactions.js";
-import { assertWorkflowPlannerTools, assertWorkflowResultTools, codexWorkflowPlannerToolInstructions, codexWorkflowResultToolInstructions } from "./workflows/controlTools.js";
-import { captureWorkspaceSnapshot, changedWorkspaceFiles, filesOutsideWriteScope, runVerificationCommands } from "./workflows/enforcement.js";
-import { upsertWorkflowLog, workflowLog, workflowLogFromEngineEvent, type WorkflowLogContext } from "./workflows/logs.js";
-import { WORKFLOW_ROLE_SKILLS } from "./workflows/roles.js";
-import { DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS, type WorkflowEngine, type WorkflowNodeAttemptRecord, type WorkflowNodeLog, type WorkflowNodePhase, type WorkflowNodeRecord, type WorkflowNodeResult, type WorkflowPlan, type WorkflowPlanningMode } from "./workflows/types.js";
-import { timeoutReason } from "./orchestration/timeouts.js";
-import { terminateServerDescendants, terminateTrackedProcessTrees } from "./processTree.js";
-import { WorkspaceSkillProjectionManager, type SkillProjectionEngine } from "./skillProjection.js";
-import { attachmentPrompt, deleteSessionAttachments, MAX_ATTACHMENT_SIZE, storeAttachment, validateAttachments, type Attachment } from "./attachments.js";
-import { claudeMcpConfig, codexMcpConfig, type CodexConfigObject, type WorkbenchMcpServer } from "./mcpConfig.js";
-import { CodexLinkRepository } from "./codexLink/repository.js";
-import { createCodexLinkRouter } from "./codexLink/routes.js";
-import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTranscriptIndex.js";
-import { normalizeSessionScope } from "./sessionScope.js";
-import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
-import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
-import { checkoutBranch, commitFiles, createBranch, fetchRemote, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
-import { previewDocx } from "./docxPreview.js";
-import { DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES, readMarkdownPreviewPage } from "./markdownPreview.js";
-import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, TEXT_PREVIEW_EXTENSIONS, looksLikeTextPreview } from "./filePreviewTypes.js";
+import express from "express";
+import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import readXlsxFile from "read-excel-file/node";
+import { deleteActivityArtifactsForSession, readActivityArtifact } from "./activity/artifacts.js";
+import { createPublishedArtifact, listPublishedArtifacts, readPublishedArtifact, updatePublishedArtifact } from "./activity/publishedArtifacts.js";
 import {
-  DEFAULT_WORKBENCH_INTERFACE_SETTINGS,
-  normalizeWorkbenchInterfaceSettings,
-  type WorkbenchInterfaceSettings
-} from "./settings/pagePreferences.js";
+advanceActivityTurnFileBaseline,
+createActivityTurnFileBaseline,
+createEventFileDiff,
+readActivityFileSnapshot,
+readActivityTurnFileBaseline,
+type ActivityFileSnapshot,
+type ActivityTurnFileBaseline,
+type EventFileDiffPreview
+} from "./activity/fileDiff.js";
 import { canonicalActivityFromEngineEvent } from "./activity/fromEngineEvent.js";
+import { settleSupersededReasoning } from "./activity/lifecycle.js";
 import { canonicalActivity, normalizeCanonicalActivity } from "./activity/normalize.js";
 import { compactStoredActivityDetails } from "./activity/redaction.js";
 import type { CanonicalActivityRecord } from "./activity/types.js";
-import { deleteActivityArtifactsForSession, readActivityArtifact } from "./activity/artifacts.js";
-import {
-  advanceActivityTurnFileBaseline,
-  createActivityTurnFileBaseline,
-  createEventFileDiff,
-  readActivityFileSnapshot,
-  readActivityTurnFileBaseline,
-  type ActivityFileSnapshot,
-  type ActivityTurnFileBaseline,
-  type EventFileDiffPreview
-} from "./activity/fileDiff.js";
-import { claimPendingInput, normalizePendingInputs, promotePendingInput, removePendingInput, updatePendingInput } from "./sessionInputs/queue.js";
-import { GenerationSaveCoordinator } from "./persistence/generationSaveCoordinator.js";
-import { PendingInputActionError, type PendingInput as QueuePendingInput } from "./sessionInputs/types.js";
-import { runTransitionConflict, type RunAbortIntent } from "./sessionRuns/transitions.js";
-import { SessionManagementRepository } from "./sessionManagement/repository.js";
-import { sessionManagementFacets } from "./sessionManagement/facets.js";
-import { readSessionRecoverySnapshot, writeSessionRecoverySnapshot, deleteSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
-import { certifyPersonalDataBackup, createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
-import { BackupBusyError, BackupScheduler, type BackupTrigger } from "./persistence/backupScheduler.js";
-import { loadBackupPolicy, PERSONAL_BACKUP_RETENTION, saveBackupPolicy } from "./persistence/backupPolicy.js";
-import { workbenchInventoryItem } from "./sessionManagement/health.js";
-import { taskDeletionPolicy } from "./sessionManagement/deletionPolicy.js";
-import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
-import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
-import { parsePortableSessionImport } from "./sessionManagement/import.js";
-import type { SessionInventoryItem, SessionManagementSummary, SessionRecoverySnapshot, SessionScopeSummary, WorkspaceTrashSnapshot } from "./sessionManagement/types.js";
 import { BUILTIN_AGENT_DESCRIPTORS } from "./agents/catalog.js";
-import { ProviderHostRegistry } from "./providers/host.js";
+import { createAgentCapabilitySnapshot } from "./agents/capabilityProbe.js";
+import { nativeFeatureDiagnostics } from "./agents/nativeFeatureDiagnostics.js";
+import { loadCustomAgents } from "./agents/customAgents.js";
+import { HookRegistry } from "./agents/hooks.js";
+import { RoutineScheduler, type AgentRoutine, type UpdateRoutineInput } from "./agents/routines.js";
+import {
+normalizeProviderId,
+type AgentModelAdapter,
+type AgentProviderId,
+type AgentProviderManifestV1,
+type AgentProviderModelSelection,
+type AgentReasoningControl,
+type DelegationMode
+} from "./agents/types.js";
+import { crossProviderReviewPair, resolveAgentRoute, type AgentRoutingPolicy } from "./agents/routing.js";
+import { AgentTranscriptIndex, type AgentTranscriptDescriptor } from "./agentTranscriptIndex.js";
+import { prepareWorkbenchDataDir, remapLegacyRuntimePath, resolveWorkbenchPaths } from "./appPaths.js";
+import { AppUpdateService } from "./appUpdate/service.js";
+import { attachmentDirectory, attachmentPrompt, attachmentReference, configureAttachmentStorage, copySessionAttachments, deleteSessionAttachments, MAX_ATTACHMENT_SIZE, migrateSessionAttachments, resolveAttachmentPath, storeAttachment, validateAttachments, type Attachment } from "./attachments.js";
+import { createAuth } from "./auth.js";
+import { CodexLinkRepository } from "./codexLink/repository.js";
+import { createCodexLinkRouter } from "./codexLink/routes.js";
+import { ConfidentialSkillManager } from "./confidentialSkillManager.js";
+import { WorkbenchDataOwnerLease } from "./dataOwnerLease.js";
+import { certifyPersonalDataBackup, createPersonalDataBackup, listPersonalDataBackups } from "./dataRecovery.js";
+import { previewDocx } from "./docxPreview.js";
+import { runClaude } from "./engines/claude/process.js";
+import { compactClaudeQuestionPayload, isClaudeQuestionTool } from "./engines/claude/questions.js";
+import { resolveClaudeCommand } from "./engines/claude/runtime.js";
+import { ClaudeSessionHandle, runClaudeSessionTurn } from "./engines/claude/session.js";
+import { NativeTerminalManager } from "./engines/nativeTerminal.js";
+import { registerNativeTerminalRoutes } from "./engines/nativeTerminalRoutes.js";
+import { assertNativeTerminalExecutable, claudeNativeSessionArgs, claudeNativeTerminalEnvironment, codexTerminalConfigArgs, terminalMcpEnvironment } from "./engines/nativeTerminalLaunch.js";
+import { claudeTranscriptTerminalState } from "./engines/claude/transcriptLifecycle.js";
+import type { ClaudeInputOrigin } from "./engines/claude/backgroundTasks.js";
+import { codexActivityFromEvent, isCodexContextCompactionNotice, runCodexSessionTurn, summarizeCodexEvent } from "./engines/codex/events.js";
+import { codexItemSourceId } from "./engines/codex/itemIdentity.js";
+import type { EngineName, EngineRuntimeStatus, NormalizedEngineEvent } from "./engines/types.js";
+import { WorkbenchEventHub } from "./eventHub.js";
+import { TraceRecorder } from "./observability/traces.js";
+import { BINARY_PREVIEW_EXTENSIONS, CODE_PREVIEW_LANGUAGES, looksLikeTextPreview, TEXT_PREVIEW_EXTENSIONS } from "./filePreviewTypes.js";
+import { pickFolder } from "./folderPicker.js";
+import { checkoutBranch, commitFiles, createBranch, fetchRemote, gitRoot, readBranches, readCommitDiff, readCommits, readGitSnapshot, readRemotes, readWorkspaceDiff, stageFiles, unstageFiles } from "./git/service.js";
+import { WorktreeError, bindWorktree, cleanupWorktree, createWorktree, listWorktrees, preflightMerge, restoreWorktree } from "./git/worktreeManager.js";
+import { IncrementalJsonl } from "./incrementalJsonl.js";
+import { loadOrCreateDevelopmentApiToken, validateLocalApiRequest } from "./localApiSecurity.js";
+import { BUILTIN_DELEGATION_SKILL_NAME, BUILTIN_SKILL_MANAGER_NAME, ManagedSkillManager, type SkillPromptContext } from "./managedSkillManager.js";
+import { DEFAULT_MARKDOWN_PREVIEW_PAGE_BYTES, readMarkdownPreviewPage } from "./markdownPreview.js";
+import { claudeMcpConfig, codexMcpConfig, type CodexConfigObject, type WorkbenchMcpServer } from "./mcpConfig.js";
+import { isNarrativeMessage, normalizedEventTextLimit } from "./messageTextPolicy.js";
+import { agentStatusForParent, codexTerminalStatusFromMarkers, isNativeAgentProjection, mergeAgentRuntimeStatus, nativeAgentMessageCanReuse, orchestrationCapabilities, recoverDelegatedTaskAfterRestart, recoverSessionAfterRestart, skillPolicyEnabled } from "./orchestration/contracts.js";
+import { timeoutReason } from "./orchestration/timeouts.js";
+import { assertPathInsideRoot, isPathInside, pathKey } from "./pathBoundary.js";
+import { WorkbenchPerformanceMonitor, yieldToEventLoop } from "./performance.js";
+import { loadBackupPolicy, PERSONAL_BACKUP_RETENTION, saveBackupPolicy } from "./persistence/backupPolicy.js";
+import { BackupBusyError, BackupScheduler, type BackupTrigger } from "./persistence/backupScheduler.js";
+import { GenerationSaveCoordinator } from "./persistence/generationSaveCoordinator.js";
+import type { AgentBridgeRequest } from "./plugins/collaboration/broker.js";
+import { createDelegationBroker } from "./plugins/collaboration/broker.js";
+import { createDelegationExecution } from "./plugins/collaboration/execution.js";
+import { resolveExecutionMode, resolveTurnExecutionMode, withoutDelegationSkill } from "./plugins/collaboration/mode.js";
+import { COLLABORATION_PROTOCOL, collaborationMainPrompt } from "./plugins/collaboration/protocol.js";
+import { COLLABORATION_PLUGIN_ID, createBuiltInPluginHost, ORCHESTRATION_PLUGIN_ID } from "./plugins/index.js";
+import { createOrchestrationServices } from "./plugins/orchestration.js";
+import { registerOrchestrationRoutes } from "./plugins/orchestration/controller.js";
+import { orchestrationLifecycle } from "./plugins/orchestration/lifecycle.js";
+import { createOrchestrationRuntime, type WorkflowPlannerRunner, type WorkflowWorkerRunner } from "./plugins/orchestration/runtime.js";
+import { snapshotQuestionCodexConfig } from "./plugins/orchestration/snapshotQuestionConfig.js";
+import { createOrchestrationScheduler } from "./plugins/orchestration/scheduler.js";
+import { WorkflowTargetService } from "./plugins/orchestration/targets.js";
+import { WorkflowDefinitionStore } from "./plugins/orchestration/definitions.js";
+import { registerOrchestrationExtensionRoutes } from "./plugins/orchestration/extensionRoutes.js";
+import { workspaceExecutionCoordinator, type WorkspaceExecutionLease } from "./runtime/workspaceExecutionCoordinator.js";
+import type { WorkflowRecord } from "./plugins/orchestration/types.js";
+import { TaskContextStore, latestTaskHandoffForRoot, renderTaskHandoff, redactTaskText, taskRootsEqual } from "./tasks/context.js";
+import { prepareWorkflowTaskContext } from "./tasks/executionContext.js";
+import { publishTaskWorkflowResult } from "./tasks/workflowResult.js";
+import { registerTaskContextRoutes, refreshWorkflowTaskHandoff } from "./tasks/routes.js";
+import { mergeTaskHistoryServers, prepareSessionTaskHistoryServers, TASK_HISTORY_SERVER_NAME } from "./tasks/sessionHistory.js";
+import { terminateServerDescendants, terminateTrackedProcessTrees } from "./processTree.js";
 import { AcpMainSessionRuntime, assertAcpConfigValue, type AcpMainSessionInput } from "./providers/acp/mainSession.js";
+import { acpMcpServers } from "./providers/acp/mcp.js";
+import { acpDelegationEnvironment, acpLaunchSpecForRuntime, acpProviderManifest, createAcpRuntimeDefinition } from "./providers/acp/runtime.js";
 import { RestrictedAcpClientServices } from "./providers/acp/services.js";
 import { AcpStdioBackend } from "./providers/acp/stdioBackend.js";
-import { acpMcpServers } from "./providers/acp/mcp.js";
-import type { AcpLaunchSpec } from "./providers/types.js";
-import { AgentMarketStore } from "./providers/market.js";
-import { acpDelegationEnvironment, acpLaunchSpecForRuntime, acpProviderManifest, createAcpRuntimeDefinition } from "./providers/acp/runtime.js";
 import { normalizeProviderConnection, providerConnectionConfigValues, providerConnectionEnvironment, publicProviderConnection, type ProviderConnectionProfile } from "./providers/connections.js";
 import { createProviderControlSnapshot, providerActiveEnvironment, providerConfiguration, providerManagedEnvironment, type ProviderControlSnapshotInput } from "./providers/controlPlane.js";
+import { ProviderHostRegistry } from "./providers/host.js";
+import { AgentMarketStore } from "./providers/market.js";
+import type { AcpLaunchSpec } from "./providers/types.js";
+import { assertCodexMcpConfiguration } from "./runtime/codexCompatibility.js";
+import { applyRuntimeNetworkEnvironment, DEFAULT_RUNTIME_CONFIGURATION, normalizeRuntimeConfiguration } from "./runtime/config.js";
+import { RuntimeDetectionCache } from "./runtime/detectionCache.js";
+import { CliRuntimeManager } from "./runtime/manager.js";
+import type { CliRuntimeId, RuntimeExecutionIdentity, RuntimeInstallOptions, RuntimeStatus } from "./runtime/types.js";
+import { SecretVault, type WorkbenchSecrets } from "./secretVault.js";
+import { claimPendingInput, normalizePendingInputs, promotePendingInput, removePendingInput, updatePendingInput } from "./sessionInputs/queue.js";
+import { PendingInputActionError } from "./sessionInputs/types.js";
+import { taskDeletionPolicy } from "./sessionManagement/deletionPolicy.js";
+import { sessionAsMarkdown, sessionAsPortableJson } from "./sessionManagement/export.js";
+import { sessionManagementFacets } from "./sessionManagement/facets.js";
+import { workbenchInventoryItem } from "./sessionManagement/health.js";
+import { parsePortableSessionImport } from "./sessionManagement/import.js";
+import { codexOfficialInventory, listClaudeNativeSessions } from "./sessionManagement/native.js";
+import { SessionManagementRepository } from "./sessionManagement/repository.js";
+import { deleteSessionRecoverySnapshot, readSessionRecoverySnapshot, writeSessionRecoverySnapshot } from "./sessionManagement/snapshot.js";
+import type { SessionInventoryItem, SessionManagementSummary, SessionRecoverySnapshot, SessionScopeSummary, WorkspaceTrashSnapshot } from "./sessionManagement/types.js";
+import { runTransitionConflict, type RunAbortIntent } from "./sessionRuns/transitions.js";
+import { normalizeSessionScope } from "./sessionScope.js";
+import { safeMessageText, sliceMessageWindow } from "./sessionWindow.js";
+import { summarizeMessagePayload } from "./sessionMessagePayload.js";
 import {
-  normalizeProviderId,
-  type AgentModelAdapter,
-  type AgentProviderId,
-  type AgentProviderModelSelection,
-  type AgentProviderManifestV1,
-  type AgentReasoningControl,
-  type DelegationMode,
-  type DelegationRequest
-} from "./agents/types.js";
+DEFAULT_WORKBENCH_INTERFACE_SETTINGS,
+normalizeWorkbenchInterfaceSettings
+} from "./settings/pagePreferences.js";
+import { WorkspaceSkillProjectionManager, type SkillProjectionEngine } from "./skillProjection.js";
+import { CURRENT_STATE_SCHEMA_VERSION, MIN_STATE_SCHEMA_VERSION, WorkbenchStateStore } from "./stateStore.js";
+import { planStorageMaintenance, runStorageMaintenance, type StorageMaintenanceInput } from "./storageGovernance.js";
+import type { AgentLog, AgentThread, AgentThreadIdentity, AgentThreadSourceKind, CapabilityProfile, ClaudeSettings, DelegatedTask, ExecutionMode, McpServer, Message, ModelOption, PendingInput, Session, SessionStatus, Settings, SkillFolder, SkillOrganization, SkillPolicies, SkillPolicy, State, TaskFolder, Workspace } from "./workbench/types.js";
+import { assertWorkflowPlannerTools, assertWorkflowResultTools } from "./workflows/controlTools.js";
+import { type WorkflowPlanningMode } from "./workflows/types.js";
+import { deleteWorkspaceEntries, moveWorkspaceEntries, searchWorkspaceFiles } from "./workspaceFiles.js";
+import { WorkspaceTreeIndex } from "./workspaceTreeIndex.js";
 
-type ClaudeSettings = {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  effort: "low" | "medium" | "high" | "xhigh" | "max";
-  claudePath: string;
-  permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
-};
+function normalizedAgentProvider(value: unknown, fallback: AgentProviderId = "unknown") {
+  const provider = String(value || "").trim().toLowerCase();
+  return provider || fallback;
+}
 
-type ModelOption = {
-  id: string;
-  displayName: string;
-  createdAt?: string;
-};
+function agentIdentityKey(provider: AgentProviderId, id: string, toolUseId?: string) {
+  const normalized = normalizedAgentProvider(provider);
+  return toolUseId ? `${normalized}:tool:${toolUseId}` : `${normalized}:agent:${id}`;
+}
 
-type Settings = {
-  defaultEngine: EngineName;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh";
-  sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
-  approvalPolicy: "never" | "on-request" | "on-failure" | "untrusted";
-  networkAccess: boolean;
-  webSearch: "disabled" | "cached" | "live";
-  codexPath: string;
-  claude: ClaudeSettings;
-  runtime: RuntimeConfiguration;
-  interface: WorkbenchInterfaceSettings;
-};
+function agentIdentityFor(agent: Pick<AgentThread, "id" | "provider" | "toolUseId" | "parentThreadId" | "identity" | "identityAliases">, parentSessionId: string, sourceKind: AgentThreadSourceKind): AgentThreadIdentity {
+  const providerId = normalizedAgentProvider(agent.provider || agent.identity?.providerId);
+  const providerPrefix = `${providerId}:`;
+  const key = [agent.identity?.key, ...(agent.identityAliases || [])]
+    .find((candidate) => typeof candidate === "string" && candidate.startsWith(providerPrefix))
+    || agentIdentityKey(providerId, agent.id, agent.toolUseId);
+  return {
+    key,
+    agentId: agent.id,
+    providerId,
+    sourceKind,
+    parentSessionId,
+    identityVersion: 1
+  };
+}
 
-type SkillPolicy = "auto" | "always" | "manual" | "off";
-type SkillPolicies = Record<string, SkillPolicy>;
-type ExecutionMode = "native" | "collaborative";
-type TaskFolder = { id: string; name: string; createdAt: string };
-type SkillFolder = { id: string; ownerUserId: string; name: string; position: number; pinned: boolean; createdAt: string; updatedAt: string };
-type SkillOrganization = { id: string; ownerUserId: string; skillName: string; folderId: string | null; position: number; archivedAt: string | null; updatedAt: string };
-type CapabilityProfile = { id: string; ownerUserId: string; name: string; description: string; skillPolicies: SkillPolicies; createdAt: string; updatedAt: string; lastUsedAt: string | null };
-
-type Workspace = {
-  id: string;
-  ownerUserId: string;
-  name: string;
-  root: string;
-  createdAt: string;
-  lastOpenedAt?: string;
-  pinned?: boolean;
-  archivedAt?: string | null;
-  taskFolders?: TaskFolder[];
-  agentSkillPolicies?: SkillPolicies;
-  agentCapabilityProfileId?: string | null;
-  agentSkillOverrides?: SkillPolicies;
-  agentExecutionMode?: ExecutionMode;
-  // Legacy fields are retained only while old state files migrate.
-  agentSkillNames?: string[];
-  agentMode?: "auto" | "all" | "off";
-};
-
-type Message = {
-  id: string;
-  role: "user" | "assistant" | "event" | "error";
-  text: string;
-  createdAt: string;
-  eventType?: string;
-  eventPhase?: "started" | "updated" | "completed";
-  activityCategory?: string;
-  activityPhase?: "started" | "running" | "completed" | "failed";
-  activityDetail?: unknown;
-  activity?: CanonicalActivityRecord;
-  sourceId?: string;
-  payload?: unknown;
-  attachments?: Attachment[];
-};
-
-type SessionStatus = "idle" | "running" | "paused" | "completed" | "failed" | "stopped" | "interrupted";
-type PendingInput = QueuePendingInput<Attachment, SkillPolicies>;
-
-type Session = {
-  id: string;
-  ownerUserId: string;
-  title: string;
-  scopeKind: "workspace" | "standalone";
-  workspaceId: string;
-  codexThreadId: string | null;
-  engine: EngineName;
-  engineSessionId: string | null;
-  createdAt: string;
-  updatedAt: string;
-  usage: Usage;
-  messages: Message[];
-  pendingInputs: PendingInput[];
-  status: SessionStatus;
-  runStartedAt?: string;
-  runFinishedAt?: string;
-  lastError?: string;
-  stopReason?: "user" | "pause" | "steer" | "shutdown" | "crash" | "timeout" | "unknown";
-  deadlineAt?: string;
-  parentSessionId?: string;
-  branchedFromMessageId?: string;
-  claudeInstructionsInjected?: boolean;
-  revision: number;
-  pinned?: boolean;
-  archivedAt?: string | null;
-  folderId?: string | null;
-  standaloneSkillPolicies?: SkillPolicies;
-  standaloneCapabilityProfileId?: string | null;
-  standaloneExecutionMode?: ExecutionMode;
-  providerConfigOptions?: SessionConfigOption[];
-  providerConfigValues?: Record<string, string | boolean>;
-  runtimeBinding?: RuntimeExecutionIdentity;
-  creationMutationId?: string;
-};
-
-type McpTransport = "stdio" | "http" | "sse";
-type McpServer = {
-  id: string;
-  ownerUserId: string;
-  name: string;
-  transport: McpTransport;
-  command?: string;
-  args?: string[];
-  url?: string;
-  env?: Record<string, string>;
-  headers?: Record<string, string>;
-  enabledWorkspaceIds: string[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-type State = {
-  settings: Settings;
-  workspaces: Workspace[];
-  sessions: Session[];
-  delegatedTasks: DelegatedTask[];
-  mcpServers: McpServer[];
-  skillFolders: SkillFolder[];
-  skillOrganizations: SkillOrganization[];
-  capabilityProfiles: CapabilityProfile[];
-  providerConnections: ProviderConnectionProfile[];
-  delegationProtocolVersion: number;
-};
-
-type DelegatedTask = {
-  id: string;
-  parentSessionId: string;
-  provider: AgentProviderId;
-  adapterId?: string;
-  mode?: DelegationMode;
-  nickname: string;
-  cwd: string;
-  task: string;
-  status: "queued" | "running" | "completed" | "failed" | "interrupted";
-  createdAt: string;
-  updatedAt: string;
-  usage: Usage;
-  finalText?: string;
-  lastError?: string;
-  completedAt?: string;
-  reviewedAt?: string;
-  idempotencyKey?: string;
-  requestFingerprint?: string;
-  deadlineAt?: string;
-  timeoutReason?: string;
-  acceptance?: string[];
-  retryCount?: number;
-  retryOf?: string;
-  runtimeBinding?: RuntimeExecutionIdentity;
-  agentRevision?: number;
-};
-
-type AgentLog = {
-  id: string;
-  createdAt: string;
-  kind: "status" | "message" | "tool" | "result" | "error" | "reasoning";
-  title: string;
-  text: string;
-  payload?: unknown;
-  category?: string;
-  phase?: "started" | "running" | "completed" | "failed";
-  detail?: unknown;
-  activity?: CanonicalActivityRecord;
-};
-
-type AgentThread = {
-  id: string;
-  toolUseId?: string;
-  parentThreadId: string;
-  nickname: string;
-  path: string;
-  status: "running" | "completed" | "failed" | "interrupted";
-  updatedAt: string;
-  usage: Usage;
-  logs: AgentLog[];
-  provider?: AgentProviderId;
-  mode?: DelegationMode;
-  task?: string;
-  logCount?: number;
-  revision?: number;
-};
+function sourceKindForAgent(agent: AgentThread): AgentThreadSourceKind {
+  return agent.identity?.sourceKind || (agent.provider === "codex" || agent.provider === "claude" ? "native" : "acp");
+}
 
 const MAX_STORED_AGENT_LOGS = 120;
 const MAX_VISIBLE_AGENT_LOGS = 80;
@@ -395,8 +257,10 @@ const OFFICIAL_CODEX_HOME = path.resolve(process.env.META_CODEX_LINK_HOME || pat
 const CLAUDE_HOME = APP_PATHS.claudeHome;
 const OFFICIAL_CLAUDE_HOME = path.resolve(process.env.META_CLAUDE_LINK_HOME || path.join(os.homedir(), ".claude"));
 const MCP_CONFIG_DIR = APP_PATHS.mcpConfigDir;
-const WORKFLOW_PLANNER_TRANSACTION_DIR = APP_PATHS.workflowTransactionsDir;
+configureAttachmentStorage(path.join(APP_PATHS.dataDir, "attachments"));
+const WORKFLOW_PLANNER_TRANSACTION_DIR = path.join(APP_PATHS.pluginRuntimeDir, ORCHESTRATION_PLUGIN_ID, "transactions");
 const ACTIVITY_ARTIFACTS_DIR = APP_PATHS.activityArtifactsDir;
+const PUBLISHED_ARTIFACTS_DIR = path.join(APP_PATHS.dataDir, "artifacts", "published");
 const SESSION_RECOVERY_DIR = path.join(APP_PATHS.dataDir, "sessions", "recovery");
 const SKILLS_DIR = path.join(CODEX_HOME, "skills");
 const STATE_FILE = path.join(RUNTIME_DIR, "state.json");
@@ -457,15 +321,33 @@ type ActiveRun = {
   skillNames?: string[];
   agentMode?: "auto" | "all" | "off";
   skillPolicies?: SkillPolicies;
+  executionMode?: ExecutionMode;
+  inputOrigin?: ClaudeInputOrigin;
   claudeProcess?: ClaudeSessionHandle;
   reviewedDelegatedTaskIds: Set<string>;
   delegatedReviewTaskIds: Set<string>;
   injectedDelegatedRecoveryTaskIds: Set<string>;
   releaseSkillProjection?: () => void;
+  taskHistoryServers?: WorkbenchMcpServer[];
 };
 
 const activeRuns = new Map<string, ActiveRun>();
+const nativeInteractions = new NativeInteractionBroker((id, owner, prompt, status) => {
+  const session = sessionById(id, owner);
+  if (!session) return;
+  // Answers (especially secret questions) are returned only to the CLI.
+  const existing = session.messages.find(message => message.sourceId === `native-request:${prompt.id}`);
+  if (existing) { existing.text = `${prompt.title} · ${status === "resolved" ? "已处理" : "已取消"}`; existing.activityPhase = "completed"; }
+  else appendMessage(session, { role: "event", text: `${prompt.title} · 等待你的决定`, sourceId: `native-request:${prompt.id}`, eventType: "native.request", activityCategory: "status", activityPhase: "running" });
+  publishSessionChanged(session); scheduleStateSave();
+});
 const sessionCreationMutationLocks = new Map<string, Promise<void>>();
+
+function dispatchAgentHook(input: { kind: "session" | "tool" | "permission" | "subagent" | "compact"; event: string; providerId?: string; sessionId?: string; taskId?: string; payload?: unknown }) {
+  void hookRegistry.dispatch(input).catch((error) => {
+    console.warn("Agent hook dispatch failed:", error instanceof Error ? error.message : String(error));
+  });
+}
 
 async function withSessionCreationMutationLock<T>(key: string, operation: () => Promise<T>) {
   const previous = sessionCreationMutationLocks.get(key) || Promise.resolve();
@@ -497,9 +379,23 @@ const BACKUP_DIR = APP_PATHS.backupsDir;
 let backupPolicy = loadBackupPolicy(BACKUP_POLICY_FILE);
 let state: State = structuredClone(emptyState);
 const stateStore = new WorkbenchStateStore(RUNTIME_DIR);
-const workflowRepository = new WorkflowRepository(stateStore.db);
-const workflowStateFiles = new WorkflowStateFiles();
+const pluginHost = createBuiltInPluginHost(APP_PATHS);
+pluginHost.start();
+const { repository: workflowRepository, stateFiles: workflowStateFiles } = createOrchestrationServices(pluginHost.context(ORCHESTRATION_PLUGIN_ID), stateStore.db);
+const taskContextStore = new TaskContextStore(stateStore.db);
+const workflowTargets = new WorkflowTargetService(pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory);
+const workflowDefinitions = new WorkflowDefinitionStore(pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory);
 const eventHub = new WorkbenchEventHub();
+const traceRecorder = new TraceRecorder();
+let routineScheduler: RoutineScheduler | null = null;
+// Hooks are an intentionally small, host-owned extension point. They are
+// registered by built-in integrations during process startup; the API only
+// exposes diagnostics and never evaluates user supplied JavaScript.
+const hookRegistry = new HookRegistry({
+  onError: ({ hook, context, error, status }) => {
+    console.warn(`Agent hook ${hook.id} ${status} on ${context.event}:`, error instanceof Error ? error.message : String(error));
+  }
+});
 const appUpdateService = new AppUpdateService({
   projectRoot: ROOT,
   stateFile: APP_PATHS.appUpdateStateFile,
@@ -551,8 +447,7 @@ const claudeModelValidationCache = new Map<string, number>();
 const codexModelValidationCache = new Map<string, number>();
 const stateSaveCoordinator = new GenerationSaveCoordinator(persistStateOnce);
 let deferredStateSaveTimer: NodeJS.Timeout | undefined;
-type PlainSkillRuntime = { root: string; instructions: string; cleanup: () => void };
-let bundledSkill: PlainSkillRuntime;
+
 const RUNTIME_DETECTION_TTL_MS = 60_000;
 const codexRuntimeDetection = new RuntimeDetectionCache<CodexRuntimeStatus>(
   () => cliRuntimeManager.detect("codex", state.settings.codexPath), RUNTIME_DETECTION_TTL_MS,
@@ -688,8 +583,9 @@ async function validateCodexModel(settings: Pick<Settings, "baseUrl" | "apiKey" 
   const response = await fetch(openAiResponsesUrl(baseUrl), {
     method: "POST",
     headers: openAiHeaders(settings.apiKey),
-    body: JSON.stringify({ model: settings.model, input: "Reply with OK.", max_output_tokens: 16 }),
-    signal: AbortSignal.timeout(30_000)
+    body: JSON.stringify({ model: settings.model, input: "Reply with OK.", max_output_tokens: 128,
+      ...(/^(?:gpt-[5-9]|o[134](?:-|$))/i.test(settings.model) ? { reasoning: { effort: "low" } } : {}) }),
+    signal: AbortSignal.timeout(60_000)
   });
   const text = await response.text();
   if (!response.ok) {
@@ -949,9 +845,15 @@ function uid(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function isWorkbenchDelegationEnabled(session: Pick<Session, "id">, explicitPolicies?: SkillPolicies) {
-  const policies = explicitPolicies || activeRuns.get(session.id)?.skillPolicies || {};
-  return skillPolicyEnabled(policies[BUILTIN_DELEGATION_SKILL_NAME]);
+function sessionExecutionMode(session: Pick<Session, "id">) {
+  const stored = state.sessions.find((item) => item.id === session.id);
+  const workspace = stored && executionWorkspaceForSession(stored);
+  return workspace ? workspaceAgentConfig(workspace).executionMode : "native";
+}
+
+function isWorkbenchDelegationEnabled(session: Pick<Session, "id">, _legacyPolicies?: SkillPolicies) {
+  return pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)
+    && (activeRuns.get(session.id)?.executionMode || sessionExecutionMode(session)) === "collaborative";
 }
 
 function mainEngineName(session: Pick<Session, "engine">) {
@@ -1046,7 +948,6 @@ async function ensureRuntime() {
   await fsp.mkdir(SKILLS_DIR, { recursive: true });
   await fsp.mkdir(CLAUDE_HOME, { recursive: true });
   await fsp.mkdir(MCP_CONFIG_DIR, { recursive: true, mode: 0o700 });
-  await ensureBundledPlannerSkill();
   await ensureBundledSkillManager();
   try {
     const secureSecrets = secretVault.load();
@@ -1100,7 +1001,7 @@ async function ensureRuntime() {
           const pendingInputs = normalizePendingInputs<Attachment, SkillPolicies>(session.pendingInputs, session.updatedAt || new Date().toISOString());
           const standalonePolicies = scope.scopeKind === "standalone" ? completeSkillPolicies(session.standaloneSkillPolicies) : undefined;
           const standaloneExecutionMode = scope.scopeKind === "standalone"
-            ? normalizeExecutionMode(session.standaloneExecutionMode, standalonePolicies || {})
+            ? normalizeExecutionMode(session.standaloneExecutionMode, normalizeSkillPolicies(session.standaloneSkillPolicies))
             : undefined;
           const normalized: Session = {
             ...session,
@@ -1159,7 +1060,7 @@ async function ensureRuntime() {
         migrated = true;
       }
       const agentExecutionMode = normalizeExecutionMode(workspace.agentExecutionMode, agentSkillPolicies);
-      Object.assign(agentSkillPolicies, applyExecutionMode(agentSkillPolicies, agentExecutionMode));
+      delete agentSkillPolicies[BUILTIN_DELEGATION_SKILL_NAME];
       if (workspace.agentExecutionMode === undefined) migrated = true;
       if (!hasPolicies || workspace.agentSkillNames !== undefined || workspace.agentMode !== undefined) migrated = true;
       const { agentSkillNames: _legacyNames, agentMode: _legacyMode, ...rest } = workspace;
@@ -1308,48 +1209,6 @@ async function ensureRuntime() {
   }
 }
 
-const BUNDLED_PLANNER_SKILL = `---
-name: Workbench 委派协议
-description: 面向已注册 AI CLI 的通用子 Agent 委派、等待、恢复和验收协议；由当前主脑按能力选择合适的 Agent。
----
-
-# Workbench 委派协议
-
-你正在使用 Workbench Agent Runtime Protocol。当前主脑负责理解目标、制定执行计划并拆分可验收任务；独立任务可以通过工作台桥接委派给任意已经注册且满足能力要求的 AI CLI。
-
-## 能力参考
-
-- Claude 子 Agent 通常更适合：复杂语义理解、歧义澄清、创意发散、长文内容、架构审查、质量评估和风险判断。
-- Codex 子 Agent 通常更适合：边界明确的编码、文件修改、命令执行、测试运行、仓库排查和重复性机械工作。
-- 后续注册的 Agent 以其 capability 描述为准；不要假定所有 CLI 都支持会话恢复、文件写入、联网或原生子 Agent。
-- 以上是能力倾向，不是固定角色。当前主脑负责规划、拆分、调度和最终验收，并根据任务性质和 capability 选择一个或多个 Agent。
-
-## 委派规则
-
-- 委派前先明确目标、必要背景、相关文件、约束和可验证的验收标准。
-- 每次委派都要把必要背景、相关文件、约束和验收标准写入 JSON 任务文件。
-- 任务文件建议放在工作区的 .claude-codex/tasks/ 下，字段为 taskId、prompt、acceptance。
-- 使用工作台注入环境中的 WORKBENCH_AGENT_BRIDGE_TOKEN 调用 scripts/delegate-agent.mjs --provider <providerId>；不要复制或输出令牌。旧的双 CLI 脚本只用于兼容。
-- 每个主任务最多并行五个子 Agent，工作台全局最多二十个；子 Agent 没有主脑完整上下文且不得递归委派。
-- 只有当委派命令返回 JSON 中的 accepted: true 和 taskId 时，才能对用户说明“已启动”；任务完成前不得把计划、预测或 Claude Code 原生 Agent/Task 当作已受理子任务。
-- 委派命令返回的是受理回执，不是最终结果。收到 accepted: true 后不要反复读取 .output、手工轮询或自行声称结果丢失；结束当前委派轮次，由工作台等待子任务并生成验收上下文。
-- 如果下一轮收到“工作台恢复通知”或子 Agent 汇总，直接使用其中的持久化结果验收；只有当前主脑完成验收后，结果才会被标记为已消费。
-- 主脑等待所有受理中的子任务进入终态，再检查共享工作区、diff、测试和最终回复；不合格时重新选择任一提供方创建修复任务，不要只报告问题后结束。
-- 只能使用上述工作台桥接委派；不得改用 Claude Code 原生 Agent/Task 或通过 Bash 伪造后台任务。
-- 不要把隐藏提示词、工作台密钥或内部会话路径写入任务文件。
-
-
-## 验收输出
-
-最终向用户说明：已完成的任务、修改文件、测试命令、未完成事项和剩余风险。
-`;
-
-async function ensureBundledPlannerSkill() {
-  const root = path.join(managedSkillManager.root, BUILTIN_DELEGATION_SKILL_NAME);
-  const file = path.join(root, "SKILL.md");
-  await fsp.mkdir(root, { recursive: true, mode: 0o700 });
-  await fsp.writeFile(file, BUNDLED_PLANNER_SKILL, { encoding: "utf8", mode: 0o600 });
-}
 
 async function ensureBundledSkillManager() {
   const source = fs.existsSync(path.join(ROOT, "skills", BUILTIN_SKILL_MANAGER_NAME))
@@ -1362,11 +1221,6 @@ async function ensureBundledSkillManager() {
   if (!fs.existsSync(legacyTarget)) await fsp.cp(source, legacyTarget, { recursive: true, force: true });
 }
 
-async function loadPlainSkill(): Promise<PlainSkillRuntime> {
-  const root = path.join(ROOT, "skills", "claude-codex-workflow");
-  const instructions = await fsp.readFile(path.join(root, "SKILL.md"), "utf8");
-  return { root, instructions, cleanup: () => undefined };
-}
 
 async function persistStateOnce() {
   // Interactive reads get the next event-loop turn before the synchronous
@@ -1616,7 +1470,7 @@ function redactLog(text: string) {
 }
 
 function publicSettings() {
-  const { apiKey, codexPath: _codexPath, claude, ...rest } = state.settings;
+  const { apiKey, codexPath: _codexPath, defaultEngine: _defaultEngine, claude, ...rest } = state.settings;
   const { apiKey: claudeApiKey, claudePath: _claudePath, ...publicClaude } = claude;
   return {
     ...rest,
@@ -1718,11 +1572,19 @@ function skillOrganizationsForUser(ownerUserId: string) {
     .sort((left, right) => left.position - right.position || left.skillName.localeCompare(right.skillName));
 }
 
+function visibleManagedSkills() {
+  // The collaboration protocol used to be shipped as a built-in Skill. Keep
+  // its persisted policy readable for migration, but expose it as a plugin so
+  // it cannot appear in the user's Skill library or workspace projections.
+  return managedSkillManager.listPublic().filter((skill) => skill.name !== BUILTIN_DELEGATION_SKILL_NAME);
+}
+
 function skillLibraryForUser(ownerUserId: string) {
+  const hidden = new Set([BUILTIN_DELEGATION_SKILL_NAME]);
   return {
-    skills: managedSkillManager.listPublic(),
+    skills: visibleManagedSkills(),
     folders: skillFoldersForUser(ownerUserId),
-    organizations: skillOrganizationsForUser(ownerUserId)
+    organizations: skillOrganizationsForUser(ownerUserId).filter((item) => !hidden.has(item.skillName))
   };
 }
 
@@ -1745,7 +1607,7 @@ function mcpServersForNode(workspace: Workspace, names: string[]) {
 }
 
 function codexMcpConfigForWorkspace(workspace: Workspace, selectedNames?: string[], additionalServers: WorkbenchMcpServer[] = []) {
-  return codexMcpConfig([...additionalServers, ...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace))]);
+  return codexMcpConfig(mergeTaskHistoryServers([...additionalServers, ...(selectedNames ? mcpServersForNode(workspace, selectedNames) : mcpServersForWorkspace(workspace))], additionalServers));
 }
 
 const CLAUDE_WORKFLOW_READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"] as const;
@@ -1758,7 +1620,7 @@ function packagedWorkflowToolArgs(compiledName: string, sourceName: string) {
     if (!fs.existsSync(compiled)) throw new Error(`桌面运行时缺少任务编排工具：${compiledName}`);
     return [compiled];
   }
-  return [path.join(ROOT, "node_modules", "tsx", "dist", "cli.mjs"), path.join(ROOT, "server", "workflows", sourceName)];
+  return ["--import", pathToFileURL(path.join(ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href, path.join(ROOT, "server", "workflows", sourceName)];
 }
 
 function workflowPlannerToolServer(transactionPath: string): WorkbenchMcpServer {
@@ -1786,8 +1648,8 @@ async function workflowPlannerMcpConfigPath(workspace: Workspace, transactionPat
   return file;
 }
 
-async function workspaceMcpConfigPath(workspace: Workspace, onlyServerId?: string) {
-  const content = JSON.stringify(mcpConfigForWorkspace(workspace, onlyServerId));
+async function workspaceMcpConfigPath(workspace: Workspace, onlyServerId?: string, additionalServers: WorkbenchMcpServer[] = []) {
+  const content = JSON.stringify(claudeMcpConfig(mergeTaskHistoryServers(mcpServersForWorkspace(workspace, onlyServerId), additionalServers)));
   const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
   const file = path.join(MCP_CONFIG_DIR, `${workspace.id}-${hash}.json`);
   if (!fs.existsSync(file)) await fsp.writeFile(file, content, { encoding: "utf8", mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
@@ -1854,7 +1716,7 @@ function sessionById(id: string, ownerUserId?: string) {
 
 async function createWorkflowClaudeHandle(options: {
   cwd: string; sessionId?: string | null; mcpConfigPath?: string; permissionMode: "default" | "acceptEdits" | "plan" | "bypassPermissions";
-  allowedTools?: string[]; disallowedTools?: string[]; additionalDirectories?: string[]; includeSystemStatus?: boolean;
+  snapshotOnly?: boolean; tools?: string[]; allowedTools?: string[]; disallowedTools?: string[]; additionalDirectories?: string[]; includeSystemStatus?: boolean;
   signal: AbortSignal; ownerId: string; onEvent: (event: NormalizedEngineEvent) => Promise<void> | void;
 }) {
   const runtime = await getClaudeRuntime();
@@ -1862,8 +1724,8 @@ async function createWorkflowClaudeHandle(options: {
   const command = resolveClaudeCommand(runtime.path);
   return new ClaudeSessionHandle({
     executable: command.executable, executableArgs: command.args, cwd: options.cwd, sessionId: options.sessionId,
-    model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
-    configDir: CLAUDE_HOME, mcpConfigPath: options.mcpConfigPath, permissionMode: options.permissionMode, allowedTools: options.allowedTools,
+    model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
+    configDir: CLAUDE_HOME, mcpConfigPath: options.mcpConfigPath, permissionMode: options.permissionMode, snapshotOnly: options.snapshotOnly, tools: options.tools, allowedTools: options.allowedTools,
     disallowedTools: options.disallowedTools, additionalDirectories: options.additionalDirectories, includeSystemStatus: options.includeSystemStatus,
     disallowNativeAgents: true, signal: options.signal, ownerId: options.ownerId, onEvent: options.onEvent
   });
@@ -1877,7 +1739,13 @@ function standaloneSessionRoot(session: Pick<Session, "id" | "ownerUserId">) {
 
 function executionWorkspaceForSession(session: Session, ownerUserId?: string): Workspace | undefined {
   if (ownerUserId && session.ownerUserId !== ownerUserId) return undefined;
-  if (session.scopeKind !== "standalone") return session.workspaceId ? workspaceById(session.workspaceId, ownerUserId) : undefined;
+  if (session.scopeKind !== "standalone") {
+    const workspace = session.workspaceId ? workspaceById(session.workspaceId, ownerUserId) : undefined;
+    if (!workspace) return undefined;
+    const context = taskContextStore.forExecution({ kind: "session", id: session.id }, session.ownerUserId);
+    const execution = context?.executions.find((item) => item.kind === "session" && item.id === session.id);
+    return execution?.executionRoot ? { ...workspace, root: execution.executionRoot } : workspace;
+  }
   const standalonePolicies = completeSkillPolicies(session.standaloneSkillPolicies);
   const executionMode = normalizeExecutionMode(session.standaloneExecutionMode, standalonePolicies);
   return {
@@ -1895,8 +1763,15 @@ function executionWorkspaceForSession(session: Session, ownerUserId?: string): W
 function fileScopeById(id: string, ownerUserId: string) {
   const workspace = workspaceById(id, ownerUserId);
   if (workspace) return workspace;
+  const workflow = workflowRepository.get(id, ownerUserId);
+  if (workflow) {
+    const original = workspaceById(workflow.workspaceId, ownerUserId);
+    if (original) return { ...original, id: workflow.id, root: workflow.workDirectory };
+  }
   const session = sessionById(id, ownerUserId);
-  return session?.scopeKind === "standalone" ? executionWorkspaceForSession(session, ownerUserId) : undefined;
+  if (!session) return undefined;
+  const execution = executionWorkspaceForSession(session, ownerUserId);
+  return execution ? { ...execution, id: session.id } : undefined;
 }
 
 async function ensureSessionExecutionRoot(session: Session) {
@@ -1932,6 +1807,15 @@ function assertAllowedWorkspacePath(input: string) {
     }
   }
   return resolved;
+}
+
+function resolvePreviewAttachment(workspace: Workspace, reference: string) {
+  const parsed = attachmentReference(reference);
+  if (!parsed) return resolveWorkspaceFile(workspace, reference);
+  const session = sessionById(parsed.sessionId, workspace.ownerUserId);
+  const scope = session && executionWorkspaceForSession(session);
+  if (!session || !scope || path.resolve(scope.root) !== path.resolve(workspace.root)) throw new Error("附件不属于当前工作区任务");
+  return resolveAttachmentPath(workspace.root, session.id, reference);
 }
 
 function resolveWorkspaceFile(workspace: Workspace, relativePath: string) {
@@ -2023,8 +1907,8 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   );
   env.CODEX_HOME = codexHome;
   if (settings.apiKey) {
-    env.CODEX_API_KEY = settings.apiKey;
-    env.OPENAI_API_KEY = settings.apiKey;
+    env.CODEX_API_KEY = codexRuntimeConnection(settings).apiKey;
+    env.OPENAI_API_KEY = codexRuntimeConnection(settings).apiKey;
   }
   if (parentSession && delegationEnabled) {
     env.WORKBENCH_AGENT_BRIDGE_URL = AGENT_BRIDGE_URL;
@@ -2038,41 +1922,66 @@ function envForCodex(settings: Settings, parentSession?: Session, delegationEnab
   return env;
 }
 
-function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string) {
-  const customProviderConfig = settings.baseUrl
-    ? {
-        model_provider: "modelx",
-        model_providers: {
-          modelx: {
-            name: "ModelX API",
-            base_url: openAiApiRoot(settings.baseUrl),
-            env_key: "OPENAI_API_KEY",
-            wire_api: "responses",
-            supports_websockets: false,
-            // A dropped upstream stream should be recovered by the Codex client.
-            request_max_retries: 3,
-            stream_max_retries: 5,
-            stream_idle_timeout_ms: 300000
-          }
-        }
-      }
-    : undefined;
+function claudeCredentialKind(): "api-key" | "auth-token" {
+  const profile = state.providerConnections.find((item) => item.providerId === "claude" && item.isDefault);
+  const environment = profile ? providerActiveEnvironment("claude", profile.authMethodId, providerConnectionEnvironment(profile)) : {};
+  return profile?.authMethodId === "anthropic-compatible" && Boolean(environment.ANTHROPIC_AUTH_TOKEN) ? "auth-token" : "api-key";
+}
+const codexSearchCompatibility = new CodexSearchCompatibility(PORT);
+function codexRuntimeConnection(settings: Settings) {
+  const profile = state.providerConnections.find((item) => item.providerId === "codex" && item.isDefault);
+  const legacy = profile?.authMethodId === "openai-compatible" && profile.env.METACODE_CODEX_LEGACY_SEARCH === "true";
+  return legacy && settings.baseUrl && settings.apiKey
+    ? { ...codexSearchCompatibility.connection(openAiApiRoot(settings.baseUrl), settings.apiKey), legacy: true }
+    : { baseUrl: settings.baseUrl ? openAiApiRoot(settings.baseUrl) : "", apiKey: settings.apiKey, legacy: false };
+}
+function codexProviderConfig(settings: Settings): CodexConfigObject {
+  const connection = codexRuntimeConnection(settings);
+  return connection.baseUrl ? { model_provider: "modelx", model_providers: { modelx: { name: "ModelX API", base_url: connection.baseUrl, ...(connection.legacy ? { supports_standalone_web_search: true } : {}), env_key: "OPENAI_API_KEY", wire_api: "responses", supports_websockets: false, request_max_retries: 3, stream_max_retries: 5, stream_idle_timeout_ms: 300000 } } } : {};
+}
 
-  const workspaceMcp = workspace ? codexMcpConfigForWorkspace(workspace, selectedMcpNames, additionalMcpServers) : codexMcpConfig(additionalMcpServers);
+function buildCodex(settings: Settings, parentSession?: Session, disableNativeAgents = false, workspace?: Workspace, selectedMcpNames?: string[], additionalMcpServers: WorkbenchMcpServer[] = [], codexHomeOverride?: string, snapshotOnly = false) {
+  const customProviderConfig = codexProviderConfig(settings);
+
+  const workspaceMcp = snapshotOnly ? { config: {}, env: {}, skipped: [] } : workspace ? codexMcpConfigForWorkspace(workspace, selectedMcpNames, additionalMcpServers) : codexMcpConfig(additionalMcpServers);
   if (workspaceMcp.skipped.length) {
     console.warn(`Codex skipped unsupported SSE MCP servers for workspace ${workspace?.id}: ${workspaceMcp.skipped.join(", ")}`);
   }
   const codexConfig: CodexConfigObject = {
     ...(customProviderConfig || {}),
     ...(disableNativeAgents ? { features: { multi_agent: false } } : {}),
-    ...workspaceMcp.config
+    ...workspaceMcp.config,
+    ...(snapshotOnly ? snapshotQuestionCodexConfig : {})
   };
   return new Codex({
     ...(codexRuntimeDetection.peek()?.available ? { codexPathOverride: codexRuntimeDetection.peek()!.path } : {}),
-    ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+    ...(codexRuntimeConnection(settings).apiKey ? { apiKey: codexRuntimeConnection(settings).apiKey } : {}),
     ...(Object.keys(codexConfig).length ? { config: codexConfig } : {}),
     env: { ...envForCodex(settings, parentSession, disableNativeAgents, codexHomeOverride || CODEX_HOME), ...workspaceMcp.env }
   });
+}
+
+async function nativeCustomAgents(session: Session, workspace: Workspace) {
+  const codexHome = codexLinkRepository.findBySession(session.ownerUserId, session.id)?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId);
+  return loadCustomAgents({ projectRoot: workspace.root, userHome: os.homedir(), providerHomes: { codex: codexHome, claude: nativeProviderHome("claude", session.ownerUserId) } });
+}
+
+async function codexNativeLaunch(session: Session, workspace: Workspace, activeRun?: ActiveRun) {
+  const runtime = await detectCodexRuntime();
+  if (!runtime.available) throw new Error("Codex CLI 不可用");
+  const home = codexLinkRepository.findBySession(session.ownerUserId, session.id)?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId);
+  const mcp = codexMcpConfigForWorkspace(workspace, undefined, activeRun?.taskHistoryServers || []);
+  const native = session.nativeOptions || DEFAULT_NATIVE_OPTIONS;
+  const selected = native.customAgent ? (await nativeCustomAgents(session, workspace)).agents.find(a => a.provider === "codex" && a.name === native.customAgent) : undefined;
+  if (native.customAgent && !selected) throw new Error("所选原生 Agent 已不存在，请重新选择");
+  const configured = terminalMcpEnvironment({ ...codexProviderConfig(state.settings), ...mcp.config, model_reasoning_effort: state.settings.reasoningEffort, web_search: state.settings.webSearch,
+    ...(selected ? { agents: { [selected.name]: { description: selected.description || selected.displayName, config_file: selected.sourcePath } } } : {}) }, { ...envForCodex(state.settings, undefined, false, home), ...mcp.env });
+  const approvalPolicy = native.approvals === "ask" ? "untrusted" : state.settings.approvalPolicy;
+  const sandbox = native.mode === "plan" ? "read-only" : state.settings.sandboxMode;
+  return { executable: runtime.path, home, cwd: workspace.root, env: configured.env, args: codexTerminalConfigArgs(configured.config),
+    thread: { cwd: workspace.root, model: state.settings.model, approvalPolicy, sandbox, developerInstructions: selected ? `For the user's task, invoke the native subagent type ${selected.name} using its official agent definition. Keep the main agent responsible for the final result. Do not imitate the subagent's output.` : "" },
+    turn: { cwd: workspace.root, model: state.settings.model, effort: state.settings.reasoningEffort, collaborationMode: { mode: native.mode === "plan" ? "plan" : "default", settings: { model: state.settings.model, reasoning_effort: state.settings.reasoningEffort, developer_instructions: null } } },
+    onRequest: (prompt: Parameters<NativeInteractionBroker["request"]>[3], signal: AbortSignal) => nativeInteractions.request(session.id, session.ownerUserId, "codex", prompt, signal) };
 }
 
 function threadOptions(workspace: Workspace, settings: Settings): ThreadOptions {
@@ -2096,27 +2005,14 @@ function mainCodexThreadOptions(session: Session, workspace: Workspace, settings
 
 // Delegated workers run unattended. Their authorization is owned by the
 // workbench, so they must never inherit an interactive approval policy.
-function delegatedThreadOptions(workspace: Workspace, settings: Settings): ThreadOptions {
+function delegatedThreadOptions(workspace: Workspace, settings: Settings, mode: "analysis" | "review" | "implementation" = "implementation"): ThreadOptions {
   return {
     ...threadOptions(workspace, settings),
-    sandboxMode: "danger-full-access",
+    sandboxMode: mode === "implementation" ? "danger-full-access" : "read-only",
     approvalPolicy: "never"
   };
 }
 
-type AgentBridgeRequest = {
-  taskId?: string;
-  parentTaskId?: string;
-  nickname?: string;
-  cwd?: string;
-  prompt?: string;
-  acceptance?: string[];
-  mode?: DelegationMode;
-  depth?: number;
-  idempotencyKey?: string;
-  capabilityRequirements?: string[];
-  adapterOptions?: Record<string, unknown>;
-};
 
 type CodexBridgeRequest = AgentBridgeRequest;
 
@@ -2152,13 +2048,17 @@ const agentPublishTimers = new Map<string, NodeJS.Timeout>();
 const publishedAgentRevisions = new Map<string, number>();
 
 function emitAgentChanged(session: Session, agent: AgentThread) {
-  const key = `${session.id}:${agent.id}`;
+  const identityKey = agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+  const key = `${session.id}:${identityKey}`;
   const revision = Math.max(0, Number(agent.revision || 0));
   if ((publishedAgentRevisions.get(key) ?? -1) >= revision && agent.status === "running") return;
   publishedAgentRevisions.set(key, revision);
   eventHub.publish("agents.changed", {
     sessionId: session.id,
     agentId: agent.id,
+    identityKey,
+    identity: agent.identity,
+    providerId: agent.identity?.providerId || normalizedAgentProvider(agent.provider),
     revision,
     status: agent.status,
     logCount: agent.logCount ?? agent.logs.length
@@ -2166,7 +2066,8 @@ function emitAgentChanged(session: Session, agent: AgentThread) {
 }
 
 function publishAgentChanged(session: Session, agent: AgentThread, immediate = agent.status !== "running") {
-  const key = `${session.id}:${agent.id}`;
+  const identityKey = agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+  const key = `${session.id}:${identityKey}`;
   pendingAgentPublishes.set(key, { session, agent });
   if (immediate) {
     const timer = agentPublishTimers.get(key);
@@ -2199,13 +2100,25 @@ function clearAgentPublishState(sessionId?: string) {
   for (const key of publishedAgentRevisions.keys()) if (matches(key)) publishedAgentRevisions.delete(key);
 }
 type MainAgentRunner = (session: Session, workspace: Workspace, prompt: string, activeRun: ActiveRun) => Promise<TurnOutcome>;
-type WorkflowPlannerRunner = typeof runBuiltinWorkflowPlan;
-type WorkflowWorkerRunner = typeof runBuiltinWorkflowNode;
+
+
 const agentAdapterRegistry = new ProviderHostRegistry<MainAgentRunner, WorkflowPlannerRunner, WorkflowWorkerRunner>(BUILTIN_AGENT_DESCRIPTORS);
+const delegationExecution = createDelegationExecution({
+  getState: () => state,
+  isWorkbenchDelegationEnabled,
+  runtimeBindingForProvider,
+  agentAdapterRegistry,
+  saveState,
+  upsertDelegatedTask,
+  appendMessage,
+  activeDelegationTasks,
+  getExternalActiveCount: () => activeWorkflowNodes.size + activeWorkflowIntegrations.size
+});
+const delegationBroker = createDelegationBroker({ getState: () => state, agentAdapterRegistry, isWorkbenchDelegationEnabled, executionWorkspaceForSession, assertExecutionCwd, activeDelegationTasks, upsertDelegatedTask, saveState, launchDelegatedExecution });
+
 const acpSessionRuntimes = new Map<AgentProviderId, AcpMainSessionRuntime>();
 const MAX_DELEGATED_TASKS_PER_PARENT = 5;
 const MAX_DELEGATED_TASKS_GLOBAL = 20;
-const MAX_DELEGATED_RETRIES = 2;
 const OPEN_DELEGATED_STATUSES = new Set<DelegatedTask["status"]>(["queued", "running"]);
 const TERMINAL_DELEGATED_STATUSES = new Set<DelegatedTask["status"]>(["completed", "failed", "interrupted"]);
 
@@ -2261,13 +2174,6 @@ function stopReasonFor(activeRun: ActiveRun): Session["stopReason"] {
   return "unknown";
 }
 
-function delegationFingerprint(input: AgentBridgeRequest, provider: AgentProviderId, parentTaskId: string, cwd: string, prompt: string) {
-  const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map(String).map((item) => item.trim()).filter(Boolean) : [];
-  const mode = input.mode === "analysis" || input.mode === "review" || input.mode === "implementation"
-    ? input.mode
-    : provider === "claude" ? "analysis" : "implementation";
-  return crypto.createHash("sha256").update(JSON.stringify({ provider, parentTaskId, cwd: path.resolve(cwd), prompt, acceptance, mode })).digest("hex");
-}
 
 function bindActiveRunCancellation(activeRun: ActiveRun, session: Session) {
   activeRun.controller.signal.addEventListener("abort", () => {
@@ -2364,172 +2270,24 @@ async function hasActiveDelegatedTasksAfterGrace(parentTaskId: string, signal: A
   return false;
 }
 
-function delegatedErrorText(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isRetryableDelegatedError(error: unknown) {
-  const text = delegatedErrorText(error).toLowerCase();
-  return [
-    "fetch failed",
-    "econnreset",
-    "econnrefused",
-    "eai_again",
-    "etimedout",
-    "socket hang up",
-    "stream disconnected",
-    "connection reset",
-    "connection refused",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "rate limit",
-    "too many requests",
-    "concurrency limit"
-  ].some((marker) => text.includes(marker));
-}
-
-function retryDelayMs(retryCount: number) {
-  return Math.min(8_000, 1_000 * (2 ** Math.max(0, retryCount - 1)));
-}
-
-function delegatedRetryInput(task: DelegatedTask) {
-  return {
-    taskId: task.id,
-    parentTaskId: task.parentSessionId,
-    cwd: task.cwd,
-    prompt: task.task,
-    acceptance: task.acceptance,
-    nickname: task.nickname,
-    mode: task.mode,
-    idempotencyKey: task.idempotencyKey
-  } satisfies CodexBridgeRequest | ClaudeBridgeRequest;
-}
-
 function launchDelegatedExecution(task: DelegatedTask) {
-  void (async () => {
-    task.runtimeBinding = await runtimeBindingForProvider(task.provider);
-    task.updatedAt = new Date().toISOString();
-    await saveState();
-    const input = delegatedRetryInput(task);
-    await agentAdapterRegistry.execute({ schemaVersion: 3, providerId: task.provider, ...input });
-  })().catch((error) => handleDelegatedExecutionFailure(task.id, error));
-}
-
-async function handleDelegatedExecutionFailure(taskId: string, error: unknown) {
-  const task = state.delegatedTasks.find((item) => item.id === taskId);
-  if (!task) return;
-  if (OPEN_DELEGATED_STATUSES.has(task.status)) {
-    task.status = "failed";
-    task.lastError = delegatedErrorText(error);
-    task.updatedAt = new Date().toISOString();
-    task.completedAt = task.updatedAt;
-    await saveState().catch(() => undefined);
-  }
-  if (!TERMINAL_DELEGATED_STATUSES.has(task.status) || !isRetryableDelegatedError(error)) return;
-  const retryCount = task.retryCount || 0;
-  if (retryCount >= MAX_DELEGATED_RETRIES) return;
-  const retryNumber = retryCount + 1;
-  const now = new Date().toISOString();
-  const retryTaskId = `${task.id}:retry-${retryNumber}-${crypto.randomUUID().slice(0, 8)}`;
-  const retryTask: DelegatedTask = {
-    ...task,
-    id: retryTaskId,
-    status: "queued",
-    createdAt: now,
-    updatedAt: now,
-    completedAt: undefined,
-    reviewedAt: undefined,
-    finalText: undefined,
-    lastError: undefined,
-    retryCount: retryNumber,
-    retryOf: task.retryOf || task.id,
-    idempotencyKey: `${task.idempotencyKey || task.id}:retry-${retryNumber}`,
-    requestFingerprint: undefined
-  };
-  upsertDelegatedTask(retryTask);
-  const parentSession = state.sessions.find((session) => session.id === task.parentSessionId);
-  if (parentSession) {
-    appendMessage(parentSession, {
-      role: "event",
-      eventType: "subagent_retry",
-      eventPhase: "started",
-      text: `${task.nickname} 临时失败，正在进行第 ${retryNumber}/${MAX_DELEGATED_RETRIES} 次自动重试`,
-      payload: { type: "subagent_retry", taskId: retryTaskId, retryOf: task.id, retryNumber, maxRetries: MAX_DELEGATED_RETRIES, error: delegatedErrorText(error) }
-    });
-  }
-  await saveState().catch(() => undefined);
-  setTimeout(() => {
-    const current = state.delegatedTasks.find((item) => item.id === retryTaskId);
-    if (!current || current.status !== "queued") return;
-    launchDelegatedExecution(current);
-  }, retryDelayMs(retryNumber));
-}
-
-function queueDelegatedTask(input: AgentBridgeRequest, requestedProvider: AgentProviderId) {
-  const provider = normalizeProviderId(requestedProvider);
-  const descriptor = agentAdapterRegistry.requireDescriptor(provider);
-  if (!descriptor.capabilities.delegation.worker) throw new Error(`${descriptor.displayName} 不支持工作台委派`);
-  const capabilityRequirements = agentAdapterRegistry.requireCapabilities(provider, input.capabilityRequirements);
-  input = { ...input, capabilityRequirements };
-  const parentTaskId = String(input.parentTaskId || "").trim();
-  const parentSession = state.sessions.find((session) => session.id === parentTaskId);
-  if (!parentSession) throw new Error("委派的主任务不存在");
-  if (!isWorkbenchDelegationEnabled(parentSession)) throw new Error("当前任务未启用工作台委派 Skill，不能使用委派桥接");
-  const workspace = executionWorkspaceForSession(parentSession);
-  if (!workspace) throw new Error("主任务工作区不存在");
-  const prompt = String(input.prompt || "").trim();
-  if (!prompt) throw new Error("委派任务不能为空");
-  const cwd = assertExecutionCwd(workspace, String(input.cwd || workspace.root));
-  const fingerprint = delegationFingerprint(input, provider, parentTaskId, cwd, prompt);
-  const idempotencyKey = String(input.idempotencyKey || input.taskId || fingerprint).trim();
-  const existingIdempotent = state.delegatedTasks.find((task) => task.parentSessionId === parentTaskId && task.provider === provider && task.idempotencyKey === idempotencyKey);
-  if (existingIdempotent) {
-    if (delegationIdempotency(existingIdempotent.requestFingerprint, fingerprint).conflict) {
-      throw new Error(`幂等键 ${idempotencyKey} 已被不同的委派内容使用`);
-    }
-    return { ok: true, accepted: true, deduplicated: true, taskId: existingIdempotent.id, parentTaskId, status: existingIdempotent.status };
-  }
-  const taskId = String(input.taskId || `${provider}-worker-${fingerprint.slice(0, 16)}`).trim();
-  const existingTaskId = state.delegatedTasks.find((task) => task.id === taskId);
-  if (activeDelegationTasks.has(taskId) || existingTaskId) {
-    if (existingTaskId?.requestFingerprint === fingerprint) {
-      return { ok: true, accepted: true, deduplicated: true, taskId, parentTaskId, status: existingTaskId.status };
-    }
-    throw new Error(`子任务 ID ${taskId} 已被其他委派使用`);
-  }
-
-  const openTasks = state.delegatedTasks.filter((task) => OPEN_DELEGATED_STATUSES.has(task.status));
-  const parentOpenCount = openTasks.filter((task) => task.parentSessionId === parentTaskId).length;
-  if (parentOpenCount >= MAX_DELEGATED_TASKS_PER_PARENT) {
-    throw new Error(`当前主任务已达到子 Agent 并发上限（${MAX_DELEGATED_TASKS_PER_PARENT}）`);
-  }
-  if (openTasks.length >= MAX_DELEGATED_TASKS_GLOBAL) {
-    throw new Error(`工作台已达到全局子 Agent 并发上限（${MAX_DELEGATED_TASKS_GLOBAL}），请稍后重试`);
-  }
-
-  const now = new Date().toISOString();
-  const mode = input.mode === "analysis" || input.mode === "review" || input.mode === "implementation"
-    ? input.mode
-    : provider === "claude" ? "analysis" : "implementation";
-  upsertDelegatedTask({
-    id: taskId, parentSessionId: parentTaskId, provider, adapterId: descriptor.adapterId, mode,
-    nickname: String(input.nickname || `${descriptor.shortName} 子 Agent`),
-    cwd, task: prompt, status: "queued", updatedAt: now, usage: emptyUsage(),
-    idempotencyKey, requestFingerprint: fingerprint,
-    acceptance: Array.isArray(input.acceptance) ? input.acceptance.map(String).map((item) => item.trim()).filter(Boolean) : [],
-    retryCount: 0
+  const span = traceRecorder.start("delegation", "delegated-agent", {
+    traceId: task.traceId,
+    provider: task.selectedProvider || task.provider,
+    attributes: { taskId: task.id, parentSessionId: task.parentSessionId, mode: task.mode || "implementation" }
   });
-  void saveState().catch((error) => console.error("Delegated task admission save failed", error));
-  const task = state.delegatedTasks.find((item) => item.id === taskId);
-  if (task) launchDelegatedExecution(task);
-  return { ok: true, accepted: true, deduplicated: false, taskId, parentTaskId, status: "queued" as const };
+  void delegationExecution.launch(task).then(
+    () => { traceRecorder.finish(span.spanId, "ok"); },
+    (error) => { traceRecorder.finish(span.spanId, "error", error); console.error("Delegation execution failed", error); }
+  );
 }
+
+function queueDelegatedTask(input: AgentBridgeRequest, provider: AgentProviderId) { return delegationBroker.queue(input, provider); }
 
 async function runCodexBridgeTask(input: CodexBridgeRequest) {
   const parentTaskId = String(input.parentTaskId || "").trim();
   const parentSession = state.sessions.find((session) => session.id === parentTaskId);
-  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error("Codex 子任务的协作主任务不存在或未启用委派 Skill");
+  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error("Codex 子任务的协作主任务不存在或未启用协作插件");
   const workspace = executionWorkspaceForSession(parentSession);
   if (!workspace) throw new Error("主任务工作区不存在");
   const taskId = String(input.taskId || uid("codex-worker"));
@@ -2537,6 +2295,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
   if (!prompt) throw new Error("Codex 委派任务不能为空");
   const cwd = assertExecutionCwd(workspace, String(input.cwd || workspace.root));
   if (activeDelegationTasks.has(taskId)) throw new Error(`Codex 子任务 ${taskId} 已在运行`);
+  const mode = input.mode === "analysis" || input.mode === "review" ? input.mode : "implementation";
   const controller = new AbortController();
   activeDelegationTasks.set(taskId, { parentTaskId, providerId: "codex", controller });
   const persistedTask = state.delegatedTasks.find((item) => item.id === taskId);
@@ -2544,7 +2303,7 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     id: taskId,
     parentTaskId,
     parentThreadId: parentSession.engineSessionId || parentSession.id,
-    nickname: String(input.nickname || "Codex 执行官"),
+    nickname: String(input.nickname || (mode === "review" ? "Codex 审查官" : mode === "analysis" ? "Codex 分析官" : "Codex 执行官")),
     path: "Codex CLI · 独立线程",
     status: "running",
     updatedAt: new Date().toISOString(),
@@ -2552,20 +2311,23 @@ async function runCodexBridgeTask(input: CodexBridgeRequest) {
     usage: emptyUsage(),
     logs: [],
     task: prompt,
+    mode,
     cwd
   };
-  upsertCodexBridgeMessage(parentSession, agent);
-  await saveState();
   try {
+    upsertCodexBridgeMessage(parentSession, agent);
+    await saveState();
     const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [], nativeProviderHome("codex", parentSession.ownerUserId));
     const executionWorkspace = { ...workspace, root: cwd } satisfies Workspace;
-    const workerThreadOptions = delegatedThreadOptions(executionWorkspace, state.settings);
+    const workerThreadOptions = delegatedThreadOptions(executionWorkspace, state.settings, mode);
     const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map((item) => String(item).trim()).filter(Boolean) : [];
     const skillContext = delegatedSkillContextBlock(parentSession, "codex", cwd);
     const workerPrompt = [
       "你是 Meta Code 工作台中的 Codex 子 Agent。请处理下面明确委派的任务，不要擅自扩大范围、重新规划整个项目或调用其他 Agent。",
       `当前工作区根目录是：${cwd}。所有工作区产物都必须以此目录为根解析；不要把 Skill 指示库根目录当作工作区。`,
-      "直接在当前工作区检查、修改代码并运行必要的测试。完成后返回：修改摘要、测试结果、未完成事项和风险。",
+      mode === "implementation"
+        ? "直接在当前工作区检查、修改代码并运行必要的测试。完成后返回：修改摘要、测试结果、未完成事项和风险。"
+        : "本任务仅限分析或审查：不得修改任何文件，只能读取、分析和报告。完成后返回：结论、证据、未完成事项和风险。",
       skillContext,
       `具体任务：\n${prompt}`,
       acceptance.length ? `验收标准：\n${acceptance.map((item) => `- ${item}`).join("\n")}` : ""
@@ -2648,6 +2410,14 @@ function appendMessage(session: Session, message: Omit<Message, "id" | "createdA
   session.updatedAt = record.createdAt;
   session.revision += 1;
   return record;
+}
+
+function publishWorkflowResult(workflow: WorkflowRecord) {
+  if (publishTaskWorkflowResult(workflow, {
+    store: taskContextStore, sessionById,
+    executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+    appendMessage, onPublished: publishSessionChanged
+  })) scheduleStateSave();
 }
 
 const sessionMessageIndexes = new WeakMap<Session, { messages: Message[]; indexedLength: number; bySourceId: Map<string, Message> }>();
@@ -2805,10 +2575,12 @@ function codexAgentLogFromEvent(event: ThreadEvent, index: number, context?: { a
 
 function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor({ ...agent, provider: "codex" }, parentSession.id, "bridge");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "codex", nickname: agent.nickname,
-    cwd: agent.cwd, task: agent.task, status: agent.status, updatedAt: agent.updatedAt,
+    cwd: agent.cwd, task: agent.task, mode: agent.mode, status: agent.status, updatedAt: agent.updatedAt,
     usage: agent.usage, finalText: agent.finalText, agentRevision: agent.revision
   });
   const sourceId = `codex-worker:${agent.id}`;
@@ -2816,7 +2588,12 @@ function upsertCodexBridgeMessage(parentSession: Session, agent: CodexBridgeAgen
   const payload = {
     type: "codex_subagent",
     action: "spawn_agent",
+    mode: agent.mode,
     provider: "codex",
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -2890,9 +2667,9 @@ function claudeActivityMetadata(event: NormalizedEngineEvent): { category: strin
     : eventType === "todo_list" ? "todo"
     : ["engine_status", "session.started", "turn.started", "turn.completed"].includes(eventType) ? "status"
     : "tool";
-  const phase = event.type === "tool.completed" || event.type === "turn.completed" ? "completed"
+  const phase = event.phase || (event.type === "tool.completed" || event.type === "turn.completed" ? "completed"
     : event.type === "tool.started" || event.type === "turn.started" ? "running"
-    : "started";
+    : "started");
   return { category, phase };
 }
 
@@ -2944,21 +2721,36 @@ async function upsertNormalizedMessage(session: Session, event: NormalizedEngine
       ? {
           type: rawPayload.type, subtype: rawPayload.subtype, stop_reason: rawPayload.stop_reason,
           duration_ms: rawPayload.duration_ms, num_turns: rawPayload.num_turns, usage: rawPayload.usage,
+          origin: rawPayload.origin, queued_turn_count: rawPayload.queued_turn_count, result_index: rawPayload.result_index,
           modelUsage: rawPayload.modelUsage, is_error: rawPayload.is_error, workbench_compacted: true
         }
       : subagentToolEvent
         ? {
             type: "claude_native_subagent", provider: "claude", name: event.toolName,
             tool_use_id: rawPayload?.tool_use_id || rawPayload?.id,
-            input: rawPayload?.input, result: rawPayload?.content, workbench_compacted: true
+            agent_id: recordOf(rawPayload?.native_result)?.agentId,
+            input: rawPayload?.input || recordOf(event.detail)?.input,
+            nativeStatus: recordOf(rawPayload?.native_result)?.status,
+            result: rawPayload?.content, workbench_compacted: true
           }
       : ["tool.started", "tool.completed"].includes(event.type)
         ? { type: rawPayload?.type, name: rawPayload?.name, tool_use_id: rawPayload?.tool_use_id, workbench_compacted: true }
       : event.payload && JSON.stringify(event.payload).length > 64_000
         ? { type: rawPayload?.type, name: rawPayload?.name, tool_use_id: rawPayload?.tool_use_id, truncated: true, workbench_compacted: true }
         : event.payload;
-  const existing = messageBySourceId(session, sourceId);
+  const existing = messageBySourceId(session, sourceId)
+    || (subagentToolEvent ? session.messages.find((message) => {
+      const previous = recordOf(message.payload);
+      const toolId = rawPayload?.tool_use_id || rawPayload?.id;
+      const agentId = recordOf(rawPayload?.native_result)?.agentId;
+      return previous?.native === true && previous.provider === "claude"
+        && (Boolean(toolId && previous.tool_use_id === toolId) || Boolean(agentId && previous.agent_id === agentId));
+    }) : undefined);
   if (existing) {
+    // The transcript card owns native lifecycle. A late tool result must not
+    // replace it with a second launch card or discard its canonical identity.
+    if (subagentToolEvent && recordOf(existing.payload)?.native === true) return;
+
     if (existing.eventType === "user_question" && questionToolEvent && event.type === "tool.completed") {
       existing.role = "event";
       existing.eventPhase = "started";
@@ -3073,6 +2865,8 @@ function claudeAgentLogFromEvent(event: NormalizedEngineEvent, index: number, co
 
 function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor({ ...agent, provider: "claude" }, parentSession.id, "bridge");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   upsertDelegatedTask({
     id: agent.id, parentSessionId: agent.parentTaskId, provider: "claude", mode: agent.mode,
@@ -3085,6 +2879,10 @@ function upsertClaudeBridgeMessage(parentSession: Session, agent: ClaudeBridgeAg
     type: "claude_subagent",
     action: "spawn_agent",
     provider: "claude",
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -3128,7 +2926,7 @@ function assertExecutionCwd(workspace: Workspace, input: string) {
 async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
   const parentTaskId = String(input.parentTaskId || "").trim();
   const parentSession = state.sessions.find((session) => session.id === parentTaskId);
-  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error("Claude 子任务的协作主任务不存在或未启用委派 Skill");
+  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error("Claude 子任务的协作主任务不存在或未启用协作插件");
   if (Number(input.depth || 0) >= 1) throw new Error("Claude 子任务不允许递归委派 Claude");
   const prompt = String(input.prompt || "").trim();
   if (!prompt) throw new Error("Claude 子任务不能为空");
@@ -3157,9 +2955,9 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
     mode,
     cwd
   };
-  upsertClaudeBridgeMessage(parentSession, agent);
-  await saveState();
   try {
+    upsertClaudeBridgeMessage(parentSession, agent);
+    await saveState();
     const runtime = await getClaudeRuntime();
     if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
     const command = resolveClaudeCommand(runtime.path);
@@ -3186,11 +2984,13 @@ async function runClaudeBridgeTask(input: ClaudeBridgeRequest) {
       model: state.settings.claude.model,
       effort: state.settings.claude.effort,
       baseUrl: state.settings.claude.baseUrl,
-      apiKey: state.settings.claude.apiKey,
-      resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey }),
+      apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
+      resolveConnection: () => ({ model: state.settings.claude.model, effort: state.settings.claude.effort, baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind() }),
       configDir: nativeProviderHome("claude", parentSession.ownerUserId),
       mcpConfigPath,
-      permissionMode: "bypassPermissions",
+      permissionMode: mode === "implementation" ? "bypassPermissions" : "plan",
+      allowedTools: mode === "implementation" ? undefined : [...CLAUDE_WORKFLOW_READ_TOOLS],
+      disallowedTools: mode === "implementation" ? undefined : [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS],
       ownerId: taskId,
       signal: controller.signal,
       onEvent: async (event) => {
@@ -3372,6 +3172,7 @@ function prepareTurn(session: Session, input: PendingInput) {
         queuedAt: input.createdAt,
         skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
         skillNames: normalizeSkillNames(input.skillNames),
+        executionMode: input.executionMode,
       }
     });
   }
@@ -3425,11 +3226,12 @@ function executionModeFromPolicies(policies: SkillPolicies): ExecutionMode {
 }
 
 function normalizeExecutionMode(value: unknown, fallbackPolicies: SkillPolicies): ExecutionMode {
-  return value === "native" || value === "collaborative" ? value : executionModeFromPolicies(fallbackPolicies);
+  return resolveExecutionMode(value, fallbackPolicies);
 }
 
 function applyExecutionMode(policies: SkillPolicies, mode: ExecutionMode): SkillPolicies {
-  return { ...policies, [BUILTIN_DELEGATION_SKILL_NAME]: mode === "collaborative" ? "auto" : "off" };
+  void mode;
+  return withoutDelegationSkill(policies);
 }
 
 function defaultManagedSkillPolicies(): SkillPolicies {
@@ -3502,7 +3304,7 @@ async function applySkillDefaultToWorkspaces(skill: { name: string; builtIn: boo
 
 function projectedBaseSkillNames(policies: SkillPolicies) {
   return Object.entries(policies)
-    .filter(([, policy]) => policy === "auto" || policy === "always")
+    .filter(([name, policy]) => name !== BUILTIN_DELEGATION_SKILL_NAME && (policy === "auto" || policy === "always"))
     .map(([name]) => name);
 }
 
@@ -3702,14 +3504,6 @@ function promptWithAgents(text: string, requestedPolicies?: unknown, legacySkill
   ].filter(Boolean).join("\n\n");
 }
 
-const WORKBENCH_DELEGATION_CAPABILITIES = [
-  "委派协议不规定固定的规划官或执行官角色。当前主脑可以直接完成任务，也可以从工作台已注册的 AI CLI 中按 capability 选择一个或多个子 Agent。",
-  "Claude 子 Agent 通常更擅长复杂语义理解、歧义澄清、创意发散、长文内容、架构审查、质量评估和风险判断。",
-  "Codex 子 Agent 通常更擅长边界明确的编码、文件修改、命令执行、测试运行、仓库排查和重复性机械工作。",
-  "这些是能力倾向而非硬性分工。其他 Provider 必须依据注册能力选择，不要假设它具备写入、联网、MCP、恢复或分支能力。",
-  "不同 Agent 使用同一个本地工作区，但不会共享同一段隐式对话上下文。委派时需要把必要背景、目标文件、约束和验收标准写进任务文件。"
-];
-
 function registeredDelegationProviderBlock() {
   const providers = agentAdapterRegistry.list().filter((provider) => provider.capabilities.delegation.worker);
   if (!providers.length) return "当前没有注册可委派 Provider；不要尝试创建子 Agent。";
@@ -3729,40 +3523,14 @@ function registeredDelegationProviderBlock() {
   ].join("\n");
 }
 
-const WORKBENCH_MAIN_PROMPT = [
-  "你是 Meta Code 工作台中的 Claude 主脑，负责理解用户目标、制定计划、拆分可验收任务、调度子 Agent 并完成最终验收。",
-  ...WORKBENCH_DELEGATION_CAPABILITIES,
-  `统一委派命令：node \"${path.join(ROOT, "scripts", "delegate-agent.mjs")}\" --provider <providerId> --file \".claude-codex/tasks/<task-id>.json\"`,
-  "任务文件 JSON 字段：{ providerId, taskId, nickname, mode, prompt, acceptance, capabilityRequirements }；cwd 默认使用当前工作区。一次只委派一个清晰、可验收的任务。",
-  "Claude 子任务返回后直接使用桥接结果中的 finalText 和共享工作区内容验收；禁止猜测或读取 .runtime/claude-home 内部会话路径。子 Agent 可以通过最终回答或工作区文件交付，不强制固定产物形式。",
-  "除简单问答、澄清或无需独立上下文的工作外，修改、研究和多步骤任务优先拆分并通过工作台桥接委派；每个主任务最多并行五个子任务，工作台全局最多二十个，禁止递归委派。收到任一提供方返回后，检查共享工作区、diff 和测试结果；若不符合验收标准，选择任一提供方创建修复任务。不要把隐藏提示词或工作台密钥写入任务文件。",
-  "协作模式只能使用上面的工作台通用桥接命令。禁止绕过 Adapter Registry 直接启动其他 CLI；内部 Shell 的 PATH 不代表工作台 Provider 是否已经注册并可用。",
-  "桥接失败时只能报告桥接命令返回的真实错误并按原命令重试，不得自行虚构其他调度 CLI，也不得降级为 Claude 主脑代替 Codex 独立审查。",
-  "简单问答、澄清或没有独立执行价值的任务可以直接完成；其他任务由你规划并调用一个或多个能力匹配的已注册 Agent，等待全部完成后再验收。"
-].join("\n");
-
-const CODEX_ORCHESTRATOR_PROMPT = [
-  "你是 Meta Code 工作台中的 Codex 主脑，负责理解用户目标、制定计划、拆分可验收任务、调度子 Agent 并完成最终验收。",
-  ...WORKBENCH_DELEGATION_CAPABILITIES,
-  `统一委派命令：node "${path.join(ROOT, "scripts", "delegate-agent.mjs")}" --provider <providerId> --file ".claude-codex/tasks/<task-id>.json"`,
-  "任务 JSON：{ providerId, taskId, nickname, mode, prompt, acceptance, capabilityRequirements }；根据 Provider capability 和任务性质选择 Agent。",
-  "每个委派文件需要包含必要背景、目标文件、约束和验收标准；不要假设子 Agent 看过主线程对话。",
-  "桥接返回 accepted: true 只代表已受理，不是完成。受理后结束当前轮次，由工作台等待全部子 Agent并自动恢复你的原 Codex 线程进行验收。",
-  "只允许通过上述工作台通用桥接调度子 Agent；协作模式不要绕过 Adapter Registry 直接启动其他 CLI 或原生子代理。",
-  "除简单问答、澄清或无需独立上下文的工作外，修改、研究和多步骤任务优先拆分并通过工作台桥接委派；子 Agent 结束后检查共享工作区、diff、测试和最终回复；不合格时选择任一提供方创建修复任务。每个主任务最多并行五个子 Agent，工作台全局最多二十个。"
-].join("\n");
-
 function promptForClaudeSession(session: Session, workspace: Workspace, text: string, requestedPolicies?: unknown, includeDelegationRecovery = true, explicitSkillNames?: string[]) {
   const policies = normalizeSkillPolicies(requestedPolicies);
   const skillPrompt = promptWithAgents(text, policies, undefined, undefined, explicitSkillNames ?? activeRuns.get(session.id)?.skillNames, { engine: "claude", workspaceRoot: workspace.root });
   if (!isWorkbenchDelegationEnabled(session, policies)) return skillPrompt;
-  const delegationPolicy = policies[BUILTIN_DELEGATION_SKILL_NAME] === "always" ? "always" : "auto";
   const recovery = includeDelegationRecovery ? delegatedRecoveryBlock(session) : "";
-  const delegationInstruction = delegationPolicy === "always"
-    ? "当前工作区将通用委派协议设为“始终启用”：主脑可按任务特点和 capability 选择已注册 Agent；只有确有独立执行价值时才创建子任务，不要为简单问答机械委派。"
-    : "当前工作区将通用委派协议设为“自动”：按任务复杂度、能力匹配和验收成本判断是否委派，不需要子 Agent 的任务可直接完成。";
+  const delegationInstruction = "当前已启用协作插件：按任务复杂度、能力匹配和验收成本判断是否委派，不需要子 Agent 的任务可直接完成。";
   // Bridge commands are runtime controls: they must survive compaction and resume.
-  return [WORKBENCH_MAIN_PROMPT, registeredDelegationProviderBlock(), BUNDLED_PLANNER_SKILL, delegationInstruction, recovery, skillPrompt].filter(Boolean).join("\n\n");
+  return [collaborationMainPrompt("claude", path.join(ROOT, "scripts", "delegate-agent.mjs")), registeredDelegationProviderBlock(), COLLABORATION_PROTOCOL, delegationInstruction, recovery, skillPrompt].filter(Boolean).join("\n\n");
 }
 
 function promptForCodexSession(session: Session, workspace: Workspace, text: string, requestedPolicies?: unknown, includeDelegationRecovery = true, explicitSkillNames?: string[]) {
@@ -3770,20 +3538,15 @@ function promptForCodexSession(session: Session, workspace: Workspace, text: str
   const skillPrompt = promptWithAgents(text, policies, undefined, undefined, explicitSkillNames ?? activeRuns.get(session.id)?.skillNames, { engine: "codex", workspaceRoot: workspace.root });
   if (!isWorkbenchDelegationEnabled(session, policies)) return skillPrompt;
   const recovery = includeDelegationRecovery ? delegatedRecoveryBlock(session) : "";
-  return [CODEX_ORCHESTRATOR_PROMPT, registeredDelegationProviderBlock(), BUNDLED_PLANNER_SKILL, recovery, skillPrompt].filter(Boolean).join("\n\n");
+  return [collaborationMainPrompt("codex", path.join(ROOT, "scripts", "delegate-agent.mjs")), registeredDelegationProviderBlock(), COLLABORATION_PROTOCOL, recovery, skillPrompt].filter(Boolean).join("\n\n");
 }
 
 function promptForAcpSession(session: Session, workspace: Workspace, text: string, requestedPolicies?: unknown, explicitSkillNames?: string[]) {
   const policies = normalizeSkillPolicies(requestedPolicies);
   const skillPrompt = promptWithAgents(text, policies, undefined, undefined, explicitSkillNames ?? activeRuns.get(session.id)?.skillNames);
   if (!isWorkbenchDelegationEnabled(session, policies)) return skillPrompt;
-  const bridge = [
-    "你是工作台中的主 Agent。可以直接完成任务，也可以按已注册 Provider 的 capability 委派独立、可验收的子任务。",
-    ...WORKBENCH_DELEGATION_CAPABILITIES,
-    `统一委派命令：node "${path.join(ROOT, "scripts", "delegate-agent.mjs")}" --provider <providerId> --file ".claude-codex/tasks/<task-id>.json"`,
-    "只能使用工作台通用桥接进行委派；不要直接启动其他 Agent CLI，也不要假定它们具备未声明的能力。"
-  ].join("\n");
-  return [bridge, registeredDelegationProviderBlock(), BUNDLED_PLANNER_SKILL, delegatedRecoveryBlock(session), skillPrompt].filter(Boolean).join("\n\n");
+  const bridge = collaborationMainPrompt(session.engine, path.join(ROOT, "scripts", "delegate-agent.mjs"));
+  return [bridge, registeredDelegationProviderBlock(), COLLABORATION_PROTOCOL, delegatedRecoveryBlock(session), skillPrompt].filter(Boolean).join("\n\n");
 }
 
 function acpDelegatedAgentLog(providerId: AgentProviderId, event: NormalizedEngineEvent, index: number, context: { actorId: string; parentId: string; threadId?: string }): AgentLog {
@@ -3812,6 +3575,8 @@ function acpDelegatedAgentLog(providerId: AgentProviderId, event: NormalizedEngi
 
 function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentState) {
   const now = new Date().toISOString();
+  const identity = agent.identity || agentIdentityFor(agent, parentSession.id, "acp");
+  agent.identity = identity;
   if (agent.status !== "running") settleSupersededReasoning(agent.logs);
   const descriptor = agentAdapterRegistry.descriptor(agent.provider);
   upsertDelegatedTask({
@@ -3825,6 +3590,10 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
     type: "workbench_subagent",
     action: "spawn_agent",
     provider: agent.provider,
+    providerId: identity.providerId,
+    identity,
+    identityKey: identity.key,
+    identityAliases: agent.identityAliases,
     agent_id: agent.id,
     parent_task_id: agent.parentTaskId,
     parentThreadId: agent.parentThreadId,
@@ -3862,7 +3631,7 @@ function upsertAcpBridgeMessage(parentSession: Session, agent: AcpBridgeAgentSta
 async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpMainSessionRuntime, input: AgentBridgeRequest) {
   const parentTaskId = String(input.parentTaskId || "").trim();
   const parentSession = state.sessions.find((session) => session.id === parentTaskId);
-  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error(`${manifest.displayName} 子任务的协作主任务不存在或未启用委派 Skill`);
+  if (!parentSession || !isWorkbenchDelegationEnabled(parentSession)) throw new Error(`${manifest.displayName} 子任务的协作主任务不存在或未启用协作插件`);
   const workspace = executionWorkspaceForSession(parentSession);
   if (!workspace) throw new Error("主任务工作区不存在");
   const task = String(input.prompt || "").trim();
@@ -3874,8 +3643,6 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
   const controller = new AbortController();
   activeDelegationTasks.set(taskId, { parentTaskId, providerId: manifest.id, controller });
   const acceptance = Array.isArray(input.acceptance) ? input.acceptance.map(String).map((item) => item.trim()).filter(Boolean) : [];
-  const connectionProfile = providerConnectionFor(manifest.id, parentSession.ownerUserId);
-  const configValues = providerConnectionConfigValues(connectionProfile, recordOf(input.adapterOptions?.configValues) || undefined);
   const runtimeSessionId = `delegated:${taskId}`;
   const agent: AcpBridgeAgentState = {
     id: taskId,
@@ -3893,8 +3660,6 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
     mode,
     cwd
   };
-  upsertAcpBridgeMessage(parentSession, agent);
-  await saveState();
   const delegatedPrompt = [
     `你是 Meta Code 工作台中的独立 ${manifest.displayName} 子 Agent。只处理下面明确委派的任务，不要重新规划整个项目或继续委派其他 Agent。`,
     `当前工作区根目录是：${cwd}。所有读取、修改和命令都必须限制在此目录内。`,
@@ -3906,6 +3671,10 @@ async function runAcpBridgeTask(manifest: AgentProviderManifestV1, runtime: AcpM
   let eventIndex = 0;
   let finalText = "";
   try {
+    const connectionProfile = providerConnectionFor(manifest.id, parentSession.ownerUserId);
+    const configValues = providerConnectionConfigValues(connectionProfile, recordOf(input.adapterOptions?.configValues) || undefined);
+    upsertAcpBridgeMessage(parentSession, agent);
+    await saveState();
     await runtime.run({
       workbenchSessionId: runtimeSessionId,
       ownerUserId: parentSession.ownerUserId,
@@ -4095,11 +3864,12 @@ async function runCodexTurn(session: Session, workspace: Workspace, prompt: stri
     const capabilities = orchestrationCapabilities("codex", delegationEnabled);
     const binding = codexLinkRepository.findBySession(session.ownerUserId, session.id);
     if (binding?.accessMode === "resume") linkedRun = await codexLink.prepareLinkedRun(binding);
-    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
+    const codex = buildCodex(state.settings, session, !capabilities.nativeAgents, workspace, undefined, activeRun.taskHistoryServers || [], binding?.accessMode === "resume" ? OFFICIAL_CODEX_HOME : nativeProviderHome("codex", session.ownerUserId));
     const options = mainCodexThreadOptions(session, workspace, state.settings, activeRun.skillPolicies);
+    const nativeLaunch = !delegationEnabled && (session.nativeOptions || state.settings.approvalPolicy !== "never") ? await codexNativeLaunch(session, workspace, activeRun) : null;
     const fileBaseline = await createActivityTurnFileBaseline(workspace.root);
     const terminalState = await runCodexSessionTurn({
-      createThread: (threadId) => threadId ? codex.resumeThread(threadId, options) : codex.startThread(options),
+      createThread: (threadId) => nativeLaunch ? new CodexNativeSession(nativeLaunch, threadId) : threadId ? codex.resumeThread(threadId, options) : codex.startThread(options),
       threadId: session.codexThreadId,
       prompt: promptForCodexSession(session, workspace, prompt, activeRun.skillPolicies, activeRun.delegatedReviewTaskIds.size === 0),
       signal: controller.signal,
@@ -4216,15 +3986,28 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
       const runtime = await getClaudeRuntime();
       if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
       const command = resolveClaudeCommand(runtime.path);
-      const mcpConfigPath = await workspaceMcpConfigPath(workspace);
+      const mcpConfigPath = await workspaceMcpConfigPath(workspace, undefined, activeRun.taskHistoryServers);
       const delegationEnabled = isWorkbenchDelegationEnabled(session, activeRun.skillPolicies);
       const capabilities = orchestrationCapabilities("claude", delegationEnabled);
+      const native = delegationEnabled ? DEFAULT_NATIVE_OPTIONS : session.nativeOptions || DEFAULT_NATIVE_OPTIONS;
+      const selected = native.customAgent ? (await nativeCustomAgents(session, workspace)).agents.find(a => a.provider === "claude" && a.name === native.customAgent) : undefined;
+      if (native.customAgent && !selected) throw new Error("所选原生 Agent 已不存在，请重新选择");
       return new ClaudeSessionHandle({
         executable: command.executable, executableArgs: command.args, cwd: workspace.root,
         sessionId, model: state.settings.claude.model,
         effort: state.settings.claude.effort,
-        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey,
-        configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: state.settings.claude.permissionMode,
+        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, credentialKind: claudeCredentialKind(),
+        configDir: nativeProviderHome("claude", session.ownerUserId), mcpConfigPath, permissionMode: native.mode === "plan" ? "plan" : native.approvals === "ask" ? "default" : state.settings.claude.permissionMode,
+        forkSourceId: session.nativeForkSourceId,
+        // Let the official CLI load the original definition, including hooks,
+        // memory, skill preloads and disallowed tools. A reduced --agents object
+        // would override the file and silently remove those native capabilities.
+        ...(selected ? { agent: selected.name } : {}),
+        ...(!delegationEnabled ? { onPermission: async (prompt: Parameters<NativeInteractionBroker["request"]>[3], signal: AbortSignal) => {
+          const answer = await nativeInteractions.request(session.id, session.ownerUserId, "claude", prompt, signal);
+          if (prompt.title === "批准计划并继续执行" && answer.decision === "accept" && session.nativeOptions?.mode === "plan") { session.nativeOptions.mode = "execute"; await saveState(); }
+          return answer;
+        } } : {}),
         bridgeUrl: delegationEnabled ? CODEX_BRIDGE_URL : undefined,
         bridgeToken: delegationEnabled ? CODEX_BRIDGE_TOKEN : undefined,
         claudeWorkerBridgeUrl: delegationEnabled ? CLAUDE_WORKER_BRIDGE_URL : undefined,
@@ -4236,7 +4019,8 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
         ownerId: session.id,
         signal: activeRun.controller.signal,
         onEvent: async (event) => {
-          if (event.sessionId) session.engineSessionId = event.sessionId;
+          if (event.sessionId) { session.engineSessionId = event.sessionId; if (event.type === "session.started") delete session.nativeForkSourceId; }
+          if (!delegationEnabled && isClaudeQuestionTool(event.toolName)) { event.payload = { ...recordOf(event.payload), native_controlled: true }; }
           if (event.type === "error") session.lastError = event.text;
           if (event.usage) session.usage = addUsage(session.usage || emptyUsage(), event.usage);
           await upsertNormalizedMessage(session, event, workspace);
@@ -4251,6 +4035,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
       handle: activeRun.claudeProcess,
       sessionId: session.engineSessionId,
       prompt: promptForClaudeSession(session, workspace, prompt, activeRun.skillPolicies, activeRun.delegatedReviewTaskIds.size === 0),
+      inputOrigin: activeRun.inputOrigin,
       sendPrompt: true,
       recoveryAttempts: 2,
       mode: "normal",
@@ -4323,7 +4108,7 @@ async function runClaudeTurn(session: Session, workspace: Workspace, prompt: str
 
 async function runSessionLoop(session: Session, workspace: Workspace, initialPrompt: string, activeRun: ActiveRun) {
   const runtimeBinding = await runtimeBindingForProvider(session.engine);
-  if (session.runtimeBinding && session.runtimeBinding.capabilityFingerprint !== runtimeBinding.capabilityFingerprint && session.engineSessionId) {
+  if (session.runtimeBinding && session.runtimeBinding.capabilityFingerprint !== runtimeBinding.capabilityFingerprint && !canResumeNativeSession(session.runtimeBinding, runtimeBinding) && session.engineSessionId) {
     appendMessage(session, {
       role: "event",
       text: `${mainEngineName(session)} 运行时或能力已变化，旧上下文不能安全续接；本轮将建立新上下文并保留工作台历史`,
@@ -4398,6 +4183,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
           continue;
         }
         activeRun.delegatedReviewTaskIds = reviewTaskIds;
+        activeRun.inputOrigin = "auto-continuation";
         prompt = delegatedReviewPrompt(session, reviewTaskIds);
         await saveState();
         continue;
@@ -4420,6 +4206,7 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
       activeRun.claudeProcess = undefined;
     }
     prepareTurn(session, nextInput);
+    activeRun.inputOrigin = "human";
     appendMessage(session, {
       role: "event",
       text: nextInput.mode === "steer" ? "已应用引导消息" : "正在执行排队消息",
@@ -4436,7 +4223,9 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
     const previousDelegationEnabled = isWorkbenchDelegationEnabled(session, activeRun.skillPolicies);
     const previousProjection = projectedSkillSignature(activeRun.skillPolicies || {}, activeRun.skillNames);
     const nextSkillPolicies = normalizeSkillPolicies(nextInput.skillPolicies, nextInput.skillNames ?? nextInput.skillName, nextInput.agentMode);
-    const nextDelegationEnabled = isWorkbenchDelegationEnabled(session, nextSkillPolicies);
+    const nextExecutionMode = resolveTurnExecutionMode(nextInput.executionMode, nextSkillPolicies, workspaceAgentConfig(workspace).executionMode);
+    if (nextExecutionMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) throw new Error("协作插件已停用，请启用后继续排队任务");
+    const nextDelegationEnabled = pluginHost.isEnabled(COLLABORATION_PLUGIN_ID) && nextExecutionMode === "collaborative";
     const nextSkillNames = normalizeSkillNames(nextInput.skillNames);
     const nextProjection = projectedSkillSignature(nextSkillPolicies, nextSkillNames);
     if (session.engine === "claude" && (previousDelegationEnabled !== nextDelegationEnabled || previousProjection !== nextProjection)) {
@@ -4450,7 +4239,8 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
       workspace.root,
       projectedRunSkillNames(nextSkillPolicies, nextSkillNames)
     );
-    activeRun.skillPolicies = nextSkillPolicies;
+    activeRun.executionMode = nextExecutionMode;
+    activeRun.skillPolicies = withoutDelegationSkill(nextSkillPolicies);
     activeRun.skillNames = nextSkillNames;
     const nextPrompt = attachmentPrompt(nextInput.text, nextInput.attachments || []);
     prompt = session.engine === "claude" && outcome === "steered"
@@ -4460,11 +4250,19 @@ async function runSessionLoop(session: Session, workspace: Workspace, initialPro
   }
 }
 
-function launchSessionRun(session: Session, workspace: Workspace, prompt: string, skillPolicies?: SkillPolicies, skillNames?: string[]) {
+function launchSessionRun(session: Session, workspace: Workspace, prompt: string, skillPolicies?: SkillPolicies, skillNames?: string[], requestedExecutionMode?: ExecutionMode, inputOrigin: ClaudeInputOrigin = "auto-continuation") {
+  dispatchAgentHook({ kind: "session", event: "session.start", providerId: session.engine, sessionId: session.id, payload: { executionMode: requestedExecutionMode || workspaceAgentConfig(workspace).executionMode } });
+  const executionMode = resolveTurnExecutionMode(requestedExecutionMode, skillPolicies || {}, workspaceAgentConfig(workspace).executionMode);
   const recoveredTaskIds = new Set(pendingDelegatedTasks(session.id)
     .filter((task) => TERMINAL_DELEGATED_STATUSES.has(task.status))
     .map((task) => task.id));
-  const normalizedPolicies = normalizeSkillPolicies(skillPolicies);
+  if (executionMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) {
+    session.status = "paused";
+    session.lastError = "协作插件已停用，请启用后继续任务";
+    scheduleStateSave();
+    return;
+  }
+  const normalizedPolicies = withoutDelegationSkill(normalizeSkillPolicies(skillPolicies));
   syncWorkspaceSkillProjection(workspace, workspaceAgentConfig(workspace).skillPolicies);
   const releaseSkillProjection = skillProjectionManager.acquireTemporarySkills(
     workspace.id,
@@ -4475,16 +4273,40 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
     controller: new AbortController(),
     promise: Promise.resolve(),
     skillPolicies: normalizedPolicies,
+    executionMode,
+    inputOrigin,
     skillNames: normalizeSkillNames(skillNames),
     releaseSkillProjection,
     reviewedDelegatedTaskIds: new Set(state.delegatedTasks
       .filter((task) => task.parentSessionId === session.id && Boolean(task.reviewedAt))
       .map((task) => task.id)),
     delegatedReviewTaskIds: new Set(),
-    injectedDelegatedRecoveryTaskIds: isWorkbenchDelegationEnabled(session, skillPolicies) ? recoveredTaskIds : new Set()
+    injectedDelegatedRecoveryTaskIds: executionMode === "collaborative" ? recoveredTaskIds : new Set()
   };
   bindActiveRunCancellation(activeRun, session);
-  activeRun.promise = runSessionLoop(session, workspace, prompt, activeRun)
+  activeRuns.set(session.id, activeRun);
+  let executionLease: WorkspaceExecutionLease | undefined;
+  const lockRequest = { root: workspace.root, ownerId: `session:${session.id}`, label: session.title, access: "write" as const };
+  const immediateLease = workspaceExecutionCoordinator.tryAcquire(lockRequest);
+  if (!immediateLease) {
+    appendMessage(session, { role: "event", text: "等待当前项目的其他任务释放写入权限", eventType: "task.workspace.waiting" });
+    scheduleStateSave();
+  }
+  activeRun.promise = Promise.resolve(immediateLease || workspaceExecutionCoordinator.acquire(lockRequest, { signal: activeRun.controller.signal }))
+    .then(async (lease) => {
+      executionLease = lease;
+      if (activeRun.controller.signal.aborted) return;
+      const context = taskContextStore.forExecution({ kind: "session", id: session.id }, session.ownerUserId);
+      const storedHandoff = latestTaskHandoffForRoot(context, workspace.root);
+      const sourceWorkflow = storedHandoff?.source.kind === "workflow" ? workflowRepository.get(storedHandoff.source.id, session.ownerUserId) : null;
+      const handoff = sourceWorkflow && taskRootsEqual(sourceWorkflow.executionRoot || sourceWorkflow.workDirectory, workspace.root) ? refreshWorkflowTaskHandoff(sourceWorkflow, taskContextStore) : storedHandoff;
+      activeRun.taskHistoryServers = await prepareSessionTaskHistoryServers({ store: taskContextStore, sessionId: session.id, ownerUserId: session.ownerUserId,
+        executionRoot: workspace.root, handoff, runtimeDirectory: path.join(RUNTIME_DIR, "runtime"), command: process.execPath,
+        args: process.env.WORKBENCH_PACKAGED === "1" ? [path.join(ROOT, "dist-server", "tasks", "historyToolServer.js")]
+          : ["--import", pathToFileURL(path.join(ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href, path.join(ROOT, "server", "tasks", "historyToolServer.ts")] });
+      const executionPrompt = handoff?.source.kind === "workflow" ? `${renderTaskHandoff(handoff)}\n\n用户当前要求：\n${prompt}` : prompt;
+      await runSessionLoop(session, workspace, executionPrompt, activeRun);
+    })
     .catch(async (error) => {
       if (activeRun.controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -4493,17 +4315,22 @@ function launchSessionRun(session: Session, workspace: Workspace, prompt: string
       session.runFinishedAt = new Date().toISOString();
       session.updatedAt = session.runFinishedAt;
       appendMessage(session, { role: "error", text: message, eventType: "workbench.run.error" });
+      dispatchAgentHook({ kind: "session", event: "session.error", providerId: session.engine, sessionId: session.id, payload: { message } });
       await saveState().catch((saveError) => console.error("Unexpected run failure save failed", saveError));
     })
     .finally(async () => {
-      await settleDelegatedTasksAfterParentExit(session, activeRun);
-      activeRun.claudeProcess?.close();
-      terminateTrackedProcessTrees(session.id);
-      activeRun.releaseSkillProjection?.();
-      workspaceTreeIndex.invalidate(workspace.root);
-      if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
+      try { await settleDelegatedTasksAfterParentExit(session, activeRun); }
+      finally {
+        try { activeRun.claudeProcess?.close(); terminateTrackedProcessTrees(session.id); activeRun.releaseSkillProjection?.(); }
+        finally {
+          executionLease?.release();
+          nativeInteractions.cancel(session.id, session.ownerUserId);
+          workspaceTreeIndex.invalidate(workspace.root);
+          if (activeRuns.get(session.id) === activeRun) activeRuns.delete(session.id);
+          dispatchAgentHook({ kind: "session", event: "session.finish", providerId: session.engine, sessionId: session.id, payload: { status: session.status } });
+        }
+      }
     });
-  activeRuns.set(session.id, activeRun);
   return activeRun;
 }
 
@@ -4518,6 +4345,10 @@ async function waitForActiveRunRelease(sessionId: string, activeRun: ActiveRun, 
 }
 
 async function terminateSessionForDeletion(session: Session) {
+  nativeTerminals.stop(session.id, session.ownerUserId);
+  const terminalDeadline = Date.now() + 5000;
+  while (nativeTerminals.get(session.id, session.ownerUserId)?.status === "running" && Date.now() < terminalDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  if (nativeTerminals.get(session.id, session.ownerUserId)?.status === "running") throw new Error("原生终端仍在结束，请稍后重试");
   const activeRun = activeRuns.get(session.id);
   abortDelegatedTasksForParent(session.id);
   if (activeRun && !activeRun.controller.signal.aborted) {
@@ -4873,43 +4704,55 @@ function withCanonicalAgentActivity(log: AgentLog, options: {
   } satisfies AgentLog;
 }
 
+type CodexTranscriptState = {
+  meta: Record<string, unknown>;
+  status: AgentThread["status"];
+  usage: Usage;
+  updatedAt: string;
+  logCount: number;
+  logs: Array<{ log: AgentLog; rawType: string }>;
+};
+
+const codexTranscriptReader = new IncrementalJsonl<CodexTranscriptState>(
+  () => ({ meta: {}, status: "interrupted", usage: emptyUsage(), updatedAt: "", logCount: 0, logs: [] }),
+  (state, record, index) => {
+    if (record.type === "session_meta") state.meta = recordOf(record.payload) || {};
+    if (typeof record.timestamp === "string" && record.timestamp > state.updatedAt) state.updatedAt = record.timestamp;
+    const payload = recordOf(record.payload);
+    const payloadType = String(payload?.type || "");
+    if (payloadType === "task_started") state.status = "running";
+    if (payloadType === "task_complete") state.status = "completed";
+    if (payloadType.includes("error") || payloadType.includes("failed")) state.status = "failed";
+    if (payloadType === "token_count") {
+      const total = recordOf(recordOf(payload?.info)?.total_token_usage);
+      if (total) state.usage = { input_tokens: Number(total.input_tokens || 0), cached_input_tokens: Number(total.cached_input_tokens || 0), output_tokens: Number(total.output_tokens || 0), reasoning_output_tokens: Number(total.reasoning_output_tokens || 0) };
+    }
+    const log = agentLogFromRecord(record, index);
+    if (!log) return;
+    state.logCount += 1;
+    trimAgentLogs([log]);
+    state.logs.push({ log, rawType: `${String(record.type || "unknown")}.${payloadType || "unknown"}` });
+    if (state.logs.length > MAX_STORED_AGENT_LOGS) state.logs.splice(0, state.logs.length - MAX_STORED_AGENT_LOGS);
+  }
+);
+
 async function codexAgentThreadFromTranscript(descriptor: AgentTranscriptDescriptor): Promise<AgentThread | null> {
   const cached = codexAgentThreadFileCache.get(descriptor.file);
   if (cached && cached.mtimeMs === descriptor.mtimeMs && cached.size === descriptor.size) return cached.agent;
-  let records: Record<string, unknown>[];
-  try {
-    records = (await fsp.readFile(descriptor.file, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
-  } catch { return cached?.agent || null; }
-  const meta = recordOf(records.find((record) => record.type === "session_meta")?.payload);
-  const spawn = recordOf(recordOf(recordOf(meta?.source)?.subagent)?.thread_spawn);
-  let status: AgentThread["status"] = "interrupted";
-  let usage = emptyUsage();
-  let updatedAt = typeof meta?.timestamp === "string" ? meta.timestamp : new Date(descriptor.mtimeMs).toISOString();
-  const logs: AgentLog[] = [];
-  records.forEach((record, index) => {
-    if (typeof record.timestamp === "string") updatedAt = record.timestamp;
-    const payload = recordOf(record.payload);
-    const payloadType = String(payload?.type || "");
-    if (payloadType === "task_started") status = "running";
-    if (payloadType === "task_complete") status = "completed";
-    if (payloadType.includes("error") || payloadType.includes("failed")) status = "failed";
-    if (payloadType === "token_count") {
-      const total = recordOf(recordOf(payload?.info)?.total_token_usage);
-      if (total) usage = { input_tokens: Number(total.input_tokens || 0), cached_input_tokens: Number(total.cached_input_tokens || 0), output_tokens: Number(total.output_tokens || 0), reasoning_output_tokens: Number(total.reasoning_output_tokens || 0) };
-    }
-    const log = agentLogFromRecord(record, index);
-    if (log) logs.push(withCanonicalAgentActivity(log, {
-      provider: "codex",
-      actorId: descriptor.threadId,
-      parentId: descriptor.parentThreadId,
-      rawType: `${String(record.type || "unknown")}.${payloadType || "unknown"}`,
-      scope: { threadId: descriptor.threadId }
-    }));
-  });
+  let transcript: CodexTranscriptState;
+  try { transcript = await codexTranscriptReader.read(descriptor.file); }
+  catch { return cached?.agent || null; }
+  const { meta, status, usage, logCount } = transcript;
+  const spawn = recordOf(recordOf(recordOf(meta.source)?.subagent)?.thread_spawn);
+  const logs = transcript.logs.map(({ log, rawType }) => withCanonicalAgentActivity(log, {
+    provider: "codex", actorId: descriptor.threadId, parentId: descriptor.parentThreadId,
+    rawType, scope: { threadId: descriptor.threadId }
+  }));
   const agent: AgentThread = {
     id: descriptor.threadId, parentThreadId: descriptor.parentThreadId,
-    nickname: String(meta?.agent_nickname || spawn?.agent_nickname || "子 Agent"), path: String(meta?.agent_path || spawn?.agent_path || ""),
-    status, updatedAt, revision: Math.max(0, Math.floor(descriptor.mtimeMs)), usage, logs: newestAgentLogs(logs), logCount: logs.length, provider: "codex"
+    nickname: String(meta.agent_nickname || spawn?.agent_nickname || "子 Agent"), path: String(meta.agent_path || spawn?.agent_path || ""),
+    status, updatedAt: transcript.updatedAt || new Date(descriptor.mtimeMs).toISOString(),
+    revision: Math.max(0, Math.floor(descriptor.mtimeMs)), usage, logs: newestAgentLogs(logs), logCount, provider: "codex"
   };
   codexAgentThreadFileCache.set(descriptor.file, { mtimeMs: descriptor.mtimeMs, size: descriptor.size, agent });
   return agent;
@@ -4969,6 +4812,56 @@ async function claudeSubagentRoots(parentSessionId: string) {
   }
 }
 
+type ClaudeTranscriptState = {
+  recordCount: number;
+  agentId: string;
+  toolUseId?: string;
+  task: string;
+  updatedAt: string;
+  completed: boolean;
+  failed: boolean;
+  usage: Usage;
+  logCount: number;
+  logs: Map<string, AgentLog>;
+};
+
+const claudeTranscriptReader = new IncrementalJsonl<ClaudeTranscriptState>(
+  () => ({ recordCount: 0, agentId: "", task: "", updatedAt: "", completed: false, failed: false, usage: emptyUsage(), logCount: 0, logs: new Map() }),
+  (state, record, recordIndex) => {
+    state.recordCount += 1;
+    if (!state.agentId && typeof record.agentId === "string") state.agentId = record.agentId;
+    if (!state.toolUseId) state.toolUseId = String(record.parentToolUseID || record.parentToolUseId || "") || undefined;
+    if (typeof record.timestamp === "string" && record.timestamp > state.updatedAt) state.updatedAt = record.timestamp;
+    const message = recordOf(record.message);
+    const terminalState = claudeTranscriptTerminalState(record);
+    if (terminalState === "completed") state.completed = true;
+    if (terminalState === "failed") state.failed = true;
+    if (/error|failed/i.test(String(record.type || "")) && record.isSidechain === true) state.failed = true;
+    if (!state.task && record.type === "user") state.task = typeof message?.content === "string" ? message.content : textContent(message?.content);
+    const source = recordOf(message?.usage);
+    if (source) state.usage = addUsage(state.usage, {
+      input_tokens: Number(source.input_tokens || 0),
+      cached_input_tokens: Number(source.cache_read_input_tokens || source.cached_input_tokens || 0),
+      output_tokens: Number(source.output_tokens || 0), reasoning_output_tokens: 0
+    });
+    for (const log of claudeNativeAgentLog(record, recordIndex)) {
+      const previous = state.logs.get(log.id);
+      const completedTool = previous?.kind === "tool" && ["result", "error"].includes(log.kind);
+      const merged = completedTool ? {
+        ...previous, ...log,
+        title: log.kind === "error" ? `${previous.title}失败` : `${previous.title}完成`,
+        category: log.kind === "error" ? "error" : previous.category,
+        detail: { ...(recordOf(previous.detail) || {}), ...(recordOf(log.detail) || {}) }
+      } satisfies AgentLog : log;
+      if (!previous) state.logCount += 1;
+      trimAgentLogs([merged]);
+      state.logs.delete(log.id);
+      state.logs.set(log.id, merged);
+      while (state.logs.size > MAX_STORED_AGENT_LOGS) state.logs.delete(state.logs.keys().next().value!);
+    }
+  }
+);
+
 async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRunning: boolean): Promise<AgentThread[]> {
   if (!parentSessionId) return [];
   const roots = await claudeSubagentRoots(parentSessionId);
@@ -4976,92 +4869,37 @@ async function listClaudeNativeAgentThreads(parentSessionId: string, parentIsRun
   const agents: AgentThread[] = [];
   for (const file of files) {
     let fileStat: fs.Stats;
-    try {
-      fileStat = await fsp.stat(file);
-    } catch {
-      continue;
-    }
+    try { fileStat = await fsp.stat(file); } catch { continue; }
     const cached = claudeAgentThreadFileCache.get(file);
     if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
       agents.push({
         ...cached.agent,
         status: cached.agent.status === "completed" || cached.agent.status === "failed"
-          ? cached.agent.status
-          : parentIsRunning ? "running" : "interrupted"
+          ? cached.agent.status : parentIsRunning ? "running" : "interrupted"
       });
       continue;
     }
-    let records: Record<string, unknown>[];
-    try {
-      records = (await fsp.readFile(file, "utf8")).split(/\r?\n/).flatMap((line) => {
-        if (!line.trim()) return [];
-        try { return [JSON.parse(line) as Record<string, unknown>]; }
-        catch { return []; }
-      });
-    } catch {
-      continue;
-    }
-    if (!records.length) continue;
+    let transcript: ClaudeTranscriptState;
+    try { transcript = await claudeTranscriptReader.read(file); } catch { continue; }
+    if (!transcript.recordCount) continue;
     let metadata: Record<string, unknown> = {};
     try { metadata = JSON.parse(await fsp.readFile(file.replace(/\.jsonl$/i, ".meta.json"), "utf8")) as Record<string, unknown>; } catch { /* Metadata is optional. */ }
-    const agentId = String(records.find((record) => typeof record.agentId === "string")?.agentId || path.basename(file, ".jsonl").replace(/^agent-/, ""));
-    const logsById = new Map<string, AgentLog>();
-    records.forEach((record, recordIndex) => {
-      for (const log of claudeNativeAgentLog(record, recordIndex)) {
-        const previous = logsById.get(log.id);
-        const completedTool = previous?.kind === "tool" && ["result", "error"].includes(log.kind);
-        const merged = completedTool ? {
-          ...previous,
-          ...log,
-          title: log.kind === "error" ? `${previous.title}失败` : `${previous.title}完成`,
-          category: log.kind === "error" ? "error" : previous.category,
-          detail: { ...(recordOf(previous.detail) || {}), ...(recordOf(log.detail) || {}) }
-        } satisfies AgentLog : log;
-        const message = recordOf(record.message);
-        logsById.set(log.id, withCanonicalAgentActivity(merged, {
-          provider: "claude",
-          actorId: agentId,
-          parentId: parentSessionId,
-          rawType: `${String(record.type || "unknown")}.${String(message?.role || record.type || "unknown")}`,
-          scope: { sessionId: parentSessionId, threadId: agentId }
-        }));
-      }
-    });
-    const logs = [...logsById.values()];
-    const updatedAt = records.map((record) => typeof record.timestamp === "string" ? record.timestamp : "").filter(Boolean).sort().at(-1) || fileStat.mtime.toISOString();
-    const terminal = [...records].reverse().find((record) => record.type === "assistant");
-    const terminalMessage = recordOf(terminal?.message);
-    const failed = records.some((record) => /error|failed/i.test(String(record.type || "")) && record.isSidechain === true);
-    const completed = terminalMessage?.stop_reason === "end_turn";
-    const status: AgentThread["status"] = failed ? "failed" : completed ? "completed" : parentIsRunning ? "running" : "interrupted";
+    const agentId = transcript.agentId || path.basename(file, ".jsonl").replace(/^agent-/, "");
+    const logs = [...transcript.logs.values()].map((log) => withCanonicalAgentActivity(log, {
+      provider: "claude", actorId: agentId, parentId: parentSessionId,
+      rawType: `transcript.${log.kind}`, scope: { sessionId: parentSessionId, threadId: agentId }
+    }));
+    const status: AgentThread["status"] = transcript.failed ? "failed" : transcript.completed ? "completed" : parentIsRunning ? "running" : "interrupted";
     if (status !== "running") settleSupersededReasoning(logs);
-    const taskRecord = records.find((record) => record.type === "user");
-    const taskMessage = recordOf(taskRecord?.message);
-    const task = typeof taskMessage?.content === "string" ? taskMessage.content : textContent(taskMessage?.content);
-    let usage = emptyUsage();
-    for (const record of records) {
-      const message = recordOf(record.message);
-      const source = recordOf(message?.usage);
-      if (!source) continue;
-      usage = addUsage(usage, {
-        input_tokens: Number(source.input_tokens || 0),
-        cached_input_tokens: Number(source.cache_read_input_tokens || source.cached_input_tokens || 0),
-        output_tokens: Number(source.output_tokens || 0),
-        reasoning_output_tokens: 0
-      });
-    }
     const agent: AgentThread = {
       id: agentId,
+      toolUseId: String(metadata.toolUseId || metadata.tool_use_id || metadata.parentToolUseId || transcript.toolUseId || "") || undefined,
       parentThreadId: parentSessionId,
       nickname: String(metadata.description || metadata.agentType || `Claude Agent ${agents.length + 1}`),
-      path: String(metadata.agentType || "Claude CLI · 原生 Agent"),
-      status,
-      updatedAt,
-      revision: Math.max(0, Math.floor(fileStat.mtimeMs)),
-      usage,
-      logs: newestAgentLogs(logs),
-      provider: "claude",
-      task
+      path: String(metadata.agentType || (file.includes(`${path.sep}workflows${path.sep}`) ? "Claude CLI · 原生 Workflow" : "Claude CLI · 原生 Agent")),
+      status, updatedAt: transcript.updatedAt || fileStat.mtime.toISOString(),
+      revision: Math.max(0, Math.floor(fileStat.mtimeMs)), usage: transcript.usage,
+      logs: newestAgentLogs(logs), logCount: transcript.logCount, provider: "claude", task: transcript.task
     };
     claudeAgentThreadFileCache.set(file, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, agent });
     agents.push(agent);
@@ -5118,11 +4956,21 @@ function listManagedAgentThreads(session: Session): AgentThread[] {
   return session.messages.filter((message) => message.eventType === "subagent" && !isNativeAgentProjection(message.payload)).map((message, index): AgentThread => {
     const payload = message.payload as Record<string, any> | undefined;
     if (payload && (payload.action === "spawn_agent" || String(payload.type || "").endsWith("_subagent"))) {
-      const provider = String(payload.provider || (payload.type === "codex_subagent" ? "codex" : "claude")).trim().toLowerCase();
+      const provider = normalizedAgentProvider(payload.provider || (payload.type === "codex_subagent" ? "codex" : payload.type === "claude_subagent" ? "claude" : "unknown"));
       const providerName = providerDisplayName(provider);
+      const id = String(payload.agent_id || message.sourceId || message.id);
+      const toolUseId = typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined;
+      const logs = Array.isArray(payload.logs) ? newestAgentLogs(payload.logs) : [];
+      const payloadIdentity = recordOf(payload.identity);
+      const identityAliases = [...new Set([
+        typeof payload.identityKey === "string" ? payload.identityKey : "",
+        typeof payloadIdentity?.key === "string" ? payloadIdentity.key : "",
+        ...(Array.isArray(payload.identityAliases) ? payload.identityAliases.filter((item: unknown): item is string => typeof item === "string") : []),
+        agentIdentityKey(provider, id, toolUseId)
+      ].filter(Boolean))];
       return {
-        id: String(payload.agent_id || message.sourceId || message.id),
-        toolUseId: typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined,
+        id,
+        toolUseId,
         parentThreadId: String(payload.parentThreadId || session.engineSessionId || session.id),
         nickname: String(payload.nickname || `${providerName} Agent ${index + 1}`),
         path: String(payload.path || `${providerName} CLI · 独立上下文`),
@@ -5133,40 +4981,87 @@ function listManagedAgentThreads(session: Session): AgentThread[] {
         updatedAt: String(payload.updatedAt || message.createdAt),
         revision: Math.max(0, Number(payload.revision || 0)),
         usage: payload.usage || emptyUsage(),
-        logs: Array.isArray(payload.logs) ? newestAgentLogs(payload.logs) : [],
+        logs,
+        logCount: Number.isFinite(Number(payload.logCount)) ? Number(payload.logCount) : logs.length,
         provider,
         mode: (["analysis", "review", "implementation"].includes(payload.mode) ? payload.mode : undefined) as AgentThread["mode"],
-        task: String(payload.task || "")
+        task: String(payload.task || ""),
+        identityAliases
       };
     }
+    const id = message.sourceId || message.id;
+    const logs = [{ id: message.id, createdAt: message.createdAt, kind: "tool", title: payload?.name || "Agent", text: message.text, payload: message.payload } satisfies AgentLog];
     return {
-      id: message.sourceId || message.id,
+      id,
       toolUseId: typeof payload?.tool_use_id === "string" ? payload.tool_use_id : undefined,
       parentThreadId: session.engineSessionId || session.id,
       nickname: payload?.input?.description || payload?.name || `Claude Agent ${index + 1}`,
       path: "Claude CLI",
+      provider: "claude",
       status: message.eventPhase === "completed" ? "completed" : session.status === "running" ? "running" : "interrupted",
       updatedAt: message.createdAt,
       usage: emptyUsage(),
-      logs: [{ id: message.id, createdAt: message.createdAt, kind: "tool", title: payload?.name || "Agent", text: message.text, payload: message.payload }]
+      logs,
+      logCount: logs.length,
+      identityAliases: [agentIdentityKey("claude", id, typeof payload?.tool_use_id === "string" ? payload.tool_use_id : undefined)]
     };
-  }).filter((agent) => !seen.has(agent.id) && Boolean(seen.add(agent.id)))
+  }).map((agent) => ({
+    ...agent,
+    identity: agent.identity || agentIdentityFor(agent, session.id, "bridge")
+  })).filter((agent) => {
+    const key = agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId);
+    return !seen.has(key) && Boolean(seen.add(key));
+  })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function mergeAgentThreads(...groups: AgentThread[][]) {
   const byId = new Map<string, AgentThread>();
+  const aliasToIdentity = new Map<string, string>();
   for (const group of groups) {
     for (const agent of group) {
-      const identity = agent.toolUseId ? `tool:${agent.toolUseId}` : `agent:${agent.id}`;
+      const provider = normalizedAgentProvider(agent.provider || agent.identity?.providerId);
+      const aliases = [
+        ...(agent.identityAliases || []),
+        ...(agent.identity?.key ? [agent.identity.key] : []),
+        agentIdentityKey(provider, agent.id, agent.toolUseId)
+      ];
+      // Provider is always part of the key. Native and bridge projections can
+      // merge only through an explicit alias/tool-use id; a Claude id can never
+      // overwrite a Codex projection with the same raw id.
+      const identity = aliases
+        .filter((alias) => alias.startsWith(`${provider}:`))
+        .map((alias) => aliasToIdentity.get(alias))
+        .find(Boolean)
+        || aliases.find((value) => value.startsWith(`${provider}:`))
+        || aliases[0];
       const existing = byId.get(identity);
       if (!existing) {
-        byId.set(identity, agent);
+        byId.set(identity, {
+          ...agent,
+          provider,
+          identity: agentIdentityFor({ ...agent, provider, identityAliases: aliases }, agent.parentThreadId, sourceKindForAgent(agent)),
+          identityAliases: aliases
+        });
+        for (const alias of aliases) aliasToIdentity.set(alias, identity);
         continue;
       }
-      const logs = [...existing.logs, ...agent.logs]
-        .reduce<AgentLog[]>((unique, log) => unique.some((item) => item.id === log.id) ? unique : [...unique, log], [])
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const logsById = new Map<string, AgentLog>();
+      for (const log of [...existing.logs, ...agent.logs]) {
+        const previous = logsById.get(log.id);
+        if (!previous) {
+          logsById.set(log.id, log);
+          continue;
+        }
+        const previousTerminal = previous.phase === "completed" || previous.phase === "failed" || previous.kind === "result" || previous.kind === "error";
+        const nextTerminal = log.phase === "completed" || log.phase === "failed" || log.kind === "result" || log.kind === "error";
+        if (log.createdAt >= previous.createdAt || (nextTerminal && !previousTerminal)) logsById.set(log.id, log);
+      }
+      const logs = [...logsById.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const mergedProvider = normalizedAgentProvider(existing.provider || agent.provider);
+      const latest = (agent.revision || 0) > (existing.revision || 0)
+        || ((agent.revision || 0) === (existing.revision || 0) && agent.updatedAt > existing.updatedAt) ? agent : existing;
+      const mergedAliases = [...new Set([...(existing.identityAliases || []), ...(agent.identityAliases || []), identity])];
       byId.set(identity, {
         ...existing,
         ...agent,
@@ -5176,13 +5071,16 @@ function mergeAgentThreads(...groups: AgentThread[][]) {
         id: existing.id,
         nickname: existing.nickname || agent.nickname,
         path: existing.path || agent.path,
-        provider: existing.provider || agent.provider,
+        provider: mergedProvider,
         task: existing.task || agent.task,
         toolUseId: existing.toolUseId || agent.toolUseId,
-        updatedAt: existing.updatedAt > agent.updatedAt ? existing.updatedAt : agent.updatedAt,
+        updatedAt: latest.updatedAt,
         revision: Math.max(existing.revision || 0, agent.revision || 0),
         status: mergeAgentRuntimeStatus(existing.status, agent.status),
         logs: logs.slice(0, MAX_VISIBLE_AGENT_LOGS),
+        logCount: Math.max(existing.logCount || existing.logs.length, agent.logCount || agent.logs.length, logs.length),
+        identity: agentIdentityFor({ ...existing, ...agent, provider: mergedProvider, identityAliases: mergedAliases }, existing.parentThreadId, existing.identity?.sourceKind || agent.identity?.sourceKind || sourceKindForAgent(existing)),
+        identityAliases: mergedAliases,
         usage: {
           input_tokens: Math.max(existing.usage.input_tokens, agent.usage.input_tokens),
           cached_input_tokens: Math.max(existing.usage.cached_input_tokens, agent.usage.cached_input_tokens),
@@ -5190,6 +5088,7 @@ function mergeAgentThreads(...groups: AgentThread[][]) {
           reasoning_output_tokens: Math.max(existing.usage.reasoning_output_tokens, agent.usage.reasoning_output_tokens)
         }
       });
+      for (const alias of mergedAliases) aliasToIdentity.set(alias, identity);
     }
   }
   return [...byId.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -5216,7 +5115,9 @@ function listPersistedDelegatedAgentThreads(session: Session): AgentThread[] {
       })] : [],
       provider: task.provider,
       mode: task.mode,
-      task: task.task
+      task: task.task,
+      identityAliases: [agentIdentityKey(task.provider, task.id)],
+      identity: agentIdentityFor({ id: task.id, provider: task.provider, parentThreadId: session.engineSessionId || session.id }, session.id, "bridge")
     }));
 }
 
@@ -5234,29 +5135,82 @@ async function listCodexAgentThreadDetails(parentThreadId: string, parentIsRunni
 }
 
 async function listSessionAgentThreads(session: Session, agentId?: string): Promise<AgentThread[]> {
-  const managed = listManagedAgentThreads(session);
-  const persisted = listPersistedDelegatedAgentThreads(session);
+  const managed = listManagedAgentThreads(session).map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "bridge"),
+    identityAliases: [...new Set([...(agent.identityAliases || []), agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)])]
+  }));
+  const persisted = listPersistedDelegatedAgentThreads(session).map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "bridge")
+  }));
   const native = session.engine === "codex"
     ? agentId
       ? await listCodexAgentThreadDetails(session.codexThreadId || "", session.status === "running", agentId)
       : await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
     : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
+  const nativeWithIdentity = native.map((agent) => ({
+    ...agent,
+    identity: agentIdentityFor(agent, session.id, "native"),
+    identityAliases: [...new Set([...(agent.identityAliases || []), agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)])]
+  }));
   // Detail reads are side-effect free. Project native lifecycle cards only while
   // reconciling the session-wide summary, otherwise summary/detail timestamps can
   // alternate and create a self-sustaining refresh loop.
-  if (!agentId) syncNativeAgentMessages(session, native);
-  const merged = mergeAgentThreads(native, managed, persisted);
+  const merged = mergeAgentThreads(nativeWithIdentity, managed, persisted).map((agent) => ({
+    ...agent,
+    identity: {
+      ...(agent.identity || agentIdentityFor(agent, session.id, sourceKindForAgent(agent))),
+      parentSessionId: session.id,
+      providerId: normalizedAgentProvider(agent.provider || agent.identity?.providerId),
+      key: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId)
+    },
+    identityAliases: agent.identityAliases || []
+  }));
   return agentId ? merged.filter((agent) => agent.id === agentId) : merged;
+}
+
+/**
+ * Native transcript projection is kept out of GET handlers. This reconciler is
+ * scoped to active sessions so opening the drawer remains a read-only operation
+ * and cannot create a publish/request loop.
+ */
+async function reconcileActiveNativeAgentProjections() {
+  const now = Date.now();
+  const active = state.sessions.filter((session) => {
+    if (nativeAgentProjectionRepairs.has(session.id) || session.status === "running" || activeRuns.has(session.id)) return true;
+    // Give a just-finished native transcript a few reconciliation ticks so its
+    // terminal status/logs are projected even after activeRuns is released.
+    const finishedAt = Date.parse(session.runFinishedAt || "");
+    return Number.isFinite(finishedAt) && now - finishedAt < 10_000;
+  });
+  for (const session of active) {
+    try {
+      const native = session.engine === "codex"
+        ? await listAgentThreadSummaries(session.codexThreadId || "", session.status === "running")
+        : await listClaudeNativeAgentThreads(session.engineSessionId || "", session.status === "running");
+      if (native.length) syncNativeAgentMessages(session, native);
+      nativeAgentProjectionRepairs.delete(session.id);
+    } catch (error) {
+      console.warn(`Native Agent projection reconcile failed for ${session.id}:`, error instanceof Error ? error.message : String(error));
+    }
+  }
 }
 
 function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
   let changed = false;
   for (const agent of agents) {
     const provider = agent.provider || session.engine;
+    const identity = agent.identity || agentIdentityFor({ ...agent, provider }, session.id, "native");
+    agent.identity = identity;
     const sourceId = `native-agent:${provider}:${agent.id}`;
     const payload = {
       type: `${provider}_subagent`,
       provider,
+      providerId: identity.providerId,
+      identity,
+      identityKey: identity.key,
+      identityAliases: agent.identityAliases,
       agent_id: agent.id,
       tool_use_id: agent.toolUseId,
       parentThreadId: agent.parentThreadId,
@@ -5276,8 +5230,16 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
     const existing = messageBySourceId(session, sourceId)
       || session.messages.find((message) => {
         const previous = recordOf(message.payload);
-        return message.eventType === "subagent" && nativeAgentMessageCanReuse(previous, agent.id);
+        return message.eventType === "subagent" && (nativeAgentMessageCanReuse(previous, agent.id, identity.providerId, identity.key)
+          || Boolean(previous?.type === "claude_native_subagent" && provider === "claude" && agent.toolUseId && previous.tool_use_id === agent.toolUseId));
       });
+    // Legacy streams can contain both the launch tool and transcript card.
+    const compactDuplicates = session.messages.filter((message) => {
+      const previous = recordOf(message.payload);
+      return message !== existing && previous?.type === "claude_native_subagent" && provider === "claude"
+        && (previous.agent_id === agent.id || Boolean(agent.toolUseId && previous.tool_use_id === agent.toolUseId));
+    });
+    if (compactDuplicates.length) { session.messages = session.messages.filter((message) => !compactDuplicates.includes(message)); changed = true; }
     if (existing) {
       const previous = recordOf(existing.payload);
       if (existing.text === text && existing.eventPhase === eventPhase && previous?.updatedAt === agent.updatedAt
@@ -5293,6 +5255,7 @@ function syncNativeAgentMessages(session: Session, agents: AgentThread[]) {
     changed = true;
   }
   if (!changed) return false;
+  sessionMessageIndexes.delete(session);
   session.updatedAt = new Date().toISOString();
   session.revision += 1;
   scheduleStateSave();
@@ -5319,7 +5282,7 @@ function persistedTaskUsageSummary(session: Session): TaskUsageSummary {
 const auth = createAuth(RUNTIME_DIR);
 const skillManager = new ConfidentialSkillManager(ROOT, RUNTIME_DIR, auth.db);
 const managedSkillManager = new ManagedSkillManager(APP_PATHS.managedSkillsDir, true);
-const skillProjectionManager = new WorkspaceSkillProjectionManager(managedSkillManager.root, agentAdapterRegistry.list().flatMap((provider) => provider.skillProjection.workspacePath ? [{ providerId: provider.id, workspacePath: provider.skillProjection.workspacePath }] : []));
+const skillProjectionManager = new WorkspaceSkillProjectionManager(managedSkillManager.root, agentAdapterRegistry.list().flatMap((provider) => provider.skillProjection.workspacePath ? [{ providerId: provider.id, workspacePath: provider.skillProjection.workspacePath }] : []), true);
 const codexLinkRepository = new CodexLinkRepository(RUNTIME_DIR);
 const sessionManagementRepository = new SessionManagementRepository(RUNTIME_DIR);
 const codexLink = createCodexLinkRouter({
@@ -5359,21 +5322,29 @@ const codexLink = createCodexLinkRouter({
 const sessionNativeInventoryCache = new Map<string, { expiresAt: number; items: SessionInventoryItem[]; warnings: string[] }>();
 const sessionNativeInventoryLoads = new Map<string, Promise<{ items: SessionInventoryItem[]; warnings: string[] }>>();
 await ensureRuntime();
+const nativeAgentProjectionRepairs = new Set(state.sessions.filter((session) => Date.now() - Date.parse(session.updatedAt) < 24 * 60 * 60 * 1000 && session.messages.some((message) => recordOf(message.payload)?.native === true)).map((session) => session.id));
 await claimLegacyOwnership(auth.getOwnerUserId());
+routineScheduler = new RoutineScheduler({
+  file: path.join(APP_PATHS.dataDir, "routines.json"),
+  run: runScheduledRoutine
+});
+routineScheduler.start();
 await reconcileNativeCodexDelegatedTasks().catch((error) => console.error("Codex delegated task reconciliation failed", error));
 for (const workspace of state.workspaces) syncWorkspaceSkillProjection(workspace, workspaceAgentConfig(workspace).skillPolicies);
-bundledSkill = await loadPlainSkill();
 await Promise.all([detectCodexRuntime(), getClaudeRuntime()]);
 
 let httpServer: { close: (callback?: () => void) => void } | null = null;
-let workflowLeaseReconciler: NodeJS.Timeout | null = null;
 let sessionTrashCleaner: NodeJS.Timeout | null = null;
+let nativeAgentProjectionReconciler: NodeJS.Timeout | null = null;
+const nativeTerminals = new NativeTerminalManager();
 let shuttingDown = false;
 
 async function shutdown(reason: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   queuePaused = true;
+  routineScheduler?.stop();
+  nativeTerminals.stopAll();
   console.log(`Workbench shutdown requested: ${reason}`);
   const forceExitTimer = setTimeout(() => process.exit(1), 15_000);
   forceExitTimer.unref();
@@ -5392,8 +5363,9 @@ async function shutdown(reason: string) {
     sessionPublishTimers.clear();
     pendingSessionPublishes.clear();
     clearAgentPublishState();
-    if (workflowLeaseReconciler) clearInterval(workflowLeaseReconciler);
+    pluginHost.stop();
     if (sessionTrashCleaner) clearInterval(sessionTrashCleaner);
+    if (nativeAgentProjectionReconciler) clearInterval(nativeAgentProjectionReconciler);
     appUpdateService.close();
     terminateTrackedProcessTrees();
 
@@ -5451,6 +5423,100 @@ const workflowTicks = new Set<string>();
 const WORKFLOW_RUNNER_ID = `workbench-${process.pid}-${crypto.randomUUID()}`;
 const WORKFLOW_PLANNER_RECOVERY_ATTEMPTS = 2;
 
+type OrchestrationRuntime = ReturnType<typeof createOrchestrationRuntime>;
+const orchestrationRuntime = createOrchestrationRuntime({
+  agentAdapterRegistry,
+  providerReadiness,
+  workspaceById,
+  workflowRepository,
+  workflowStateFiles,
+  eventHub,
+  onWorkflowCompleted: publishWorkflowResult,
+  readTaskHistory: (workflow) => {
+    const context = taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId);
+    return context ? taskContextStore.exportHistorySnapshot(context.id, workflow.ownerUserId, workflow.executionRoot || workflow.workDirectory) : null;
+  },
+  managedSkillManager,
+  skillFileIndex,
+  autoSkillCandidateBlock,
+  workflowPlannerMcpConfigPath,
+  getClaudeRuntime,
+  nativeProviderHome,
+  CLAUDE_WORKFLOW_READ_TOOLS,
+  WORKFLOW_PLANNER_RECOVERY_ATTEMPTS,
+  workflowPlannerToolServer,
+  assertCodexWorkflowControlPlane,
+  threadOptions,
+  buildCodex,
+  buildSnapshotQuestionCodex: (cwd) => {
+    const isolatedHome = path.join(cwd, "codex-profile");
+    fs.mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
+    if (!state.settings.apiKey && fs.existsSync(path.join(CODEX_HOME, "auth.json"))) {
+      fs.copyFileSync(path.join(CODEX_HOME, "auth.json"), path.join(isolatedHome, "auth.json"));
+      fs.chmodSync(path.join(isolatedHome, "auth.json"), 0o600);
+    }
+    return buildCodex(state.settings, undefined, true, undefined, [], [], isolatedHome, true);
+  },
+  promptWithAgents,
+  workspaceAgentConfig,
+  runtimeDirectory: pluginHost.context(ORCHESTRATION_PLUGIN_ID).runtimeDirectory,
+  workflowNodeResultToolServer,
+  delegatedThreadOptions,
+  workflowNodeMcpConfigPath,
+  claudeCredentialKind,
+  createWorkflowClaudeHandle,
+  claudeMcpAllowedTools,
+  CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS,
+  mcpServersForNode,
+  runtimeBindingForProvider,
+  activeWorkflowIntegrations,
+  workspaceTreeIndex,
+  getState: () => state
+});
+
+const orchestrationScheduler = createOrchestrationScheduler({
+  workflowTicks,
+  workspaceById,
+  syncWorkflowProtocolFiles,
+  appendWorkflowProtocolEvent,
+  workflowEvent,
+  activeWorkflowNodes,
+  activeWorkflowIntegrations,
+  activeDelegationTasks,
+  integrateWorkflow,
+  getDelegationActiveCount: () => delegationExecution.activeCount(),
+  currentWorkflowProviderCapabilities,
+  runtimeBindingForProvider,
+  WORKFLOW_RUNNER_ID,
+  workflowNodeIntents,
+  skillProjectionManager,
+  workspaceTreeIndex,
+  executeWorkflowNode,
+  workflowResultDigest,
+  workflowRepository,
+  workflowStateFiles,
+  isEnabled: () => pluginHost.isEnabled(ORCHESTRATION_PLUGIN_ID)
+});
+
+pluginHost.bind(COLLABORATION_PLUGIN_ID, {
+  activate: () => { delegationExecution.start(); return () => delegationExecution.stop(); },
+  beforeDisable: () => {
+    if (activeDelegationTasks.size || state.delegatedTasks.some((task) => OPEN_DELEGATED_STATUSES.has(task.status))
+      || [...activeRuns.values()].some((run) => run.executionMode === "collaborative")) throw new Error("协作任务仍在运行，请先暂停或完成任务后停用插件");
+  }
+});
+pluginHost.bind(ORCHESTRATION_PLUGIN_ID, orchestrationLifecycle({
+  repository: workflowRepository,
+  stateFiles: workflowStateFiles,
+  legacyTransactions: APP_PATHS.workflowTransactionsDir,
+  transactions: WORKFLOW_PLANNER_TRANSACTION_DIR,
+  isEnabled: () => pluginHost.isEnabled(ORCHESTRATION_PLUGIN_ID),
+  isBusy: () => Boolean(activeWorkflowPlanners.size || activeWorkflowNodes.size || activeWorkflowIntegrations.size || workflowTicks.size),
+  activeNodeKeys: () => new Set(activeWorkflowNodes.keys()),
+  queueTick: queueWorkflowTick,
+  disposeScheduler: () => orchestrationScheduler.dispose()
+}));
+
 function workflowRuntimeActive(workflowId: string) {
   return activeWorkflowPlanners.has(workflowId)
     || activeWorkflowIntegrations.has(workflowId)
@@ -5466,1250 +5532,57 @@ async function waitForWorkflowRuntimeRelease(workflowId: string, timeoutMs = 30_
   if (workflowRuntimeActive(workflowId)) throw new Error("任务编排的 Agent 仍在结束，请稍后重试");
 }
 
-function workflowPlannerRecoveryPrompt(reason: string) {
-  return [
-    "上一轮规划没有形成可提交的终态，但隔离规划事务仍然保留。",
-    `中断原因：${reason || "规划回合未完整结束"}。`,
-    "先调用 workflow_read_plan 读取当前草稿，只继续未完成部分。大型计划使用 workflow_apply_operations 每批写入 2 至 4 个节点，不要重新生成已经写入的内容。",
-    "完成依赖、自审和修正后调用 workflow_validate_draft；通过后必须调用 workflow_commit_candidate。自然语言只需简短说明，不要输出机器 JSON。"
-  ].join("\n");
-}
+function retryableWorkflowPlannerFailure(...args: Parameters<OrchestrationRuntime["retryableWorkflowPlannerFailure"]>): ReturnType<OrchestrationRuntime["retryableWorkflowPlannerFailure"]> { return orchestrationRuntime.retryableWorkflowPlannerFailure(...args); }
+function workflowPlannerFailureMessage(...args: Parameters<OrchestrationRuntime["workflowPlannerFailureMessage"]>): ReturnType<OrchestrationRuntime["workflowPlannerFailureMessage"]> { return orchestrationRuntime.workflowPlannerFailureMessage(...args); }
+function workflowPlannerRequestKey(...args: Parameters<OrchestrationRuntime["workflowPlannerRequestKey"]>): ReturnType<OrchestrationRuntime["workflowPlannerRequestKey"]> { return orchestrationRuntime.workflowPlannerRequestKey(...args); }
+function currentWorkflowProviderCapabilities(...args: Parameters<OrchestrationRuntime["currentWorkflowProviderCapabilities"]>): ReturnType<OrchestrationRuntime["currentWorkflowProviderCapabilities"]> { return orchestrationRuntime.currentWorkflowProviderCapabilities(...args); }
+function assertWorkflowExecutionReady(...args: Parameters<OrchestrationRuntime["assertWorkflowExecutionReady"]>): ReturnType<OrchestrationRuntime["assertWorkflowExecutionReady"]> { return orchestrationRuntime.assertWorkflowExecutionReady(...args); }
+function syncWorkflowProtocolFiles(...args: Parameters<OrchestrationRuntime["syncWorkflowProtocolFiles"]>): ReturnType<OrchestrationRuntime["syncWorkflowProtocolFiles"]> { return orchestrationRuntime.syncWorkflowProtocolFiles(...args); }
+function appendWorkflowProtocolEvent(...args: Parameters<OrchestrationRuntime["appendWorkflowProtocolEvent"]>): ReturnType<OrchestrationRuntime["appendWorkflowProtocolEvent"]> { return orchestrationRuntime.appendWorkflowProtocolEvent(...args); }
+function workflowEvent(...args: Parameters<OrchestrationRuntime["workflowEvent"]>): ReturnType<OrchestrationRuntime["workflowEvent"]> { return orchestrationRuntime.workflowEvent(...args); }
+function plannerSkillContext(...args: Parameters<OrchestrationRuntime["plannerSkillContext"]>): ReturnType<OrchestrationRuntime["plannerSkillContext"]> { return orchestrationRuntime.plannerSkillContext(...args); }
+function runBuiltinWorkflowPlan(...args: Parameters<OrchestrationRuntime["runBuiltinWorkflowPlan"]>): ReturnType<OrchestrationRuntime["runBuiltinWorkflowPlan"]> { return orchestrationRuntime.runBuiltinWorkflowPlan(...args); }
+function requestWorkflowPlan(...args: Parameters<OrchestrationRuntime["requestWorkflowPlan"]>): ReturnType<OrchestrationRuntime["requestWorkflowPlan"]> { return orchestrationRuntime.requestWorkflowPlan(...args); }
+function workflowResultPath(...args: Parameters<OrchestrationRuntime["workflowResultPath"]>): ReturnType<OrchestrationRuntime["workflowResultPath"]> { return orchestrationRuntime.workflowResultPath(...args); }
+function workflowResultDigest(...args: Parameters<OrchestrationRuntime["workflowResultDigest"]>): ReturnType<OrchestrationRuntime["workflowResultDigest"]> { return orchestrationRuntime.workflowResultDigest(...args); }
+function runBuiltinWorkflowNode(...args: Parameters<OrchestrationRuntime["runBuiltinWorkflowNode"]>): ReturnType<OrchestrationRuntime["runBuiltinWorkflowNode"]> { return orchestrationRuntime.runBuiltinWorkflowNode(...args); }
+function executeWorkflowNode(...args: Parameters<OrchestrationRuntime["executeWorkflowNode"]>): ReturnType<OrchestrationRuntime["executeWorkflowNode"]> { return orchestrationRuntime.executeWorkflowNode(...args); }
+function integrateWorkflow(...args: Parameters<OrchestrationRuntime["integrateWorkflow"]>): ReturnType<OrchestrationRuntime["integrateWorkflow"]> { return orchestrationRuntime.integrateWorkflow(...args); }
 
-function retryableWorkflowPlannerFailure(message: string) {
-  const text = message.toLowerCase();
-  if (classifyClaudeFailure(message) === "permanent") return false;
-  return [
-    "stream disconnected", "connection reset", "connection refused", "socket hang up", "fetch failed",
-    "econnreset", "econnrefused", "eai_again", "etimedout", "service unavailable", "bad gateway",
-    "gateway timeout", "http 524", "rate limit", "too many requests", "concurrency limit", "max token",
-    "token 上限", "不完整结果", "没有通过 workflow_commit_candidate", "missing completion", "工作台正在关闭"
-  ].some((marker) => text.includes(marker.toLowerCase()));
-}
-
-function workflowPlannerFailureMessage(error: unknown, controller: AbortController) {
-  const timedOut = timeoutReason(controller.signal);
-  if (timedOut) return timedOut.message;
-  const message = error instanceof Error ? error.message : String(error);
-  if (controller.signal.aborted && /operation was aborted|aborterror|aborted/i.test(message)) {
-    const reason = controller.signal.reason;
-    if (reason instanceof Error && reason.message) return reason.message;
-    return "规划运行已中止";
-  }
-  return message;
-}
-
-function workflowPlannerRequestKey(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, mode: WorkflowPlanningMode, note: string | null, previousPlan: WorkflowPlan | null) {
-  return crypto.createHash("sha256").update(JSON.stringify({
-    workflowId: workflow.id,
-    mode,
-    originalPrompt: workflow.originalPrompt,
-    note: note || "",
-    basePlanVersion: workflow.activePlanVersion,
-    previousPlan: previousPlan || null
-  })).digest("hex");
-}
-
-async function currentWorkflowProviderCapabilities(ownerUserId: string, workspace?: Workspace): Promise<WorkflowProviderCapabilities> {
-  const descriptors = agentAdapterRegistry.list();
-  const entries = await Promise.all(descriptors.map(async (descriptor) => {
-    const readiness = await providerReadiness(descriptor.id, ownerUserId, workspace);
-    return [descriptor.id, {
-      displayName: descriptor.shortName,
-      available: readiness.ready && descriptor.capabilities.workflow.worker && Boolean(agentAdapterRegistry.workflowWorkerRunner(descriptor.id)),
-      workspaceRead: descriptor.capabilities.workspace.read,
-      workspaceWrite: descriptor.capabilities.workspace.write
-    }] as const;
-  }));
-  const providers = Object.fromEntries(entries);
-  const available = entries.filter(([, provider]) => provider.available);
-  const read = providers.claude?.available ? "claude" : available.find(([, provider]) => provider.workspaceRead)?.[0] || "claude";
-  const write = providers.codex?.available ? "codex" : available.find(([, provider]) => provider.workspaceWrite)?.[0] || read;
-  return { providers, defaults: { read, write } };
-}
-
-async function assertWorkflowExecutionReady(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, ownerUserId: string) {
-  const workspace = workspaceById(workflow.workspaceId, ownerUserId);
-  if (!workspace) throw new Error("工作区不存在");
-  const capabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
-  for (const node of workflow.nodes) {
-    if (["completed", "skipped", "canceled"].includes(node.status)) continue;
-    const providerId = resolveWorkflowProvider(node.provider, node.workspaceAccess, capabilities);
-    const provider = capabilities.providers[providerId];
-    if (!provider?.available) throw new Error(`节点「${node.title}」需要的 Agent「${provider?.displayName || providerId}」尚未连接或不可用`);
-    if (node.workspaceAccess === "write" && !provider.workspaceWrite) throw new Error(`节点「${node.title}」需要写入工作区，但 Agent「${provider.displayName}」未声明写入能力`);
-    if (node.workspaceAccess === "read" && !provider.workspaceRead) throw new Error(`节点「${node.title}」需要读取工作区，但 Agent「${provider.displayName}」未声明读取能力`);
-  }
-}
-
-function workflowExecutionProvider(node: Pick<WorkflowNodeRecord, "provider" | "workspaceAccess">) {
-  const preferred = node.workspaceAccess === "write" ? "codex" : "claude";
-  const fallback = agentAdapterRegistry.list().find((descriptor) =>
-    descriptor.capabilities.workflow.worker &&
-    (node.workspaceAccess !== "write" || descriptor.capabilities.workspace.write) &&
-    Boolean(agentAdapterRegistry.workflowWorkerRunner(descriptor.id))
-  )?.id;
-  const provider = node.provider === "auto"
-    ? (agentAdapterRegistry.workflowWorkerRunner(preferred) ? preferred : fallback || preferred)
-    : node.provider;
-  if (!agentAdapterRegistry.workflowWorkerRunner(provider)) throw new Error(`Provider「${provider}」尚未绑定工作流节点 Runner`);
-  return provider;
-}
-
-function syncWorkflowProtocolFiles(workflowId: string, ownerUserId: string) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow || !workflow.workDirectory) return workflow;
-  workflowStateFiles.sync(workflow);
-  return workflow;
-}
-
-function appendWorkflowProtocolEvent(workflowId: string, ownerUserId: string, type: string, payload?: unknown, nodeId?: string, attempt?: number) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow || !workflow.workDirectory) return;
-  workflowStateFiles.appendEvent(workflow, { type, payload, nodeId, attempt });
-}
-
-function workflowEvent(workflowId: string, type: string, ownerUserId: string, workspaceId: string, revision: number, nodeId?: string) {
-  const payload = { workflowId, workspaceId, revision, eventType: type, ...(nodeId ? { nodeId } : {}) };
-  eventHub.publish(type, payload, [ownerUserId]);
-  eventHub.publish("workflow.changed", payload, [ownerUserId]);
-}
-
-function workflowTextFromOpenAI(payload: any) {
-  if (typeof payload?.output_text === "string") return payload.output_text;
-  return (Array.isArray(payload?.output) ? payload.output : []).flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
-    .map((item: any) => String(item?.text || item?.output_text || "")).filter(Boolean).join("\n");
-}
-
-function plannerSkillContext(workspace: Workspace, policies: SkillPolicies) {
-  const contexts = managedSkillManager.listPublic()
-    .filter((skill) => !skill.builtIn && (policies[skill.name] === "always" || policies[skill.name] === "auto"))
-    .map((skill) => {
-      try { return { skill: managedSkillManager.promptContext(skill.name), policy: policies[skill.name] as "always" | "auto" }; }
-      catch { return null; }
-    })
-    .filter((item): item is { skill: SkillPromptContext; policy: "always" | "auto" } => Boolean(item));
-  const maxInstructions = 14_000;
-  const maxTotalContext = 36_000;
-  let totalLength = 0;
-  return contexts.map(({ skill, policy }, index) => policy === "always"
-    ? [
-      `必须遵守的工作区 Skill ${index + 1}：${skill.name}`,
-      skill.instructions.length > maxInstructions ? `${skill.instructions.slice(0, maxInstructions)}\n[正文已截断；如需细节，继续从入口文件读取]` : skill.instructions,
-      `入口和指示库根目录：${skill.root}`,
-      `可用指示库文件索引：\n${skillFileIndex(skill)}`,
-      "规划节点必须继承该 Skill 的阶段顺序、产物要求和验收规则；只读取与当前任务相关的参考文件。"
-    ].join("\n")
-    : autoSkillCandidateBlock(skill, index)
-  ).map((block) => {
-    if (totalLength >= maxTotalContext) return "";
-    const remaining = maxTotalContext - totalLength;
-    const value = block.length > remaining ? `${block.slice(0, Math.max(0, remaining - 80))}\n[规划上下文已达到总预算；请按入口文件索引按需读取]` : block;
-    totalLength += value.length;
-    return value;
-  }).filter(Boolean).join("\n\n");
-}
-
-function validateClaudePlannerPreflight() {
-  const baseUrl = state.settings.claude.baseUrl.trim();
-  if (!baseUrl) throw new Error("Claude Base URL 未配置");
-  try {
-    const parsed = new URL(baseUrl);
-    if (!/^https?:$/i.test(parsed.protocol)) throw new Error("协议必须是 HTTP 或 HTTPS");
-  } catch (error) {
-    throw new Error(`Claude Base URL 无效：${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (!state.settings.claude.model.trim()) throw new Error("Claude 模型未配置");
-}
-
-async function runBuiltinWorkflowPlan(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, skillNames: string[], mcpServerNames: string[], skillContext: string, providerCapabilities: WorkflowProviderCapabilities, signalController: AbortController, transactionPath: string, onActivity: (event: NormalizedEngineEvent) => void, planningMode: WorkflowPlanningMode = "initial", previousPlan: WorkflowPlan | null = null) {
-  const engine = workflow.plannerEngine;
-  const system = planSystemPrompt(skillNames, mcpServerNames, skillContext, workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS, providerCapabilities);
-  const plannerPrompt = plannerTurnPrompt(system, workflow.originalPrompt, { mode: planningMode, reviewNote: workflow.reviewNote, previousPlan, workspaceRoot: workspace.root });
-  const sessionId = workflow.plannerSessionId || `workflow-planner:${workflow.id}`;
-  let engineSessionId = workflow.plannerEngineSessionId;
-  let plannerMcpConfigFile = "";
-  try {
-  if (engine === "claude") {
-    let output = "";
-    const plannerEvent = (event: NormalizedEngineEvent) => { if (event.type === "assistant" && event.text) output = event.text; onActivity(event); };
-    plannerMcpConfigFile = await workflowPlannerMcpConfigPath(workspace, transactionPath);
-    const createPlannerHandle = async (resumeSessionId?: string | null) => {
-      const runtime = await getClaudeRuntime();
-      if (!runtime.available) throw new Error("Claude CLI 不可用，请先在配置中检测或安装");
-      const command = resolveClaudeCommand(runtime.path);
-      return new ClaudeSessionHandle({
-        executable: command.executable, executableArgs: command.args, cwd: workflow.workDirectory || workspace.root,
-        sessionId: resumeSessionId, model: state.settings.claude.model, effort: state.settings.claude.effort,
-        baseUrl: state.settings.claude.baseUrl, apiKey: state.settings.claude.apiKey, configDir: nativeProviderHome("claude", workflow.ownerUserId),
-        mcpConfigPath: plannerMcpConfigFile, permissionMode: "default", disallowNativeAgents: true,
-        disallowedTools: [...CLAUDE_PLANNER_DISALLOWED_TOOLS],
-        allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, "mcp__workbench-workflow-plan__*"],
-        includeSystemStatus: true,
-        additionalDirectories: skillNames.map((name) => managedSkillManager.promptContext(name).root),
-        signal: signalController.signal, ownerId: sessionId, onEvent: plannerEvent
-      });
-    };
-    let prompt = plannerPrompt;
-    for (let recoveryAttempt = 0; recoveryAttempt <= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS; recoveryAttempt += 1) {
-      const turn = await runClaudeSessionTurn({
-        createHandle: createPlannerHandle,
-        sessionId: engineSessionId,
-        prompt,
-        recoveryAttempts: 2,
-        mode: "planner",
-        signal: signalController.signal,
-        onSessionId: (id) => {
-          engineSessionId = id;
-          workflowRepository.setPlannerSession(workflow.id, workflow.ownerUserId, sessionId, id);
-        },
-        onRecovery: ({ attempt, maxAttempts, reason, transport }) => onActivity({
-          type: "status",
-          sourceId: `planner-runtime-recovery:${attempt}`,
-          text: transport
-            ? `Claude 规划连接已刷新并恢复原会话（${attempt}/${maxAttempts}）：${reason}`
-            : `Claude 规划回合不完整，正在原会话续跑（${attempt}/${maxAttempts}）：${reason}`
-        }),
-        transportRecoveryPrompt: workflowPlannerRecoveryPrompt,
-        incompleteRecoveryPrompt: workflowPlannerRecoveryPrompt
-      });
-      const result = turn.result;
-      engineSessionId = result.sessionId;
-      const transaction = readWorkflowPlanTransaction(transactionPath);
-      if (["committed", "no_change"].includes(transaction.status)) break;
-      if (!result.failed) {
-        if (recoveryAttempt >= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS) throw new Error("规划 Agent 已结束，但没有通过 workflow_commit_candidate 提交候选计划");
-        prompt = workflowPlannerRecoveryPrompt("规划回合已结束，但事务尚未提交");
-      } else {
-        const reason = result.error || "Claude 规划 Agent 未完成";
-        if (!result.retryable || recoveryAttempt >= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS) throw new Error(reason);
-        prompt = workflowPlannerRecoveryPrompt(reason);
-      }
-      onActivity({ type: "status", sourceId: `planner-recovery:${recoveryAttempt + 1}`, text: `规划通道未完整结束，正在从事务草稿自动续跑（${recoveryAttempt + 1}/${WORKFLOW_PLANNER_RECOVERY_ATTEMPTS}）` });
-    }
-    const transaction = readWorkflowPlanTransaction(transactionPath);
-    if (transaction.status === "no_change") return { plan: transaction.draftPlan, engineSessionId, noChange: true, note: transaction.note, finalText: output };
-    if (transaction.status !== "committed") throw new Error("规划 Agent 已结束，但没有通过 workflow_commit_candidate 提交候选计划");
-    return { plan: transaction.draftPlan, engineSessionId, noChange: false, note: transaction.note, finalText: output };
-  }
-  if (!state.settings.apiKey) throw new Error("请先配置 Codex / OpenAI API Key");
-  const plannerDirectory = path.dirname(transactionPath);
-  const plannerServer = workflowPlannerToolServer(transactionPath);
-  await assertCodexWorkflowControlPlane(plannerServer, plannerDirectory, "planner");
-  const plannerThreadOptions = { ...threadOptions({ ...workspace, root: plannerDirectory }, state.settings), workingDirectory: plannerDirectory, sandboxMode: "workspace-write" as const, approvalPolicy: "never" as const, networkAccessEnabled: false };
-  let output = "";
-  let plannerToolAuthorizationError = "";
-  const codexPlannerInstructions = codexWorkflowPlannerToolInstructions();
-  let prompt = `${plannerPrompt}\n\n${codexPlannerInstructions}`;
-  for (let recoveryAttempt = 0; recoveryAttempt <= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS; recoveryAttempt += 1) {
-    const codex = buildCodex(state.settings, undefined, true, workspace, undefined, [plannerServer]);
-    const terminal = await runCodexSessionTurn({
-      createThread: (threadId) => threadId ? codex.resumeThread(threadId, plannerThreadOptions) : codex.startThread(plannerThreadOptions),
-      threadId: engineSessionId,
-      prompt,
-      signal: signalController.signal,
-      missingCompletionMessage: "Codex stream missing completion",
-      terminalReason: "Codex 规划已到达终态",
-      onThreadId: (threadId) => {
-        engineSessionId = threadId;
-        workflowRepository.setPlannerSession(workflow.id, workflow.ownerUserId, sessionId, threadId);
-      },
-      onEvent: (event) => {
-        const text = summarizeCodexEvent(event);
-        if (/user cancelled MCP tool call|MCP tool call.*cancelled|MCP 工具.*取消/i.test(text)) plannerToolAuthorizationError = text;
-        if (event.type === "item.completed" && event.item.type === "agent_message") output = text;
-        const normalized = normalizedCodexWorkflowEvent(event, text);
-        if (normalized) onActivity(normalized);
-      },
-      isDurableResultCommitted: () => { try { return ["committed", "no_change"].includes(readWorkflowPlanTransaction(transactionPath).status); } catch { return false; } },
-    });
-    engineSessionId = terminal.threadId || engineSessionId;
-    const transaction = readWorkflowPlanTransaction(transactionPath);
-    if (["committed", "no_change"].includes(transaction.status)) break;
-    const reason = terminal.failure || "规划回合已结束，但事务尚未提交";
-    const recoverable = !terminal.failed || retryableWorkflowPlannerFailure(reason);
-    if (!recoverable || recoveryAttempt >= WORKFLOW_PLANNER_RECOVERY_ATTEMPTS) throw new Error(reason || "Codex 规划 Agent 执行失败");
-    prompt = `${workflowPlannerRecoveryPrompt(reason)}\n\n${codexPlannerInstructions}`;
-    onActivity({ type: "status", sourceId: `planner-recovery:${recoveryAttempt + 1}`, text: `规划通道未完整结束，正在从事务草稿自动续跑（${recoveryAttempt + 1}/${WORKFLOW_PLANNER_RECOVERY_ATTEMPTS}）` });
-  }
-  if (plannerToolAuthorizationError) throw new Error(`规划工具被 Codex 执行权限策略拒绝：${plannerToolAuthorizationError}`);
-  const transaction = readWorkflowPlanTransaction(transactionPath);
-  if (transaction.status === "no_change") return { plan: transaction.draftPlan, engineSessionId, noChange: true, note: transaction.note, finalText: output };
-  if (transaction.status !== "committed") throw new Error("规划 Agent 已结束，但没有通过 workflow_commit_candidate 提交候选计划");
-  return { plan: transaction.draftPlan, engineSessionId, noChange: false, note: transaction.note, finalText: output };
-  } finally {
-    if (plannerMcpConfigFile) await fsp.rm(plannerMcpConfigFile, { force: true }).catch(() => undefined);
-  }
-}
-
-function requestWorkflowPlan(...args: Parameters<WorkflowPlannerRunner>): ReturnType<WorkflowPlannerRunner> {
-  const engine = args[0].plannerEngine;
-  const runner = agentAdapterRegistry.workflowPlannerRunner(engine);
-  if (!runner) throw new Error(`Provider「${engine}」尚未绑定工作流规划 Runner`);
-  return runner(...args);
-}
-
-function normalizedCodexWorkflowEvent(event: any, text: string): NormalizedEngineEvent | null {
-  const presentation = codexActivityFromEvent(event);
-  const item = event?.item || {};
-  const itemId = String(item.id || event?.item_id || event?.thread_id || event?.type || "codex");
-  const metadata = { category: presentation.category, phase: presentation.phase, detail: presentation.detail };
-  if (event?.type === "thread.started") return { type: "session.started", sourceId: `thread:${event.thread_id || itemId}`, text: text || "Codex 会话已开始", payload: event, ...metadata };
-  if (event?.type === "turn.started") return { type: "turn.started", sourceId: "turn", text: text || "Codex 开始运行", payload: event, ...metadata };
-  if (event?.type === "turn.completed") return { type: "turn.completed", sourceId: "turn", text: text || "Codex 任务已完成", payload: event, ...metadata };
-  if (event?.type === "error" && isCodexReconnectMessage(text)) return { type: "status", sourceId: `reconnect:${itemId}`, text: text || "Codex 正在重连", payload: event, ...metadata };
-  if (event?.type === "turn.failed" || event?.type === "error") return { type: "error", sourceId: `error:${itemId}`, text: text || "Codex 执行失败", payload: event, ...metadata };
-  if (presentation.rawType === "context_compaction") return { type: "status", rawType: presentation.rawType, sourceId: itemId, text, payload: event, ...metadata };
-  if (!String(event?.type || "").startsWith("item.")) return text ? { type: "status", sourceId: itemId, text, payload: event, ...metadata } : null;
-  if (item.type === "agent_message") return { type: "assistant", sourceId: itemId, text, payload: event, ...metadata };
-  if (item.type === "reasoning") return { type: "reasoning", sourceId: itemId, text: text || "Codex 正在分析任务", payload: event, ...metadata };
-  const toolName = String(item.type || "工具");
-  return { type: event.type === "item.completed" ? "tool.completed" : "tool.started", sourceId: itemId, toolName, text: text || `${toolName}${event.type === "item.completed" ? "已完成" : "正在执行"}`, payload: event, ...metadata };
-}
-
-function markCodexTransientLogsRecovered(logs: WorkflowNodeLog[]) {
-  for (const log of logs) {
-    if (log.category === "status" && log.phase === "running" && /连接异常|重连|stream|socket|fetch failed/i.test(log.text)) {
-      log.kind = "status";
-      log.title = "连接已恢复";
-      log.text = "连接已恢复，任务继续执行";
-      log.phase = "completed";
-    }
-  }
-}
-
-function verifiedWorkflowNodeResults(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>) {
-  let snapshot = workflowStateFiles.results(workflow);
-  if (!snapshot) snapshot = workflowStateFiles.syncResults(workflow);
-  const verified = new Map<string, WorkflowNodeResult>();
-  for (const node of workflow.nodes) {
-    if (node.status !== "completed") continue;
-    const entry = snapshot.nodes[node.id];
-    if (!entry?.result) continue;
-    const digest = workflowResultDigest(entry.result);
-    const expected = node.resultDigest || entry.resultDigest;
-    if (expected && digest !== expected) throw new Error(`节点「${node.title}」的 results.json 哈希不一致，已停止消费该结果`);
-    verified.set(node.id, entry.result);
-  }
-  return verified;
-}
-
-function workflowNodeTaskContract(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord) {
-  const verifiedResults = verifiedWorkflowNodeResults(workflow);
-  const nodeById = new Map(workflow.nodes.map((item) => [item.id, item]));
-  const ancestorIds = new Set<string>();
-  const pendingAncestors = [...node.dependsOn];
-  while (pendingAncestors.length) {
-    const ancestorId = pendingAncestors.pop()!;
-    if (ancestorIds.has(ancestorId)) continue;
-    ancestorIds.add(ancestorId);
-    const ancestor = nodeById.get(ancestorId);
-    if (ancestor) pendingAncestors.push(...ancestor.dependsOn);
-  }
-  const upstream = workflow.nodes.filter((item) => node.dependsOn.includes(item.id) && verifiedResults.has(item.id)).map((item) => {
-    const result = verifiedResults.get(item.id)!;
-    return {
-      nodeId: item.id, title: item.title, outcome: result.outcome, humanSummary: result.humanSummary,
-      outputs: result.outputs, decisions: result.decisions, handoff: result.handoff,
-      warnings: result.warnings, unresolved: result.unresolved, machineResultPath: result.machineResultPath
-    };
-  });
-  const ancestorContracts = workflow.nodes.filter((item) => ancestorIds.has(item.id)).map((item) => ({
-    nodeId: item.id,
-    title: item.title,
-    objective: item.objective,
-    constraints: item.constraints,
-    acceptance: item.acceptance,
-    deliverables: item.deliverables
-  }));
-  const downstreamConsumers = workflow.nodes.filter((item) => item.dependsOn.includes(node.id)).map((item) => ({ id: item.id, title: item.title, requiredArtifacts: item.requiredArtifacts }));
-  return {
-    schemaVersion: 1,
-    task: {
-      id: node.id,
-      title: node.title,
-      objective: node.objective,
-      nonGoals: node.nonGoals,
-      constraints: [
-        ...node.constraints,
-        `系统执行边界：业务文件只允许读取或写入当前任务目录 ${workflow.workDirectory}；不得枚举或读取父工作区、兄弟任务目录或任务目录外文件。`,
-        "workbench-workflow-result 是 Workbench 强制机器交接控制面，不属于业务 MCP；任务中的禁用 MCP 约束只针对可选业务 MCP。"
-      ],
-      originalGoal: workflow.originalPrompt
-    },
-    inputs: { dependencies: upstream, ancestorContracts, requiredArtifacts: node.requiredArtifacts },
-    execution: { workDirectory: workflow.workDirectory, workspaceAccess: node.workspaceAccess, writeScope: node.writeScope, skills: node.skills, mcpServers: node.mcpServers, mcpRequired: node.mcpRequired },
-    outputs: { deliverables: node.deliverables, acceptance: node.acceptance, verificationCommands: node.verificationCommands, downstreamConsumers }
+/** Start a scheduled prompt as an ordinary Meta Code session. Routines share
+ * the same Native/Managed execution path, persistence and event stream as a
+ * user-created task, so a scheduled run never gets a private execution model.
+ */
+async function runScheduledRoutine(routine: AgentRoutine) {
+  const ownerUserId = routine.ownerUserId;
+  if (!ownerUserId) throw new Error("例程缺少所属用户，已拒绝执行");
+  const requested = String(routine.providerId || "auto").trim().toLowerCase();
+  const engine = requested === "auto"
+    ? resolveAgentRoute("auto", agentAdapterRegistry.list(), { strategy: "reliability" }).selectedProvider
+    : normalizeProviderId(requested);
+  const provider = agentAdapterRegistry.descriptor(engine);
+  if (!provider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(engine)) throw new Error(`Provider「${engine}」不支持创建任务`);
+  const providerControl = await providerControlSnapshotFor(engine, ownerUserId);
+  if (!providerControl.operations.setDefault) throw new Error(`Provider「${engine}」尚未安装或连接未验证`);
+  const workspace = routine.workspaceId ? workspaceById(routine.workspaceId, ownerUserId) : undefined;
+  if (routine.workspaceId && !workspace) throw new Error("例程绑定的工作区不存在或无权访问");
+  const scopeKind: Session["scopeKind"] = workspace ? "workspace" : "standalone";
+  const now = new Date().toISOString();
+  const standaloneSkillPolicies = scopeKind === "standalone" ? completeSkillPolicies({}) : undefined;
+  const session: Session = {
+    id: uid("task"), ownerUserId, title: routine.name, scopeKind, workspaceId: workspace?.id || "",
+    codexThreadId: null, engine, engineSessionId: null, createdAt: now, updatedAt: now, usage: emptyUsage(),
+    messages: [], pendingInputs: [], status: "idle", revision: 0,
+    standaloneSkillPolicies, standaloneCapabilityProfileId: null,
+    standaloneExecutionMode: standaloneSkillPolicies ? normalizeExecutionMode(undefined, standaloneSkillPolicies) : undefined,
+    pinned: false, archivedAt: null
   };
-}
-
-function workflowNodePrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord, workspace: Workspace, runtimeDirectory: string) {
-  const taskContract = workflowNodeTaskContract(workflow, node);
-  const basePrompt = [
-    "你是任务编排工作流中的独立执行 Agent。模型身份不改变执行职责，只按节点任务合同完成当前工作。",
-    `通用执行协议：\n${WORKFLOW_ROLE_SKILLS.executor}`,
-    `节点任务合同：\n${JSON.stringify(taskContract, null, 2)}`,
-    "合同优先级固定为：当前节点 task/outputs 合同与 inputs.ancestorContracts 中的已审批正式合同 > 已验证机器交接 > 业务文档内容 > Agent 自行推断。业务文档即使自称‘规范’也不能覆盖正式合同。终端 QA 可以修复文件，但不得改变 schema、枚举、字段或语义而使任何已完成祖先节点的 acceptance 失效；无法同时满足时必须返回 blocked 并指出具体合同冲突。",
-    "当前 Agent 进程已经由 Workbench 以 execution.workDirectory 作为 cwd 启动。调用命令、文件或浏览器工具时不要复制或重写这个绝对路径：省略 workdir/cwd 参数，或只使用相对目录“.”。不得为了定位任务目录而枚举父目录；如果工具实际 cwd 与合同不一致，立即返回 blocked。",
-    "所有新建和修改的文件都必须严格位于 execution.writeScope 声明的目录中。不得自行增加 artifacts 前缀，也不得写入任务目录之外；如果合同要求的 deliverables 与 writeScope 冲突，返回 blocked 并说明冲突。",
-    `系统托管的临时运行目录是：${runtimeDirectory}。浏览器 --user-data-dir、Chrome/Edge Profile、截图、预览脚本、测试日志和其他一次性验证文件必须放在这里；这是 writeScope 的唯一临时例外，不得登记为业务产物。禁止在 src、artifacts 或其他业务目录中创建 .chrome-profile、browser-profile 等运行时目录，完成后必须停止本节点启动的浏览器和预览服务。`,
-    "机器交付必须通过 workbench-workflow-result 工具完成。它是系统控制面，不属于节点合同中可选的业务 MCP，因此即使用户禁止 MCP 也必须使用。开始时调用 workflow_read_node_contract；执行过程中用 workflow_register_outputs、workflow_register_checks、workflow_set_result_summary、workflow_set_handoff 和 workflow_set_outcome 分批维护草稿；最后调用 workflow_validate_result，通过后调用 workflow_commit_result。",
-    "outputs 中的文件和目录路径必须真实存在；没有业务文件的纯分析节点应通过 text/decision 输出和 handoff 提供可消费结果。consumableBy 只能填写任务合同 downstreamConsumers 中列出的 ID，没有下游时使用空数组。checks 只能登记真实执行情况。缺少输入或权限时调用 workflow_report_blocked。",
-    "自然语言最终回复只面向用户，简短总结本节点工作即可。不要在聊天回复中输出机器 JSON；聊天文本不再作为机器交付和完成依据。只有 workflow_commit_result 成功才代表候选机器结果已封存，正式完成状态仍由 Workbench 验收决定。",
-    "提交前必须调用 workflow_read_result_draft 复核完整草稿，按通用执行协议完成六项固定自审并调用 workflow_self_review_result。已明确属于 downstreamConsumers 的后续验证写入 warnings 或 handoff，不得放入 unresolved 或据此降低当前节点 outcome。自审后立即校验和提交；若再次修改草稿，必须重新自审。",
-    node.attempt > 1 && node.summary ? `这是第 ${node.attempt} 次纠正执行。保留并复用已经真实存在的业务产物，只针对上次验收问题补充或修正，不要无条件从头重做。上次结果反馈：\n${JSON.stringify({ outcome: node.summary.outcome, humanSummary: node.summary.humanSummary, warnings: node.summary.warnings, unresolved: node.summary.unresolved, outputs: node.summary.outputs }, null, 2)}` : ""
-  ].filter(Boolean).join("\n\n");
-  return promptWithAgents(
-    basePrompt,
-    workspaceAgentConfig(workspace).skillPolicies,
-    undefined,
-    undefined,
-    node.skills,
-    { engine: workflowExecutionProvider(node), workspaceRoot: workflow.workDirectory }
-  );
-}
-
-function workflowResultPath(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, reportedPath: string, mustExist: boolean) {
-  const raw = reportedPath.trim();
-  if (!raw) throw new Error("执行结果包含空文件路径");
-  const workflowRoot = path.resolve(workflow.workDirectory);
-  const candidates = path.isAbsolute(raw) ? [path.resolve(raw)] : [path.resolve(workflow.workDirectory, raw), path.resolve(workspace.root, raw)];
-  const resolved = mustExist
-    ? candidates.find((candidate) => isPathInside(workflowRoot, candidate) && fs.existsSync(candidate))
-    : candidates.find((candidate) => isPathInside(workflowRoot, candidate));
-  if (!resolved) throw new Error(`执行结果路径越出任务目录：${raw}`);
-  if (mustExist && !fs.existsSync(resolved)) throw new Error(`Agent 声明的产物不存在：${raw}`);
-  return { absolute: resolved, relative: path.relative(workflowRoot, resolved).replaceAll("\\", "/") || "." };
-}
-
-function verifyWorkflowNodeResult(
-  workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>,
-  node: WorkflowNodeRecord,
-  workspace: Workspace,
-  result: WorkflowNodeResult,
-  changedFiles: string[],
-  outsideWriteScope: string[]
-): { result: WorkflowNodeResult; records: Array<{ path: string; kind: string; hash: string | null; summary: string }> } {
-  const normalized: WorkflowNodeResult = { ...result, changedFiles: [...new Set(changedFiles)] };
-  if (result.outcome !== "completed") return { result: normalized, records: [] };
-
-  const issues: string[] = [];
-  const downstreamNodeIds = new Set(workflow.nodes.filter((item) => item.dependsOn.includes(node.id)).map((item) => item.id));
-  issues.push(...workflowNodeResultGateIssues(result, { downstreamNodeIds: [...downstreamNodeIds], deliverables: node.deliverables }));
-
-  const paths = workflowResultArtifactPaths(result);
-  const verified: Array<{ absolute: string; relative: string }> = [];
-  const normalizedByPath = new Map<string, string>();
-  for (const reportedPath of paths) {
-    try {
-      const item = workflowResultPath(workflow, workspace, reportedPath, true);
-      verified.push(item);
-      normalizedByPath.set(reportedPath, item.relative);
-    } catch (error) {
-      issues.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-  if (outsideWriteScope.length) issues.push(`检测到越出 writeScope 的文件修改：${outsideWriteScope.join(", ")}`);
-
-  const outputs = result.outputs.map((output) => ({ ...output, path: output.path ? normalizedByPath.get(output.path) || output.path : null }));
-  const records = verified.map(({ absolute, relative }) => {
-    const stat = fs.statSync(absolute);
-    const hash = stat.isFile() && stat.size <= 25 * 1024 * 1024 ? crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex") : null;
-    return { path: relative, kind: stat.isDirectory() ? "directory" : "file", hash, summary: result.humanSummary.slice(0, 500) };
-  });
-  if (!issues.length) return { result: { ...normalized, outputs }, records };
-  return {
-    result: {
-      ...normalized,
-      outcome: outsideWriteScope.length ? "failed" : "partial",
-      outputs,
-      warnings: outsideWriteScope.length ? [...normalized.warnings, "越界文件未自动回滚，请人工检查工作区状态。"] : normalized.warnings,
-      unresolved: [...new Set([...normalized.unresolved, ...issues])]
-    },
-    records
-  };
-}
-
-function workflowFailureResult(message: string, outcome: "blocked" | "failed" = "failed"): WorkflowNodeResult {
-  return {
-    outcome,
-    humanSummary: outcome === "blocked" ? "节点因执行条件不足而阻塞。" : "节点未能完成执行。",
-    outputs: [],
-    changedFiles: [],
-    checks: [],
-    decisions: [],
-    handoff: { facts: [], constraints: [], nextAgentInstructions: [] },
-    warnings: [],
-    unresolved: [message],
-    machineResultPath: null
-  };
-}
-
-class WorkflowNodeOutcomeError extends Error {
-  constructor(readonly result: WorkflowNodeResult, readonly allowAutomaticRetry = true) {
-    const detail = result.unresolved.join("；") || result.warnings.join("；") || result.humanSummary;
-    super(result.outcome === "blocked" ? `节点阻塞：${detail}` : result.outcome === "partial" ? `执行契约未满足：${detail}` : `节点执行失败：${detail}`);
-    this.name = "WorkflowNodeOutcomeError";
-  }
-}
-
-class WorkflowNodeStageRetryError extends Error {
-  constructor(readonly stage: "snapshot" | "verification", message: string) {
-    super(message);
-    this.name = "WorkflowNodeStageRetryError";
-  }
-}
-
-function persistWorkflowNodeResult(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, node: WorkflowNodeRecord, workspace: Workspace, result: WorkflowNodeResult) {
-  const target = path.resolve(workflow.workDirectory, ".workflow", "results.json");
-  if (!isPathInside(workflow.workDirectory, target) || !isPathInside(workspace.root, target)) throw new Error("机器结果文件越出任务目录");
-  const relative = path.relative(workflow.workDirectory, target).replaceAll("\\", "/");
-  return { ...result, machineResultPath: relative };
-}
-
-const WORKFLOW_PHASE_ORDER: WorkflowNodePhase[] = ["claimed", "result_draft_started", "agent_running", "agent_output_received", "result_parsed", "result_candidate_committed", "verification_completed", "result_verified", "result_committed", "completed"];
-
-function workflowPhaseAtLeast(current: WorkflowNodePhase, expected: WorkflowNodePhase) {
-  return WORKFLOW_PHASE_ORDER.indexOf(current) >= WORKFLOW_PHASE_ORDER.indexOf(expected);
-}
-
-function atomicWriteWorkflowCheckpoint(target: string, content: string) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, content, { encoding: "utf8", flag: "wx" });
-  fs.renameSync(temporary, target);
-}
-
-function writeSnapshotCheckpoint(target: string, snapshot: Map<string, string>) {
-  atomicWriteWorkflowCheckpoint(target, JSON.stringify([...snapshot.entries()]));
-}
-
-function readSnapshotCheckpoint(target: string) {
-  const entries = JSON.parse(fs.readFileSync(target, "utf8")) as Array<[string, string]>;
-  return new Map(entries);
-}
-
-function workflowResultDigest(result: WorkflowNodeResult) {
-  return crypto.createHash("sha256").update(JSON.stringify({ outputs: result.outputs, decisions: result.decisions, handoff: result.handoff, checks: result.checks })).digest("hex");
-}
-
-async function runBuiltinWorkflowNode(workflowId: string, ownerUserId: string, nodeId: string, controller: AbortController, attempt: WorkflowNodeAttemptRecord, runnerId: string) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow) throw new Error("工作流不存在");
-  const current = workflow.nodes.find((item) => item.id === nodeId); if (!current) throw new Error("工作流节点不存在");
-  const workspace = workspaceById(workflow.workspaceId, workflow.ownerUserId); if (!workspace) throw new Error("工作区不存在");
-  fs.mkdirSync(attempt.checkpointDirectory, { recursive: true });
-  const beforeSnapshotPath = path.join(attempt.checkpointDirectory, "before-snapshot.json");
-  const rawOutputPath = path.join(attempt.checkpointDirectory, "raw-output.txt");
-  const resultTransactionPath = path.join(attempt.checkpointDirectory, "result-transaction.json");
-  const runtimeDirectory = path.join(RUNTIME_DIR, "workflow-node-runtime", crypto.createHash("sha256").update(`${workflowId}:${current.planVersion}:${nodeId}:${attempt.attempt}`).digest("hex"));
-  fs.mkdirSync(runtimeDirectory, { recursive: true });
-  const leaseUntil = () => new Date(Date.now() + 60_000).toISOString();
-  const renewLease = () => workflowRepository.renewNodeLease(current.recordId, attempt.id, runnerId, leaseUntil());
-  let beforeSnapshot: Map<string, string>;
-  let structured: WorkflowNodeResult;
-  let systemDerivedResult = false;
-  let preserveBusinessArtifacts = false;
-  const executionRunId = `node-run-${crypto.randomUUID()}`;
-  const logContext: WorkflowLogContext = { attempt: attempt.attempt, runId: executionRunId, contextId: attempt.engineThreadId };
-  const attemptLog = (kind: WorkflowNodeLog["kind"], title: string, text: string, id?: string, context: WorkflowLogContext = {}) => workflowLog(kind, title, text, id, { ...logContext, ...context });
-  // Engine streams can emit many partial assistant/tool-progress events per second.
-  // Coalesce only the database refresh; durable protocol events and terminal states
-  // remain immediate so reconnect/recovery never observes stale execution state.
-  let nodePersistTimer: NodeJS.Timeout | null = null;
-  let nodePersistPending = false;
-  const persistNodeState = (immediate = false) => {
-    if (immediate) {
-      if (nodePersistTimer) clearTimeout(nodePersistTimer);
-      nodePersistTimer = null;
-      nodePersistPending = false;
-      workflowRepository.updateNode(current);
-      renewLease();
-      return;
-    }
-    if (nodePersistPending) return;
-    nodePersistPending = true;
-    nodePersistTimer = setTimeout(() => {
-      nodePersistTimer = null;
-      nodePersistPending = false;
-      workflowRepository.updateNode(current);
-      renewLease();
-    }, 250);
-  };
-  const flushNodeState = () => persistNodeState(true);
-
-  const taskContract = workflowNodeTaskContract(workflow, current);
-  const resultContract: WorkflowNodeResultContract = {
-    schemaVersion: 1,
-    workflowId,
-    planVersion: current.planVersion,
-    nodeRecordId: current.recordId,
-    nodeId,
-    attemptId: attempt.id,
-    attempt: attempt.attempt,
-    contractDigest: workflowNodeContractDigest(current),
-    idempotencyKey: current.idempotencyKey || `${workflowId}:${current.planVersion}:${nodeId}:${attempt.attempt}`,
-    taskContract,
-    downstreamNodeIds: workflow.nodes.filter((item) => item.dependsOn.includes(nodeId)).map((item) => item.id),
-    requireSelfReview: true
-  };
-  const { resumed: resultTransactionResumed } = openWorkflowNodeResultTransaction(resultTransactionPath, resultContract);
-  if (!workflowPhaseAtLeast(attempt.phase, "agent_running")) attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_draft_started", leaseExpiresAt: leaseUntil() });
-
-  const resultFromTransactionOrLegacy = async (finalText: string, engineError?: unknown) => {
-    let transactionError: unknown;
-    try {
-      let transaction = readWorkflowNodeResultTransaction(resultTransactionPath);
-      if (transaction.status !== "committed") {
-        const validation = validateWorkflowNodeResultTransaction(resultTransactionPath);
-        if (validation.valid) transaction = commitWorkflowNodeResultTransaction(resultTransactionPath);
-        else throw new Error(validation.errors.join("；") || "机器结果草稿未完成");
-      }
-      current.logs.push(attemptLog("status", resultTransactionResumed ? "恢复机器交接" : "机器交接已提交", `结果事务 ${transaction.transactionId}`));
-      workflowRepository.updateNode(current);
-      return transaction.draftResult;
-    } catch (error) { transactionError = error; }
-    if (finalText.trim()) {
-      try {
-        const legacy = parseWorkflowNodeResult(finalText);
-        current.logs.push(attemptLog("status", "兼容旧版机器交接", "结果事务不可用，已从旧版最终回复恢复结构化结果"));
-        workflowRepository.updateNode(current);
-        return legacy;
-      } catch { /* New agents no longer return machine JSON in chat. */ }
-    }
-    systemDerivedResult = true;
-    const reasons = [
-      `机器结果事务未完成：${transactionError instanceof Error ? transactionError.message : String(transactionError)}`,
-      engineError ? `Agent 结束异常：${engineError instanceof Error ? engineError.message : String(engineError)}` : "Agent 没有提交可验证的机器结果"
-    ];
-    return {
-      ...workflowFailureResult(reasons.join("；"), "failed"),
-      outcome: "partial" as const,
-      humanSummary: "业务执行已经结束，但机器交接不完整；Workbench 将保留并核对真实文件，不虚构缺失结论。"
-    };
-  };
-
-  const repairResultTransaction = async (initialReasons: string[]) => {
-    let reasons = initialReasons;
-    const maximumRepairs = 2;
-    while (attempt.resultRepairCount < maximumRepairs) {
-      reopenWorkflowNodeResultTransaction(resultTransactionPath, reasons);
-      const repairNumber = attempt.resultRepairCount + 1;
-      current.logs.push(attemptLog("status", "自动修复机器交接", `第 ${repairNumber}/${maximumRepairs} 次，仅修正结果合同，不重新执行业务任务`));
-      workflowRepository.updateNode(current);
-      const repairPrompt = [
-        "你正在修复当前节点已经完成的机器交接，不得重新执行业务任务、修改业务文件、启动子 Agent 或扩大任务范围。",
-        "先调用 workflow_read_node_contract 和 workflow_read_result_draft，保留已有真实输出、检查、决策和 handoff，只修正下列门禁问题：",
-        reasons.map((reason) => `- ${reason}`).join("\n"),
-        "文件类 output 必须引用真实存在的路径；没有文件的逻辑结论改用 text 或 decision。consumableBy 只能引用合同中的下游节点。",
-        "修正完成后重新执行六项 workflow_self_review_result，再调用 workflow_validate_result；只有校验 valid=true 后才能 workflow_commit_result。",
-        "最终自然语言回复只需简述修正内容，不要输出机器 JSON。"
-      ].join("\n\n");
-      const resultServer = workflowNodeResultToolServer(resultTransactionPath);
-      try {
-        if (workflowExecutionProvider(current) === "codex") {
-          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
-          const codex = buildCodex(state.settings, undefined, true, workspace, [], [resultServer]);
-          const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
-          const repairOptions = { ...delegatedThreadOptions(workflowWorkspace, state.settings), sandboxMode: "read-only" as const };
-          const terminal = await runCodexSessionTurn({
-            createThread: () => codex.startThread(repairOptions),
-            prompt: `${repairPrompt}\n\n${codexWorkflowResultToolInstructions()}`,
-            signal: controller.signal,
-            missingCompletionMessage: "Codex 未完成机器交接修复",
-            terminalReason: "Codex 机器交接修复已到达终态",
-            onEvent: (event) => {
-              const text = summarizeCodexEvent(event);
-              const normalized = normalizedCodexWorkflowEvent(event, text);
-              if (normalized) { if (normalized.type === "turn.completed") markCodexTransientLogsRecovered(current.logs); upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(normalized, `codex:${executionRunId}:repair:${repairNumber}`, { ...logContext, contextId: event.type === "thread.started" ? event.thread_id : null })); }
-              workflowRepository.updateNode(current); renewLease();
-            },
-            isDurableResultCommitted: () => { try { return readWorkflowNodeResultTransaction(resultTransactionPath).status === "committed"; } catch { return false; } },
-          });
-          if (terminal.forcedByDurableResult) current.logs.push(attemptLog("status", "服务器接管终态", "机器结果已提交，但 Codex 事件流未及时关闭；Workbench 已结束等待并继续验收"));
-          const failure = codexTurnFailure(terminal, terminal.lastError, "Codex 未完成机器交接修复");
-          if (failure) throw new Error(failure);
-        } else {
-          const repairMcpConfig = await workflowNodeMcpConfigPath(workspace, [], [resultServer]);
-          const repairTurn = await runClaudeSessionTurn({
-            createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
-              cwd: workflow.workDirectory, sessionId: resumeSessionId, mcpConfigPath: repairMcpConfig, permissionMode: "plan",
-              allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([resultServer])],
-              disallowedTools: [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS], signal: controller.signal,
-              ownerId: `${workflowId}:${nodeId}:result-repair`,
-              onEvent: (event) => { if (event.text) upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(event, `claude:${executionRunId}:repair:${repairNumber}`, logContext)); workflowRepository.updateNode(current); renewLease(); }
-            }),
-            prompt: repairPrompt, recoveryAttempts: 2, signal: controller.signal
-          });
-          if (repairTurn.result.failed) throw new Error(repairTurn.result.error || "Claude 未完成机器交接修复");
-        }
-      } catch (error) {
-        reasons = [`结果修复 Agent 异常：${error instanceof Error ? error.message : String(error)}`];
-      }
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { resultRepairCount: repairNumber, leaseExpiresAt: leaseUntil() });
-      try {
-        let transaction = readWorkflowNodeResultTransaction(resultTransactionPath);
-        if (transaction.status === "committed") {
-          current.logs.push(attemptLog("status", "机器交接修复完成", `结果事务 ${transaction.transactionId} 已重新封存`));
-          workflowRepository.updateNode(current);
-          return transaction.draftResult;
-        }
-        const validation = validateWorkflowNodeResultTransaction(resultTransactionPath);
-        if (validation.valid) {
-          transaction = commitWorkflowNodeResultTransaction(resultTransactionPath);
-          current.logs.push(attemptLog("status", "机器交接修复完成", `结果事务 ${transaction.transactionId} 已重新封存`));
-          workflowRepository.updateNode(current);
-          return transaction.draftResult;
-        }
-        reasons = validation.errors;
-      } catch (error) {
-        reasons = [error instanceof Error ? error.message : String(error)];
-      }
-    }
-    throw new Error(`机器交接自动修复未通过：${reasons.join("；")}`);
-  };
-
-  if (!workflowPhaseAtLeast(attempt.phase, "agent_output_received") && !workflowPhaseAtLeast(attempt.phase, "result_parsed")) {
-    try {
-      beforeSnapshot = await captureWorkspaceSnapshot(workflow.workDirectory);
-      writeSnapshotCheckpoint(beforeSnapshotPath, beforeSnapshot);
-      if (attempt.snapshotRetryCount) attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount: 0, leaseExpiresAt: leaseUntil() });
-    } catch (error) {
-      const detail = `执行前工作区快照失败：${error instanceof Error ? error.message : String(error)}`;
-      const snapshotRetryCount = attempt.snapshotRetryCount + 1;
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { snapshotRetryCount, leaseExpiresAt: leaseUntil() });
-      current.logs.push(attemptLog("error", "工作区快照暂时失败", `${detail}；${snapshotRetryCount <= 2 ? "将只重试快照阶段" : "已停止自动重试"}`));
-      workflowRepository.updateNode(current);
-      if (snapshotRetryCount <= 2) throw new WorkflowNodeStageRetryError("snapshot", detail);
-      throw new WorkflowNodeOutcomeError(persistWorkflowNodeResult(workflow, current, workspace, workflowFailureResult(detail)), false);
-    }
-    attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "agent_running", leaseExpiresAt: leaseUntil() });
-    const prompt = workflowNodePrompt(workflow, current, workspace, runtimeDirectory); let finalText = "";
-    if (current.summary) {
-      current.summary = null;
-      current.logs.push(attemptLog("status", "开始新的执行尝试", "上一尝试结果仅保留在历史记录中，不参与本次终态判断"));
-    }
-    current.logs.push(attemptLog("status", "开始执行", `${current.provider === "auto" ? "自动选择" : current.provider} · 第 ${current.attempt} 次尝试`));
-    workflowRepository.updateNode(current);
-    const resolvedMcpServers = mcpServersForNode(workspace, current.mcpServers);
-    if (current.mcpRequired && resolvedMcpServers.length !== current.mcpServers.length) {
-      structured = workflowFailureResult(`节点必需的 MCP 当前不可用：${current.mcpServers.join(", ")}`, "blocked");
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_parsed", parsedResult: structured, leaseExpiresAt: leaseUntil() });
-    } else {
-      let engineError: unknown;
-      try {
-        if (workflowExecutionProvider(current) === "codex") {
-          const resultServer = workflowNodeResultToolServer(resultTransactionPath);
-          await assertCodexWorkflowControlPlane(resultServer, workflow.workDirectory, "result");
-          const codex = buildCodex(state.settings, undefined, true, workspace, current.mcpServers, [resultServer]);
-          const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
-          const threadOptions = { ...delegatedThreadOptions(workflowWorkspace, state.settings), sandboxMode: current.workspaceAccess === "write" ? "danger-full-access" as const : "read-only" as const };
-          const previousThreadId = current.engineThreadId;
-          const contextStrategy = workflowCodexContextStrategy(current);
-          current.contextRecoveryMode = contextStrategy.mode;
-          current.contextRecoveryCount = contextStrategy.recoveryCount;
-          if (contextStrategy.mode === "resumed") {
-            current.logs.push(attemptLog("status", "恢复原上下文", `继续 Codex Thread ${contextStrategy.threadId}；保留原会话记录并核对已有文件与检查点`, undefined, { contextId: contextStrategy.threadId }));
-          } else if (previousThreadId) {
-            current.engineThreadId = null;
-            current.logs.push(attemptLog("status", "降级到新上下文", "原 Codex Thread 已完成有限恢复尝试；创建干净上下文并从持久化任务合同、文件和检查点继续"));
-          }
-          workflowRepository.updateNode(current);
-          attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { engineThreadId: current.engineThreadId, contextRecoveryCount: current.contextRecoveryCount, contextRecoveryMode: current.contextRecoveryMode, leaseExpiresAt: leaseUntil() });
-          const recoveryPrompt = contextStrategy.mode === "resumed"
-            ? `这是连接中断后的恢复回合。延续本 Thread 中已经完成的工作，先检查工作区已有文件和节点结果事务；不要重复已验证步骤，也不要把上一次准备执行但未完成的动作视为已完成。\n\n${prompt}`
-            : prompt;
-          const terminal = await runCodexSessionTurn({
-            createThread: (threadId) => threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions),
-            threadId: contextStrategy.threadId,
-            prompt: `${recoveryPrompt}\n\n${codexWorkflowResultToolInstructions()}`,
-            signal: controller.signal,
-            missingCompletionMessage: "Codex 节点未返回完成状态",
-            terminalReason: "Codex 节点已到达终态",
-            onThreadId: (threadId) => {
-              current.engineThreadId = threadId;
-              attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { engineThreadId: threadId, contextRecoveryCount: current.contextRecoveryCount, contextRecoveryMode: current.contextRecoveryMode, leaseExpiresAt: leaseUntil() });
-              workflowRepository.updateNode(current); renewLease();
-            },
-            onEvent: (event) => {
-              const text = summarizeCodexEvent(event);
-              if (event.type === "thread.started") {
-              current.engineThreadId = event.thread_id;
-              }
-              if (event.type === "item.completed" && event.item.type === "agent_message") finalText = text;
-              const normalized = event.type === "thread.started" && contextStrategy.mode === "resumed"
-                ? { type: "status" as const, sourceId: `thread-resumed:${event.thread_id}`, text: "原上下文已恢复", payload: event }
-                : normalizedCodexWorkflowEvent(event, text);
-              if (normalized) { if (normalized.type === "turn.completed") markCodexTransientLogsRecovered(current.logs); upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(normalized, `codex:${executionRunId}:main`, { ...logContext, contextId: current.engineThreadId })); }
-              if (normalized) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.engine_event", { type: normalized.type, sourceId: normalized.sourceId, toolName: normalized.toolName, text: normalized.text }, nodeId, current.attempt);
-              workflowRepository.updateNode(current); renewLease();
-            },
-            isDurableResultCommitted: () => { try { return readWorkflowNodeResultTransaction(resultTransactionPath).status === "committed"; } catch { return false; } },
-          });
-          if (terminal.forcedByDurableResult) {
-            current.logs.push(attemptLog("status", "服务器接管终态", "机器结果已提交，但 Codex 事件流未及时关闭；Workbench 已结束等待并继续系统验收"));
-            workflowRepository.updateNode(current);
-          }
-          const failure = codexTurnFailure(terminal, terminal.lastError, "Codex 节点未返回完成状态");
-          if (failure) throw new Error(failure);
-        } else {
-          const resultServer = workflowNodeResultToolServer(resultTransactionPath);
-          const nodeMcpConfig = await workflowNodeMcpConfigPath(workspace, current.mcpServers, [resultServer]);
-          const claudeTurn = await runClaudeSessionTurn({
-            createHandle: (resumeSessionId) => createWorkflowClaudeHandle({
-              cwd: workflow.workDirectory, sessionId: resumeSessionId, mcpConfigPath: nodeMcpConfig,
-              permissionMode: current.workspaceAccess === "write" ? "bypassPermissions" : "plan",
-              allowedTools: current.workspaceAccess === "read" ? [...CLAUDE_WORKFLOW_READ_TOOLS, ...claudeMcpAllowedTools([...resolvedMcpServers, resultServer])] : undefined,
-              disallowedTools: current.workspaceAccess === "read" ? [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS] : undefined,
-              signal: controller.signal, ownerId: `${workflowId}:${nodeId}`,
-              onEvent: (event) => {
-                if (event.type === "assistant") finalText = event.text;
-                if (event.text) upsertWorkflowLog(current.logs, workflowLogFromEngineEvent(event, `claude:${executionRunId}:main`, { ...logContext, contextId: current.engineThreadId }));
-                if (event.text) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.engine_event", { type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text }, nodeId, current.attempt);
-                workflowRepository.updateNode(current); renewLease();
-              }
-            }),
-            sessionId: current.engineThreadId,
-            prompt,
-            recoveryAttempts: 2,
-            mode: "worker",
-            signal: controller.signal,
-            onSessionId: (id) => {
-              current.engineThreadId = id;
-              current.contextRecoveryMode = attempt.engineThreadId ? "resumed" : "fresh";
-              attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { engineThreadId: id, contextRecoveryCount: current.contextRecoveryCount, contextRecoveryMode: current.contextRecoveryMode, leaseExpiresAt: leaseUntil() });
-              workflowRepository.updateNode(current);
-            },
-            onRecovery: ({ attempt: reconnectAttempt, maxAttempts, reason, transport }) => {
-              current.contextRecoveryCount += 1;
-              current.contextRecoveryMode = "resumed";
-              attempt = workflowRepository.checkpointNodeAttempt(attempt.id, {
-                engineThreadId: current.engineThreadId,
-                contextRecoveryCount: current.contextRecoveryCount,
-                contextRecoveryMode: current.contextRecoveryMode,
-                leaseExpiresAt: leaseUntil()
-              });
-              current.logs.push(attemptLog("status", transport ? "Claude 连接恢复" : "Claude 上下文续跑", `沿用原会话自动恢复（${reconnectAttempt}/${maxAttempts}）：${reason}`));
-              workflowRepository.updateNode(current); renewLease();
-            }
-          });
-          if (claudeTurn.result.failed) throw new Error(claudeTurn.result.error || "Claude 节点未返回完整结果");
-        }
-      } catch (error) {
-        engineError = error;
-        if (!(controller.signal.aborted && !timeoutReason(controller.signal))) {
-          current.logs.push(attemptLog("error", "Agent 结束异常", error instanceof Error ? error.message : String(error)));
-        }
-        workflowRepository.updateNode(current);
-      }
-      if (engineError) {
-        let committedResultAvailable = false;
-        try {
-          let transaction = readWorkflowNodeResultTransaction(resultTransactionPath);
-          if (transaction.status === "editing") {
-            const validation = validateWorkflowNodeResultTransaction(resultTransactionPath);
-            if (validation.valid) transaction = commitWorkflowNodeResultTransaction(resultTransactionPath);
-          }
-          committedResultAvailable = transaction.status === "validated" || transaction.status === "committed";
-          if (committedResultAvailable) {
-            current.logs.push(attemptLog("status", "服务器接管机器交接", "Agent 连接中断，但完整结果草稿已由 Workbench 校验并封存"));
-            workflowRepository.updateNode(current);
-          }
-        } catch { /* The engine error remains authoritative when no durable result exists. */ }
-        if (!committedResultAvailable) throw engineError;
-      }
-      try {
-        atomicWriteWorkflowCheckpoint(rawOutputPath, finalText);
-        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "agent_output_received", rawOutput: finalText, leaseExpiresAt: leaseUntil() });
-        structured = await resultFromTransactionOrLegacy(finalText, engineError);
-        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_candidate_committed", parsedResult: structured, leaseExpiresAt: leaseUntil() });
-      } catch (error) {
-        if (engineError) throw engineError;
-        throw error;
-      }
-    }
-  } else {
-    beforeSnapshot = readSnapshotCheckpoint(beforeSnapshotPath);
-    if (attempt.parsedResult) structured = attempt.parsedResult;
-    else {
-      const raw = attempt.rawOutput ?? (fs.existsSync(rawOutputPath) ? fs.readFileSync(rawOutputPath, "utf8") : "");
-      structured = await resultFromTransactionOrLegacy(raw);
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_candidate_committed", parsedResult: structured, leaseExpiresAt: leaseUntil() });
-    }
-  }
-
-  if (structured.outcome !== "completed" && attempt.resultRepairCount < 2 && fs.existsSync(resultTransactionPath)) {
-    try {
-      const transaction = readWorkflowNodeResultTransaction(resultTransactionPath);
-      if (transaction.status !== "committed") {
-        const validation = validateWorkflowNodeResultTransaction(resultTransactionPath);
-        const reasons = validation.errors.length ? validation.errors : structured.unresolved;
-        structured = await repairResultTransaction(reasons);
-        systemDerivedResult = false;
-        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_candidate_committed", parsedResult: structured, leaseExpiresAt: leaseUntil() });
-      }
-    } catch (error) {
-      current.logs.push(attemptLog("error", "机器交接修复未完成", error instanceof Error ? error.message : String(error)));
-      workflowRepository.updateNode(current);
-    }
-  }
-
-  if (!workflowPhaseAtLeast(attempt.phase, "verification_completed")) {
-    if (structured.outcome === "completed" && current.verificationCommands.length) {
-      current.logs.push(attemptLog("status", "开始系统验收", `${current.verificationCommands.length} 条受控命令`));
-      workflowRepository.updateNode(current);
-      const systemChecks = await runVerificationCommands(current.verificationCommands, workflow.workDirectory, controller.signal, `workflow:${workflowId}:${nodeId}:verify`);
-      const verificationRunCount = attempt.verificationRunCount + 1;
-      for (const check of systemChecks) current.logs.push(attemptLog(check.status === "failed" ? "error" : "status", `系统验收 · ${check.status}`, check.command || check.name));
-      current.logs = current.logs.slice(-300); workflowRepository.updateNode(current);
-      if (systemChecks.some((check) => check.status === "failed") && verificationRunCount < 2) {
-        attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_parsed", parsedResult: structured, verificationRunCount, leaseExpiresAt: leaseUntil() });
-        throw new WorkflowNodeStageRetryError("verification", "系统验收未通过，将只重跑验收命令，不重新执行 Agent");
-      }
-      structured = { ...structured, checks: [...structured.checks, ...systemChecks] };
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { verificationRunCount, leaseExpiresAt: leaseUntil() });
-    }
-    attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "verification_completed", parsedResult: structured, leaseExpiresAt: leaseUntil() });
-  } else structured = attempt.parsedResult || structured;
-
-  let resultToPersist: WorkflowNodeResult;
-  let records: Array<{ path: string; kind: string; hash: string | null; summary: string }> = [];
-  if (workflowPhaseAtLeast(attempt.phase, "result_verified") && attempt.verifiedResult) {
-    resultToPersist = attempt.verifiedResult;
-    if (!workflowPhaseAtLeast(attempt.phase, "result_committed")) records = verifyWorkflowNodeResult(workflow, current, workspace, resultToPersist, resultToPersist.changedFiles, []).records;
-  }
-  else {
-    let afterSnapshot = beforeSnapshot;
-    try { afterSnapshot = await captureWorkspaceSnapshot(workflow.workDirectory); }
-    catch (error) {
-      const detail = `执行后工作区快照失败：${error instanceof Error ? error.message : String(error)}`;
-      const snapshotRetryCount = attempt.snapshotRetryCount + 1;
-      attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "verification_completed", parsedResult: structured, snapshotRetryCount, leaseExpiresAt: leaseUntil() });
-      current.logs.push(attemptLog("error", "工作区快照暂时失败", `${detail}；已保留机器结果，${snapshotRetryCount <= 2 ? "将只重试快照与文件验收" : "已停止自动重试"}`));
-      workflowRepository.updateNode(current);
-      if (snapshotRetryCount <= 2) throw new WorkflowNodeStageRetryError("snapshot", detail);
-      preserveBusinessArtifacts = true;
-      structured = { ...structured, outcome: "partial", unresolved: [...structured.unresolved, detail] };
-    }
-    const observedChangedFiles = changedWorkspaceFiles(beforeSnapshot, afterSnapshot);
-    const currentStartedAt = Date.parse(current.startedAt || "");
-    const overlappingWriterScopes = (workflowRepository.get(workflowId, ownerUserId)?.nodes || [])
-      .filter((item) => item.id !== current.id && item.workspaceAccess === "write" && item.startedAt && (!item.finishedAt || !Number.isFinite(currentStartedAt) || Date.parse(item.finishedAt) >= currentStartedAt))
-      .flatMap((item) => workflowAuthorizedWriteScopes(item.writeScope));
-    const concurrentWriterChanges = overlappingWriterScopes.length ? new Set(observedChangedFiles.filter((file) => filesOutsideWriteScope([file], overlappingWriterScopes, workflow.workDirectory, workflow.workDirectory).length === 0)) : new Set<string>();
-    const actualChangedFiles = observedChangedFiles.filter((file) => !concurrentWriterChanges.has(file));
-    if (systemDerivedResult && actualChangedFiles.length) {
-      preserveBusinessArtifacts = true;
-      structured = {
-        ...structured,
-        outputs: actualChangedFiles.map((file, index) => ({ id: `system-observed-${index + 1}`, type: "file" as const, path: file, mediaType: null, description: "Workbench 检测到的真实文件变更；Agent 未完成语义登记", consumableBy: [] })),
-        warnings: [...structured.warnings, "这些输出由文件快照推导，只证明文件发生变化，不代表业务验收通过。"]
-      };
-    }
-    const authorizedWriteScopes = workflowAuthorizedWriteScopes(current.writeScope);
-    const outsideWriteScope = current.workspaceAccess === "write" ? filesOutsideWriteScope(actualChangedFiles, authorizedWriteScopes, workflow.workDirectory, workflow.workDirectory) : actualChangedFiles;
-    const writeManifestPath = path.join(attempt.checkpointDirectory, "write-manifest.json");
-    if (!fs.existsSync(writeManifestPath)) atomicWriteWorkflowCheckpoint(writeManifestPath, JSON.stringify({ schemaVersion: 1, workflowId, nodeId, attempt: attempt.attempt, capturedAt: new Date().toISOString(), changedFiles: actualChangedFiles, concurrentWriterChanges: [...concurrentWriterChanges], outsideWriteScope }, null, 2));
-    let verified = verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
-    if (verified.result.outcome === "partial" && !outsideWriteScope.length && attempt.resultRepairCount < 2 && fs.existsSync(resultTransactionPath)) {
-      try {
-        structured = await repairResultTransaction(verified.result.unresolved);
-        verified = verifyWorkflowNodeResult(workflow, current, workspace, structured, actualChangedFiles, outsideWriteScope);
-      } catch (error) {
-        current.logs.push(attemptLog("error", "终态交接修复未完成", error instanceof Error ? error.message : String(error)));
-        workflowRepository.updateNode(current);
-      }
-    }
-    resultToPersist = verified.result; records = verified.records;
-    attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_verified", verifiedResult: resultToPersist, leaseExpiresAt: leaseUntil() });
-  }
-  const digest = workflowResultDigest(resultToPersist);
-  if (!workflowPhaseAtLeast(attempt.phase, "result_committed")) {
-    try { workflowRepository.replaceNodeArtifacts(workflow.id, current.recordId, records, current.attempt, digest); }
-    catch (error) { resultToPersist = { ...resultToPersist, outcome: "partial", unresolved: [...resultToPersist.unresolved, `产物索引持久化失败：${error instanceof Error ? error.message : String(error)}`] }; }
-  }
-  const persisted = persistWorkflowNodeResult(workflow, current, workspace, resultToPersist);
-  attempt = workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "result_committed", verifiedResult: persisted, leaseExpiresAt: leaseUntil() });
-  current.summary = persisted;
-  workflowRepository.updateNode(current);
-  syncWorkflowProtocolFiles(workflowId, ownerUserId);
-  appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.result_committed", { outcome: persisted.outcome, resultDigest: workflowResultDigest(persisted) }, nodeId, current.attempt);
-  if (persisted.outcome !== "completed") throw new WorkflowNodeOutcomeError(persisted, !preserveBusinessArtifacts);
-  return persisted;
-}
-
-function executeWorkflowNode(...args: Parameters<WorkflowWorkerRunner>): ReturnType<WorkflowWorkerRunner> {
-  const workflow = workflowRepository.get(args[0], args[1]);
-  const node = workflow?.nodes.find((item) => item.id === args[2]);
-  if (!workflow || !node) throw new Error("工作流节点不存在");
-  const provider = workflowExecutionProvider(node);
-  const runner = agentAdapterRegistry.workflowWorkerRunner(provider);
-  if (!runner) throw new Error(`Provider「${provider}」尚未绑定工作流节点 Runner`);
-  return runner(...args);
-}
-
-async function runWorkflowTextAgent(
-  engine: WorkflowEngine,
-  prompt: string,
-  workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>,
-  workspace: Workspace,
-  controller: AbortController,
-  ownerId: string,
-  onEvent: (event: NormalizedEngineEvent) => void
-) {
-  let finalText = "";
-  if (engine === "claude") {
-    const turn = await runClaudeSessionTurn({
-      createHandle: (sessionId) => createWorkflowClaudeHandle({
-        cwd: workflow.workDirectory, sessionId, permissionMode: "default",
-        allowedTools: [...CLAUDE_WORKFLOW_READ_TOOLS], disallowedTools: [...CLAUDE_WORKFLOW_READ_ONLY_DISALLOWED_TOOLS],
-        signal: controller.signal, ownerId,
-        onEvent: (event) => { if (event.type === "assistant") finalText = event.text; onEvent(event); }
-      }),
-      prompt, recoveryAttempts: 2, mode: "validator", signal: controller.signal
-    });
-    if (turn.result.failed) throw new Error(turn.result.error || "Claude 工作流 Agent 未返回完整结果");
-    return finalText;
-  }
-  if (!state.settings.apiKey) throw new Error("请先配置 Codex / OpenAI API Key");
-  const codex = buildCodex(state.settings, undefined, true);
-  const workflowWorkspace = { ...workspace, root: workflow.workDirectory };
-  const thread = codex.startThread({ ...threadOptions(workflowWorkspace, state.settings), sandboxMode: "read-only", approvalPolicy: "never" });
-  const streamController = new AbortController();
-  const { events } = await thread.runStreamed(prompt, { signal: AbortSignal.any([controller.signal, streamController.signal]) });
-  const terminal = await consumeCodexTurnEvents(events, (event) => {
-    const text = summarizeCodexEvent(event);
-    if (event.type === "item.completed" && event.item.type === "agent_message") finalText = text;
-    const normalized = normalizedCodexWorkflowEvent(event, text);
-    if (normalized) onEvent(normalized);
-  }, { onTerminal: () => streamController.abort(new Error("Codex 工作流 Agent 已到达终态")) });
-  const failure = codexTurnFailure(terminal, terminal.lastError, "Codex 工作流 Agent 未返回完成状态");
-  if (failure) throw new Error(failure);
-  return finalText;
-}
-
-function workflowResultContractPrompt() {
-  return [
-    "最终回复只能包含一个 JSON 对象，不要 Markdown 或额外说明。",
-    '{"outcome":"completed|partial|blocked|failed","humanSummary":"面向用户的摘要","outputs":[{"id":"稳定输出ID","type":"file|directory|document|data|code|text|decision|other","path":null,"mediaType":null,"description":"用途与内容","consumableBy":[]}],"changedFiles":[],"checks":[{"name":"检查名称","command":null,"status":"passed|failed|not_run","exitCode":null,"evidence":"可复核证据"}],"decisions":[{"key":"决策键","value":"决策值","reason":"决策理由"}],"handoff":{"facts":[],"constraints":[],"nextAgentInstructions":[]},"warnings":[],"unresolved":[]}',
-    "只登记真实存在的产物和实际检查；不得把计划、猜测或未执行动作描述为已完成。"
-  ].join("\n");
-}
-
-function integrationSource(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>) {
-  const verifiedResults = verifiedWorkflowNodeResults(workflow);
-  return workflow.nodes.map((node) => {
-    const result = verifiedResults.get(node.id);
-    return ({
-    id: node.id,
-    title: node.title,
-    objective: node.objective,
-    required: node.required,
-    dependsOn: node.dependsOn,
-    acceptance: node.acceptance,
-    outcome: result?.outcome || node.status,
-    humanSummary: result?.humanSummary || "",
-    outputs: result?.outputs || [],
-    changedFiles: result?.changedFiles || [],
-    checks: result?.checks || [],
-    decisions: result?.decisions || [],
-    handoff: result?.handoff || { facts: [], constraints: [], nextAgentInstructions: [] },
-    warnings: result?.warnings || [],
-    unresolved: result?.unresolved || [],
-    machineResultPath: result?.machineResultPath || null
-  });
-  });
-}
-
-function workflowIntegratorPrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>) {
-  return [
-    "你是任务编排工作流的最终 Integrator Agent。你不是执行节点，不得启动子 Agent，也不得修改工作区文件。",
-    "这是非交互式后台整合任务：不要进入 Plan Mode，不要写计划文件，不要调用 ExitPlanMode；读取必要信息后直接返回最终 JSON。",
-    `整合协议：\n${WORKFLOW_ROLE_SKILLS.integrator}`,
-    `原始用户目标：\n${workflow.originalPrompt}`,
-    `已审批计划：\n${JSON.stringify(workflow.plan, null, 2)}`,
-    `已验证节点结果：\n${JSON.stringify(integrationSource(workflow), null, 2)}`,
-    "请综合所有节点成果形成一份自洽、去重、无冲突的最终答复。outputs 必须优先引用计划 finalDelivery 指定且已由生产节点创建的用户文件；也可以引用其他已存在节点产物或使用 path=null 的 text/decision 输出，但不得宣称创建新文件。",
-    "必须检查原始目标覆盖情况、跨节点矛盾、缺失结果和未解决风险。存在实质缺口时返回 partial/blocked/failed，不得返回 completed。",
-    workflowResultContractPrompt()
-  ].join("\n\n");
-}
-
-function workflowValidatorPrompt(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, candidate: WorkflowNodeResult) {
-  return [
-    "你是任务编排工作流的独立 Validator Agent。你只能审查，不得修改文件、重写计划或启动子 Agent。",
-    "这是非交互式后台验收任务：不要进入 Plan Mode，不要写计划文件，不要调用 ExitPlanMode；完成只读审查后直接返回最终 JSON。",
-    `验收协议：\n${WORKFLOW_ROLE_SKILLS.validator}`,
-    `原始用户目标：\n${workflow.originalPrompt}`,
-    `已审批计划：\n${JSON.stringify(workflow.plan, null, 2)}`,
-    `节点结果：\n${JSON.stringify(integrationSource(workflow), null, 2)}`,
-    `Integrator 候选结果：\n${JSON.stringify(candidate, null, 2)}`,
-    "用户任务中的“禁止 MCP”只约束可选业务 MCP。workbench-workflow-result 与 workbench-workflow-plan 是 Workbench 系统控制面，用于机器交接和规划事务，不属于业务 MCP；不得因这些控制面工具调用判定业务约束违规。",
-    "系统已经完成任务目录边界、writeScope、文件存在性和节点结果事务校验。优先复用上面的结构化结果与 checks；除非节点结果明确报告边界异常，否则不要扫描 .workflow/events.jsonl、Codex/Claude 会话日志或父工作区来重新推断执行轨迹。",
-    "如确需读取产物，最多执行一次合并的只读验收命令，并在一次命令中完成所需文件检查；不要重复读取已通过的文件或执行同义检查。",
-    "逐项检查目标覆盖、必需节点、真实产物、检查证据、跨节点一致性和未解决事项。全部通过才返回 outcome=completed；否则返回 failed，并在 unresolved 中列出可操作原因。",
-    "你的 outputs 和 changedFiles 必须为空；checks 用于记录本次最终验收依据。",
-    workflowResultContractPrompt()
-  ].join("\n\n");
-}
-
-function systemValidateIntegratedResult(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, result: WorkflowNodeResult) {
-  const issues: string[] = [];
-  if (result.outcome !== "completed") issues.push(...(result.unresolved.length ? result.unresolved : ["Integrator 未报告完整完成"]));
-  if (result.unresolved.length) issues.push(...result.unresolved);
-  const failedChecks = result.checks.filter((check) => check.status === "failed");
-  if (failedChecks.length) issues.push(`整合结果包含失败检查：${failedChecks.map((check) => check.name).join(", ")}`);
-  for (const output of result.outputs) {
-    if (["file", "directory", "document", "data", "code"].includes(output.type) && !output.path) issues.push(`最终产物 ${output.id} 缺少路径`);
-    if (output.path) {
-      try { workflowResultPath(workflow, workspace, output.path, true); }
-      catch (error) { issues.push(error instanceof Error ? error.message : String(error)); }
-    }
-  }
-  const delivery = workflow.plan?.finalDelivery;
-  if (delivery?.required) {
-    const producer = workflow.nodes.find((node) => node.id === delivery.producerNodeId);
-    if (!producer || producer.status !== "completed" || !producer.summary) issues.push(`最终交付生产节点未完成：${delivery.producerNodeId || "未指定"}`);
-    const producerPaths = producer?.summary ? workflowResultArtifactPaths(producer.summary).map((reported) => {
-      try { return workflowResultPath(workflow, workspace, reported, true).absolute.toLowerCase(); } catch { return ""; }
-    }) : [];
-    const verifyDeliveryFile = (reportedPath: string, label: string) => {
-      try {
-        const artifact = workflowResultPath(workflow, workspace, reportedPath, true);
-        const stat = fs.statSync(artifact.absolute);
-        if (!stat.isFile()) issues.push(`${label}不是文件：${reportedPath}`);
-        else if (stat.size === 0) issues.push(`${label}为空：${reportedPath}`);
-        if (!producerPaths.includes(artifact.absolute.toLowerCase())) issues.push(`生产节点没有登记${label}：${reportedPath}`);
-      } catch (error) { issues.push(error instanceof Error ? error.message : String(error)); }
-    };
-    if (!delivery.primary) issues.push("最终交付主文件未声明");
-    else verifyDeliveryFile(delivery.primary, "最终交付主文件");
-    for (const additional of delivery.additional) verifyDeliveryFile(additional, "最终附加文件");
-  }
-  return [...new Set(issues)];
-}
-
-function mergeFinalDeliveryOutputs(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, result: WorkflowNodeResult) {
-  const delivery = workflow.plan?.finalDelivery;
-  if (!delivery?.required || !delivery.producerNodeId) return result;
-  const producer = workflow.nodes.find((node) => node.id === delivery.producerNodeId);
-  if (!producer?.summary) return result;
-  const expected = new Set([delivery.primary, ...delivery.additional].filter((item): item is string => Boolean(item)).map((item) => item.replaceAll("\\", "/").toLowerCase()));
-  const deliveryOutputs = producer.summary.outputs.filter((output) => output.path && [...expected].some((item) => {
-    const reported = output.path!.replaceAll("\\", "/").toLowerCase();
-    return reported === item || reported.endsWith(`/${item}`);
-  }));
-  const byId = new Map(result.outputs.map((output) => [output.id, output]));
-  for (const output of deliveryOutputs) byId.set(output.id, output);
-  return { ...result, outputs: [...byId.values()] };
-}
-
-function persistWorkflowFinalResult(workflow: NonNullable<ReturnType<WorkflowRepository["get"]>>, workspace: Workspace, result: WorkflowNodeResult) {
-  const target = path.resolve(workflow.workDirectory, ".workflow", "results.json");
-  if (!isPathInside(workflow.workDirectory, target) || !isPathInside(workspace.root, target)) throw new Error("最终结果文件越出任务目录");
-  const relative = path.relative(workflow.workDirectory, target).replaceAll("\\", "/");
-  return { ...result, machineResultPath: relative };
-}
-
-async function integrateWorkflow(workflowId: string, ownerUserId: string) {
-  let workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow) throw new Error("工作流不存在");
-  const workspace = workspaceById(workflow.workspaceId, ownerUserId);
-  if (!workspace) throw new Error("工作区不存在");
-  const integrationBinding = await runtimeBindingForProvider(workflow.plannerEngine);
-  const integrationRuntime = workflowRepository.beginIntegration(workflowId, integrationBinding);
-  workflow = workflowRepository.get(workflowId, ownerUserId)!;
-  if (integrationRuntime.changed) workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "运行时已更新", "最终验收的运行时或能力已变化，已放弃旧的中间结果并从一致状态重新执行"));
-  workflowStateFiles.sync(workflow);
-  workflowStateFiles.appendEvent(workflow, { type: "integration.started", attempt: workflow.integrationAttempt });
-  const controller = new AbortController();
-  activeWorkflowIntegrations.set(workflowId, controller);
-  const appendEvent = (phase: "Integrator" | "Validator") => (event: NormalizedEngineEvent) => {
-    if (!event.text) return;
-    const log = workflowLogFromEngineEvent(event, `${phase.toLowerCase()}:${event.sourceId || event.type}`);
-    workflowRepository.appendIntegrationLog(workflowId, { ...log, title: `${phase} · ${log.title}` });
-    appendWorkflowProtocolEvent(workflowId, ownerUserId, "integration.engine_event", { phase, type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text });
-  };
-  const runStage = async (label: string, action: () => Promise<string>) => {
-    let lastError: unknown;
-    for (let stageAttempt = 1; stageAttempt <= 3; stageAttempt += 1) {
-      try { return await action(); }
-      catch (error) {
-        lastError = error;
-        const category = workflowFailureCategory(error);
-        if (category !== "transient" || stageAttempt >= 3 || controller.signal.aborted) throw error;
-        workflowRepository.appendIntegrationLog(workflowId, workflowLog("error", `${label} 暂时失败`, `第 ${stageAttempt}/3 次：${error instanceof Error ? error.message : String(error)}`));
-        await new Promise((resolve) => setTimeout(resolve, Math.min(4_000, 500 * (2 ** stageAttempt))));
-      }
-    }
-    throw lastError;
-  };
-  try {
-    let candidate = workflow.integratorResult;
-    if (!candidate || !workflow.integrationPhase || workflow.integrationPhase === "started") {
-      workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "开始最终整合", `由 ${workflow.plannerEngine === "claude" ? "Claude" : "Codex"} Integrator 综合节点成果`));
-      const integratorWorkflow = workflow;
-      const integratorText = await runStage("Integrator", () => runWorkflowTextAgent(integratorWorkflow.plannerEngine, workflowIntegratorPrompt(integratorWorkflow), integratorWorkflow, workspace, controller, `workflow:${workflowId}:integrator`, appendEvent("Integrator")));
-      candidate = mergeFinalDeliveryOutputs(workflow, parseWorkflowNodeResult(integratorText));
-      workflowRepository.checkpointIntegration(workflowId, "integrator_completed", { integratorResult: candidate, validatorResult: null });
-      workflow = workflowRepository.get(workflowId, ownerUserId)!;
-      workflowStateFiles.sync(workflow);
-      workflowStateFiles.appendEvent(workflow, { type: "integration.integrator_completed", payload: { outcome: candidate.outcome } });
-    } else {
-      candidate = mergeFinalDeliveryOutputs(workflow, candidate);
-      workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "恢复最终整合", "已复用持久化的 Integrator 候选结果"));
-    }
-    const systemIssues = systemValidateIntegratedResult(workflow, workspace, candidate);
-    let validation = workflow.validatorResult;
-    if (!validation || workflow.integrationPhase !== "validator_completed") {
-      workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "开始最终验收", "Validator 正在独立检查目标覆盖、产物和跨节点一致性"));
-      const validatorWorkflow = workflow;
-      const validatorCandidate = candidate;
-      const validatorText = await runStage("Validator", () => runWorkflowTextAgent(validatorWorkflow.plannerEngine, workflowValidatorPrompt(validatorWorkflow, validatorCandidate), validatorWorkflow, workspace, controller, `workflow:${workflowId}:validator`, appendEvent("Validator")));
-      validation = parseWorkflowNodeResult(validatorText);
-      workflowRepository.checkpointIntegration(workflowId, "validator_completed", { validatorResult: validation });
-      const validated = workflowRepository.get(workflowId, ownerUserId)!;
-      workflowStateFiles.sync(validated);
-      workflowStateFiles.appendEvent(validated, { type: "integration.validator_completed", payload: { outcome: validation.outcome } });
-    } else workflowRepository.appendIntegrationLog(workflowId, workflowLog("status", "恢复最终验收", "已复用持久化的 Validator 结果，仅继续系统提交"));
-    const validatorPassed = validation.outcome === "completed" && !validation.unresolved.length && !validation.checks.some((check) => check.status === "failed");
-    const unresolved = [...new Set([...candidate.unresolved, ...systemIssues, ...(validatorPassed ? [] : validation.unresolved.length ? validation.unresolved : ["Validator 未通过最终验收"])])];
-    const nodeChangedFiles = workflow.nodes.flatMap((node) => node.summary?.changedFiles || []);
-    const nodeChecks = workflow.nodes.flatMap((node) => node.summary?.checks || []);
-    const nodeWarnings = workflow.nodes.flatMap((node) => node.summary?.warnings || []);
-    const nodeUnresolved = workflow.nodes.flatMap((node) => node.summary?.unresolved || []);
-    const finalResult: WorkflowNodeResult = {
-      ...candidate,
-      outcome: systemIssues.length || !validatorPassed || nodeUnresolved.length ? "partial" : "completed",
-      changedFiles: [...new Set([...nodeChangedFiles, ...candidate.changedFiles])],
-      checks: [...nodeChecks, ...candidate.checks, ...validation.checks, { name: "最终验收 Agent", command: null, status: systemIssues.length || !validatorPassed ? "failed" : "passed", exitCode: null, evidence: validation.humanSummary }],
-      warnings: [...new Set([...nodeWarnings, ...candidate.warnings, ...validation.warnings])],
-      unresolved: [...new Set([...nodeUnresolved, ...unresolved])]
-    };
-    const persisted = persistWorkflowFinalResult(workflow, workspace, finalResult);
-    workflowRepository.checkpointIntegration(workflowId, "result_committed", { integratorResult: candidate, validatorResult: validation });
-    const status = persisted.outcome === "completed" ? "completed" : "needs_review";
-    workflowRepository.appendIntegrationLog(workflowId, workflowLog(status === "completed" ? "status" : "error", status === "completed" ? "最终验收通过" : "最终验收未通过", persisted.humanSummary));
-    workflowRepository.finishIntegration(workflowId, status, persisted);
-    const done = workflowRepository.get(workflowId, ownerUserId)!;
-    workflowStateFiles.sync(done);
-    workflowStateFiles.appendEvent(done, { type: status === "completed" ? "workflow.completed" : "workflow.needs_review", payload: { outcome: persisted.outcome } });
-    workflowEvent(workflowId, status === "completed" ? "workflow.completed" : "workflow.needs_review", ownerUserId, workspace.id, done.revision);
-  } catch (error) {
-    const controlState = workflowRepository.get(workflowId, ownerUserId)?.status;
-    if (controlState === "paused" || controlState === "canceled") return;
-    let failed = workflowFailureResult(error instanceof Error ? error.message : String(error));
-    try { failed = persistWorkflowFinalResult(workflow, workspace, failed); }
-    catch (persistenceError) { failed.unresolved.push(`最终结果文件持久化失败：${persistenceError instanceof Error ? persistenceError.message : String(persistenceError)}`); }
-    workflowRepository.appendIntegrationLog(workflowId, workflowLog("error", "最终整合失败", failed.unresolved.join("；")));
-    workflowRepository.finishIntegration(workflowId, "needs_review", failed);
-    const current = workflowRepository.get(workflowId, ownerUserId)!;
-    workflowStateFiles.sync(current);
-    workflowStateFiles.appendEvent(current, { type: "integration.failed", payload: { error: failed.unresolved.join("；") } });
-    workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workspace.id, current.revision);
-  } finally {
-    if (activeWorkflowIntegrations.get(workflowId) === controller) activeWorkflowIntegrations.delete(workflowId);
-    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
-  }
+  const executionWorkspace = workspace || await ensureSessionExecutionRoot(session);
+  state.sessions.unshift(session);
+  await saveState();
+  eventHub.publish("sessions.changed", { sessionId: session.id, action: "created", source: "routine", routineId: routine.id }, [ownerUserId]);
+  launchSessionRun(session, executionWorkspace, routine.prompt, undefined, undefined, executionWorkspace.agentExecutionMode);
+  return { routineId: routine.id, sessionId: session.id, providerId: engine };
 }
 
 async function runTurn(session: Session, workspace: Workspace, prompt: string, activeRun: ActiveRun) {
@@ -6718,233 +5591,11 @@ async function runTurn(session: Session, workspace: Workspace, prompt: string, a
   return runner(session, workspace, prompt, activeRun);
 }
 
-function scopesOverlap(left: string[], right: string[]) {
-  if (!left.length || !right.length) return true;
-  const clean = (value: string) => value.replaceAll("\\", "/").replace(/\/\*\*?$/, "").replace(/\/$/, "");
-  return left.some((a) => right.some((b) => { const x = clean(a); const y = clean(b); return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`); }));
-}
-
-function workflowAuthorizedWriteScopes(scopes: string[]) {
-  const expanded = new Set(scopes);
-  for (const scope of scopes) {
-    const normalized = scope.replaceAll("\\", "/").replace(/^\.\//, "");
-    if (normalized && !normalized.startsWith(".") && !normalized.startsWith("artifacts/")) expanded.add(`artifacts/${normalized}`);
-  }
-  return [...expanded];
-}
-
-function queueWorkflowTick(workflowId: string, ownerUserId: string) {
-  if (workflowTicks.has(workflowId)) return;
-  workflowTicks.add(workflowId);
-  setImmediate(() => void tickWorkflow(workflowId, ownerUserId).finally(() => workflowTicks.delete(workflowId)));
-}
-
-function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: string) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId);
-  if (!workflow) return [];
-  const completed = new Set(workflow.nodes.filter((node) => node.status === "completed").map((node) => node.id));
-  const reopened: string[] = [];
-  for (const node of workflow.nodes) {
-    if (!["blocked", "skipped"].includes(node.status) || !node.dependsOn.length || !node.dependsOn.every((dependency) => completed.has(dependency))) continue;
-    node.status = "pending";
-    node.error = null;
-    node.finishedAt = null;
-    node.nextRetryAt = null;
-    node.logs.push(workflowLog("status", "依赖已恢复", "上游节点修复完成，已重新进入自动调度队列"));
-    workflowRepository.updateNode(node);
-    reopened.push(node.id);
-  }
-  return reopened;
-}
-
-async function tickWorkflow(workflowId: string, ownerUserId: string) {
-  const workflow = workflowRepository.get(workflowId, ownerUserId); if (!workflow || ["completed", "canceled", "failed", "paused", "awaiting_approval", "planning", "draft", "needs_review"].includes(workflow.status)) return;
-  const workspace = workspaceById(workflow.workspaceId, workflow.ownerUserId); if (!workspace) return;
-  const nowMs = Date.now();
-  let nextRetryDelay: number | null = null;
-  for (const node of workflow.nodes.filter((item) => item.status === "retry_wait")) {
-    const dueAt = Date.parse(node.nextRetryAt || "");
-    if (!Number.isFinite(dueAt) || dueAt <= nowMs) {
-      node.status = "pending"; node.nextRetryAt = null; workflowRepository.updateNode(node);
-    } else nextRetryDelay = nextRetryDelay === null ? dueAt - nowMs : Math.min(nextRetryDelay, dueAt - nowMs);
-  }
-  if (nextRetryDelay !== null) {
-    const timer = setTimeout(() => queueWorkflowTick(workflowId, ownerUserId), Math.max(50, nextRetryDelay));
-    timer.unref();
-  }
-  let propagated = true;
-  while (propagated) {
-    propagated = false;
-    for (const node of workflow.nodes) {
-      if (!["pending", "ready", "interrupted"].includes(node.status)) continue;
-      const dependencyError = failedDependencyReason(node, workflow.nodes);
-      const dependenciesCompleted = node.dependsOn.every((id) => workflow.nodes.find((item) => item.id === id)?.status === "completed");
-      const missingArtifacts = dependenciesCompleted ? missingRequiredArtifacts(node, workflow.nodes) : [];
-      const error = dependencyError || (missingArtifacts.length ? `缺少必需上游产物：${missingArtifacts.join(", ")}` : null);
-      if (!error) continue;
-      node.status = node.required ? "blocked" : "skipped";
-      node.error = error;
-      node.finishedAt = new Date().toISOString();
-      node.logs.push(workflowLog("error", node.required ? "依赖阻塞" : "跳过可选节点", error));
-      workflowRepository.updateNode(node);
-      syncWorkflowProtocolFiles(workflowId, ownerUserId);
-      appendWorkflowProtocolEvent(workflowId, ownerUserId, node.required ? "node.blocked" : "node.skipped", { error }, node.id, node.attempt);
-      workflowEvent(workflowId, "workflow.node.blocked", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-      propagated = true;
-    }
-  }
-  const completed = new Set(workflow.nodes.filter((node) => node.status === "completed").map((node) => node.id));
-  const hasRequiredFailure = workflow.nodes.some((node) => node.required && ["failed", "blocked", "canceled"].includes(node.status));
-  const hasActiveNode = workflow.nodes.some((node) => ["running", "queued", "retry_wait"].includes(node.status));
-  const hasRunnableNode = workflow.nodes.some((node) => ["pending", "ready", "interrupted"].includes(node.status) && node.dependsOn.every((id) => completed.has(id)));
-  if (hasRequiredFailure && !hasActiveNode && !hasRunnableNode) { workflowRepository.updateRun(workflowId, "needs_review"); syncWorkflowProtocolFiles(workflowId, ownerUserId); appendWorkflowProtocolEvent(workflowId, ownerUserId, "workflow.needs_review", { reason: "required_node_failed" }); workflowEvent(workflowId, "workflow.needs_review", ownerUserId, workflow.workspaceId, workflow.revision + 1); return; }
-  if (workflow.nodes.length && workflow.nodes.every((node) => node.status === "completed" || (!node.required && ["failed", "blocked", "skipped", "canceled"].includes(node.status)))) {
-    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + activeDelegationTasks.size;
-    if (globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) {
-      const timer = setTimeout(() => queueWorkflowTick(workflowId, ownerUserId), 1_000);
-      timer.unref();
-      return;
-    }
-    await integrateWorkflow(workflowId, ownerUserId);
-    return;
-  }
-  if (workflow.status === "queued") { workflowRepository.updateRun(workflowId, "running"); syncWorkflowProtocolFiles(workflowId, ownerUserId); }
-  const running = workflow.nodes.filter((node) => node.status === "running" || node.status === "queued");
-  const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
-  for (const node of workflow.nodes) {
-    if (node.status !== "pending" && node.status !== "ready" && node.status !== "interrupted") continue;
-    if (!node.dependsOn.every((id) => completed.has(id))) continue;
-    if (node.workspaceAccess === "write" && running.some((other) => other.workspaceAccess === "write" && scopesOverlap(workflowAuthorizedWriteScopes(node.writeScope), workflowAuthorizedWriteScopes(other.writeScope)))) continue;
-    const workflowActive = [...activeWorkflowNodes.keys()].filter((key) => key.startsWith(`${workflowId}:`)).length;
-    const taskLimit = workflow.maxConcurrentAgents || DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS;
-    const globalActive = activeWorkflowNodes.size + activeWorkflowIntegrations.size + activeDelegationTasks.size;
-    if (workflowActive >= taskLimit || globalActive >= GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) break;
-    if (node.provider === "auto") { node.provider = resolveWorkflowProvider("auto", node.workspaceAccess, providerCapabilities); workflowRepository.updateNode(node); }
-    const checkpointRoot = workflowNodeCheckpointRoot(workflow.workDirectory, node.id, node.planVersion);
-    let attempt: WorkflowNodeAttemptRecord;
-    try {
-      const runtimeBinding = await runtimeBindingForProvider(node.provider);
-      attempt = workflowRepository.claimNodeAttempt(node.recordId, WORKFLOW_RUNNER_ID, checkpointRoot, new Date(Date.now() + 5 * 60_000).toISOString(), runtimeBinding);
-    }
-    catch { continue; }
-    const claimedNode = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!claimedNode) continue;
-    syncWorkflowProtocolFiles(workflowId, ownerUserId);
-    appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.started", { provider: claimedNode.provider }, node.id, attempt.attempt);
-    const controller = new AbortController(); const key = `${workflowId}:${node.id}`; workflowNodeIntents.delete(key); activeWorkflowNodes.set(key, controller);
-    const leaseHeartbeat = setInterval(() => {
-      const renewed = workflowRepository.renewNodeLease(claimedNode.recordId, attempt.id, WORKFLOW_RUNNER_ID, new Date(Date.now() + 5 * 60_000).toISOString());
-      if (!renewed) controller.abort(new Error("节点执行租约已失效"));
-    }, 30_000);
-    leaseHeartbeat.unref();
-    const releaseSkillProjection = skillProjectionManager.acquireTemporarySkills(
-      `${workspace.id}:workflow:${workflowId}`,
-      workflow.workDirectory,
-      claimedNode.skills
-    );
-    workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
-    running.push(claimedNode);
-    workflowEvent(workflowId, "workflow.node.started", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-    void executeWorkflowNode(workflowId, ownerUserId, node.id, controller, attempt, WORKFLOW_RUNNER_ID).then((result) => {
-      if (workflowNodeIntents.has(key)) throw new Error("节点已收到用户控制请求");
-      const latest = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!latest) return;
-      const finishedAt = new Date().toISOString();
-      const previousDigest = latest.resultDigest || (latest.summary ? workflowResultDigest(latest.summary) : null);
-      const nextDigest = workflowResultDigest(result);
-      workflowRepository.checkpointNodeAttempt(attempt.id, { phase: "completed", status: "completed", leaseExpiresAt: null, verifiedResult: result, finishedAt });
-      latest.status = "completed"; latest.summary = result; latest.resultDigest = nextDigest; latest.staleReason = null; latest.leaseExpiresAt = null; latest.nextRetryAt = null; latest.finishedAt = finishedAt; latest.logs.push(workflowLog("status", "执行完成", result.humanSummary, undefined, { attempt: latest.attempt, runId: attempt.id, contextId: latest.engineThreadId })); workflowRepository.updateNode(latest);
-      if (previousDigest && previousDigest !== nextDigest) workflowRepository.invalidateCompletedDependents(workflowId, latest.planVersion, latest.id);
-      const reopenedDependents = reopenRecoveredWorkflowDependents(workflowId, ownerUserId);
-      syncWorkflowProtocolFiles(workflowId, ownerUserId);
-      appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.completed", { outcome: result.outcome, resultDigest: nextDigest }, node.id, latest.attempt);
-      for (const reopenedNodeId of reopenedDependents) appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.dependency_recovered", { upstreamNodeId: latest.id }, reopenedNodeId);
-      workflowEvent(workflowId, "workflow.node.completed", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-    }).catch((error) => {
-      const latest = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id); if (!latest) return;
-      const controlIntent = workflowNodeIntents.get(key);
-      if (controlIntent === "pause" || controlIntent === "restart" || controlIntent === "cancel") {
-        try {
-          workflowRepository.checkpointNodeAttempt(attempt.id, { status: controlIntent === "cancel" ? "abandoned" : "interrupted", leaseExpiresAt: null, error: controlIntent === "cancel" ? "节点已由用户终止" : null, finishedAt: controlIntent === "cancel" ? new Date().toISOString() : null });
-          if (controlIntent === "pause") {
-            const paused = workflowRepository.completeNodePause(workflowId, ownerUserId, node.id);
-            syncWorkflowProtocolFiles(workflowId, ownerUserId);
-            appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.paused", { reason: "user" }, node.id, latest.attempt);
-            workflowEvent(workflowId, "workflow.node.paused", ownerUserId, paused.workspaceId, paused.revision, node.id);
-          } else if (controlIntent === "restart") {
-            const restarted = workflowRepository.restartNode(workflowId, ownerUserId, node.id);
-            syncWorkflowProtocolFiles(workflowId, ownerUserId);
-            appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.restart_requested", { reason: "user" }, node.id, latest.attempt);
-            workflowEvent(workflowId, "workflow.node.restart_requested", ownerUserId, restarted.workspaceId, restarted.revision, node.id);
-          } else {
-            const canceled = workflowRepository.get(workflowId, ownerUserId)!;
-            syncWorkflowProtocolFiles(workflowId, ownerUserId);
-            appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.canceled", { reason: "user" }, node.id, latest.attempt);
-            workflowEvent(workflowId, "workflow.node.canceled", ownerUserId, canceled.workspaceId, canceled.revision, node.id);
-          }
-        } catch (controlError) {
-          console.error(`Workflow node control failed for ${key}`, controlError);
-        }
-        return;
-      }
-      const interruptedWithoutTimeout = controller.signal.aborted && !timeoutReason(controller.signal);
-      if (interruptedWithoutTimeout) {
-        const reason = controller.signal.reason instanceof Error
-          ? controller.signal.reason.message
-          : "节点执行进程中断，等待安全恢复";
-        latest.status = "interrupted";
-        latest.error = reason;
-        latest.leaseExpiresAt = null;
-        latest.nextRetryAt = null;
-        latest.finishedAt = null;
-        latest.logs.push(workflowLog("status", "执行已中断", `${reason}；将从 Agent 执行阶段重新接管，不消耗合同重试次数`, undefined, { attempt: latest.attempt, runId: attempt.id, contextId: latest.engineThreadId }));
-        workflowRepository.updateNode(latest);
-        workflowRepository.checkpointNodeAttempt(attempt.id, { status: "interrupted", leaseExpiresAt: null, error: reason, finishedAt: null });
-        syncWorkflowProtocolFiles(workflowId, ownerUserId);
-        appendWorkflowProtocolEvent(workflowId, ownerUserId, "node.interrupted", { reason, recoverable: true }, node.id, latest.attempt);
-        workflowEvent(workflowId, "workflow.node.interrupted", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-        return;
-      }
-      if (error instanceof WorkflowNodeOutcomeError) latest.summary = error.result;
-      latest.error = error instanceof Error ? error.message : String(error); latest.logs.push(workflowLog("error", "执行失败", latest.error, undefined, { attempt: latest.attempt, runId: attempt.id, contextId: latest.engineThreadId }));
-      const runStatus = workflowRepository.get(workflowId, ownerUserId)?.status;
-      const category = workflowFailureCategory(error); const retryLimit = workflowRetryLimit(category);
-      const blocked = error instanceof WorkflowNodeOutcomeError && error.result.outcome === "blocked";
-      const stageRetryError = error instanceof WorkflowNodeStageRetryError ? error : null;
-      const stageRetry = Boolean(stageRetryError);
-      const automaticRetryAllowed = !(error instanceof WorkflowNodeOutcomeError) || error.allowAutomaticRetry;
-      const retry = runStatus !== "canceled" && !blocked && automaticRetryAllowed && (stageRetry || workflowAgentRetryAllowed(latest.provider, latest.failurePolicy, latest.attempt, retryLimit));
-      latest.status = runStatus === "canceled" ? "canceled" : blocked ? "blocked" : retry ? "retry_wait" : "failed";
-      const stageRetryText = stageRetryError?.stage === "snapshot"
-        ? "仅重新运行工作区快照与后续文件验收，不重新执行 Agent，也不消耗新的尝试次数"
-        : "仅重新运行系统验收，不重新执行 Agent，也不消耗新的尝试次数";
-      latest.logs.push(workflowLog("status", retry ? (stageRetry ? "等待阶段重试" : "等待重试") : "停止重试", stageRetry ? stageRetryText : `${category} · ${latest.attempt}/${retryLimit}`, undefined, { attempt: latest.attempt, runId: attempt.id, contextId: latest.engineThreadId }));
-      const finishedAt = new Date().toISOString();
-      const delay = category === "transient" ? Math.min(8_000, 1_000 * (2 ** latest.attempt)) : 1_000;
-      latest.nextRetryAt = retry ? new Date(Date.now() + delay).toISOString() : null;
-      latest.leaseExpiresAt = null; latest.finishedAt = ["failed", "blocked", "canceled"].includes(latest.status) ? finishedAt : null; workflowRepository.updateNode(latest);
-      workflowRepository.checkpointNodeAttempt(attempt.id, { status: runStatus === "canceled" ? "abandoned" : stageRetry ? "interrupted" : "failed", leaseExpiresAt: null, error: latest.error, finishedAt: stageRetry ? null : finishedAt });
-      syncWorkflowProtocolFiles(workflowId, ownerUserId);
-      appendWorkflowProtocolEvent(workflowId, ownerUserId, retry ? "node.retry_wait" : "node.failed", { error: latest.error, category, retry, stage: stageRetryError?.stage || null }, node.id, latest.attempt);
-      workflowEvent(workflowId, "workflow.node.failed", ownerUserId, workflow.workspaceId, workflow.revision + 1, node.id);
-      if (retry) {
-        const timer = setTimeout(() => {
-          const retryNode = workflowRepository.get(workflowId, ownerUserId)?.nodes.find((item) => item.id === node.id);
-          if (!retryNode || retryNode.status !== "retry_wait") return;
-          queueWorkflowTick(workflowId, ownerUserId);
-        }, delay);
-        timer.unref();
-      }
-    }).finally(() => {
-      releaseSkillProjection();
-      workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, workflow.workDirectory));
-      clearInterval(leaseHeartbeat);
-      activeWorkflowNodes.delete(key);
-      workflowNodeIntents.delete(key);
-      queueWorkflowTick(workflowId, ownerUserId);
-    });
-  }
-}
+function queueWorkflowTick(workflowId: string, ownerUserId: string) { orchestrationScheduler.queueWorkflowTick(workflowId, ownerUserId); }
+function reopenRecoveredWorkflowDependents(workflowId: string, ownerUserId: string) { return orchestrationScheduler.reopenRecoveredWorkflowDependents(workflowId, ownerUserId); }
 
 const app = express();
+codexSearchCompatibility.register(app);
 app.use(performanceMonitor.middleware);
 app.use(compression({
   threshold: 1_024,
@@ -6966,7 +5617,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, port: PORT, productId: appUpdateService.config.productId, productName: appUpdateService.config.productName, version: appUpdateService.config.currentVersion, desktop: process.env.METACODE_DESKTOP === "1", protectedWorkflow: false, authBypassed: auth.isAuthBypassed(), skillMode: "plain", delegationProtocolVersion: 3, agentProviders: agentAdapterRegistry.list().map((item) => item.id) });
+  res.json({ ok: true, port: PORT, productId: appUpdateService.config.productId, productName: appUpdateService.config.productName, version: appUpdateService.config.currentVersion, desktop: process.env.METACODE_DESKTOP === "1", protectedWorkflow: false, authBypassed: auth.isAuthBypassed(), skillMode: "plain", delegationProtocolVersion: 3, agentProviders: agentAdapterRegistry.list().map((item) => item.id), plugins: pluginHost.publicList() });
 });
 
 app.post("/api/internal/launcher/shutdown", (req, res) => {
@@ -6990,8 +5641,9 @@ app.post("/api/internal/delegation/tasks", async (req, res) => {
     return res.status(401).json({ error: "Agent 委派桥接令牌无效" });
   }
   try {
-    const providerId = normalizeProviderId(req.body?.providerId);
-    res.status(202).json(queueDelegatedTask(req.body as AgentBridgeRequest, providerId));
+    const requestedProvider = String(req.body?.providerId || "").trim().toLowerCase();
+    const providerId = requestedProvider === "auto" ? requestedProvider as AgentProviderId : normalizeProviderId(requestedProvider);
+    res.status(202).json(await queueDelegatedTask(req.body as AgentBridgeRequest, providerId));
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -7002,7 +5654,7 @@ app.post("/api/internal/codex/delegate", async (req, res) => {
     return res.status(401).json({ error: "Codex 委派桥接令牌无效" });
   }
   try {
-    res.status(202).json(queueDelegatedTask(req.body as CodexBridgeRequest, "codex"));
+    res.status(202).json(await queueDelegatedTask(req.body as CodexBridgeRequest, "codex"));
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -7012,11 +5664,12 @@ app.post("/api/internal/claude/delegate", async (req, res) => {
     return res.status(401).json({ error: "Claude 子任务桥接令牌无效" });
   }
   try {
-    res.status(202).json(queueDelegatedTask(req.body as ClaudeBridgeRequest, "claude"));
+    res.status(202).json(await queueDelegatedTask(req.body as ClaudeBridgeRequest, "claude"));
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
+
 app.post("/api/auth/register", (req, res, next) => {
   auth.register(req, res).then(() => claimLegacyOwnership(auth.getOwnerUserId())).catch(next);
 });
@@ -7043,7 +5696,118 @@ app.post("/api/auth/totp/enable", auth.requireAuth, auth.requireRoles("owner", "
   } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 app.use("/api", auth.requireAuth);
+registerNativeConversationRoutes(app, {
+  broker: nativeInteractions,
+  session: sessionById,
+  busy: id => activeRuns.has(id) || nativeTerminals.snapshot(id, state.sessions.find(s => s.id === id)?.ownerUserId || "")?.status === "running",
+  agents: async (id, owner) => {
+    const session = sessionById(id, owner)!; const workspace = executionWorkspaceForSession(session, owner);
+    if (!workspace) throw new Error("工作区不存在");
+    return (await nativeCustomAgents(session, workspace)).agents.filter(a => a.provider === session.engine).map(({ name, displayName, description, scope, provider, metadata }) => ({ name, displayName, description,
+      requiresProjectTrust: provider === "claude" && scope === "project" && Boolean(metadata.hooks || metadata.mcpServers)
+    }));
+  },
+  save: async (id, owner, options) => {
+    const session = sessionById(id, owner)!;
+    session.nativeOptions = options; session.updatedAt = new Date().toISOString(); session.revision += 1;
+    await saveState(); publishSessionChanged(session);
+  },
+  fork: async (id, owner) => {
+    const source = sessionById(id, owner)!;
+    if (!source.engineSessionId || source.nativeForkSourceId) throw new Error("请先完成一轮原生会话，再创建原生分支");
+    const workspace = await ensureSessionExecutionRoot(source);
+    const { branch, branchWorkspace } = await prepareNativeFork(source, workspace, {
+      title: nextBranchTitle(source), ensureRoot: ensureSessionExecutionRoot, codexLaunch: codexNativeLaunch
+    });
+    // Recheck after native I/O: a run could have started while forking.
+    if (activeRuns.has(source.id) || nativeTerminals.get(id, owner)?.status === "running" || sessionById(id, owner) !== source) throw new Error("源任务状态已变化，请结束执行后重新创建分支");
+    const context = taskContextStore.ensure({ kind: "session", id: source.id, executionRoot: workspace.root }, owner, source.workspaceId, source.title);
+    branch.taskContextId = context.id;
+    taskContextStore.link(context.id, { kind: "session", id: branch.id, executionRoot: branchWorkspace.root }, owner, source.workspaceId);
+    appendMessage(branch, { role: "event", eventType: "native.fork", text: source.engine === "claude" ? "已创建原生分支任务，首次发送时由 Claude 官方 CLI 分叉完整历史" : "已通过 Codex 官方协议创建独立原生历史分支" });
+    const sourceBinding = codexLinkRepository.findBySession(owner, source.id);
+    const branchBinding = source.engine === "codex" && sourceBinding?.accessMode === "resume" && branch.codexThreadId
+      ? codexLinkRepository.bind({ ...sourceBinding, sessionId: branch.id, threadId: branch.codexThreadId, threadName: branch.title, threadPreview: branch.title, previousThreadId: null }) : null;
+    state.sessions.unshift(branch);
+    try { await saveState(); } catch (error) { state.sessions = state.sessions.filter(s => s.id !== branch.id); taskContextStore.unlink({ kind: "session", id: branch.id }, owner); if (branchBinding) codexLinkRepository.unbind(owner, branchBinding.id); throw error; }
+    eventHub.publish("sessions.changed", { sessionId: branch.id, action: "created" }, [owner]);
+    return sessionWithMessageWindow(branch, 80);
+  }
+});
+registerNativeTerminalRoutes(app, {
+  manager: nativeTerminals,
+  authorize: (id, owner) => { const session = sessionById(id, owner); return Boolean(session && isNativeEnhancedProvider(session.engine)); },
+  context: (id, owner) => { const session = sessionById(id, owner)!; return { canFork: session.engine === "claude" && Boolean(session.engineSessionId) }; },
+  prepare: async (id, owner, input) => {
+    const session = sessionById(id, owner)!;
+    if (activeRuns.has(id)) throw new Error("请先停止当前对话，再启动原生终端");
+    const workspace = await ensureSessionExecutionRoot(session);
+    const readiness = await providerReadiness(session.engine, owner, workspace);
+    if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "Agent 尚未准备好");
+    const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    let executable: string, args: string[];
+    if (session.engine === "claude") {
+      const runtime = await getClaudeRuntime();
+      const command = resolveClaudeCommand(runtime.path);
+      assertNativeTerminalExecutable(command.executable);
+      executable = command.executable; args = [...command.args, "--permission-mode", state.settings.claude.permissionMode, ...claudeNativeSessionArgs(session.engineSessionId, input.forkSession === true)];
+      if (input.agentTeams === true) args.push("--teammate-mode", "in-process");
+      if (state.settings.claude.model) args.push("--model", state.settings.claude.model);
+      if (state.settings.claude.effort) args.push("--effort", state.settings.claude.effort);
+      args.push("--mcp-config", await workspaceMcpConfigPath(workspace), "--strict-mcp-config");
+      env.CLAUDE_CONFIG_DIR = nativeProviderHome("claude", owner);
+      env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+      const profile = ownerProviderProfiles(owner, "claude").find((item) => item.isDefault) || ownerProviderProfiles(owner, "claude")[0];
+      const profileEnv = providerActiveEnvironment("claude", profile?.authMethodId, providerConnectionEnvironment(profile));
+      const connectionEnv = claudeNativeTerminalEnvironment(env, state.settings.claude.baseUrl, state.settings.claude.apiKey, profileEnv.ANTHROPIC_AUTH_TOKEN);
+      delete env.ANTHROPIC_API_KEY;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+      delete env.ANTHROPIC_BASE_URL;
+      Object.assign(env, connectionEnv);
+      if (input.agentTeams === true) env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+      else delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+    } else {
+      const runtime = await detectCodexRuntime(); executable = runtime.path;
+      assertNativeTerminalExecutable(executable);
+      const mcp = codexMcpConfigForWorkspace(workspace);
+      const configured = terminalMcpEnvironment({ ...codexProviderConfig(state.settings), ...mcp.config, model_reasoning_effort: state.settings.reasoningEffort, web_search: state.settings.webSearch }, { ...envForCodex(state.settings, undefined, false, nativeProviderHome("codex", owner)), ...mcp.env });
+      Object.assign(env, configured.env);
+      args = [...codexTerminalConfigArgs(configured.config), "--no-alt-screen", "--no-daemon", "--sandbox", state.settings.sandboxMode, "--ask-for-approval", state.settings.approvalPolicy];
+      if (state.settings.model) args.push("--model", state.settings.model);
+      if (session.codexThreadId) args.push("resume", session.codexThreadId);
+    }
+    // The lease is acquired after asynchronous preparation. Normal conversation
+    // runs and workflows use the same coordinator, preventing concurrent writes.
+    if (activeRuns.has(id)) throw new Error("当前对话已开始运行，请先停止");
+    if (shuttingDown || sessionById(id, owner) !== session) throw new Error("工作台正在关闭或任务已删除");
+    const lease = workspaceExecutionCoordinator.tryAcquire({ root: workspace.root, ownerId: `native-terminal:${id}`, label: "原生终端", access: "write" });
+    if (!lease) throw new Error("此工作区仍有对话或编排在运行，请稍后启动");
+    return { sessionId: id, ownerId: owner, provider: session.engine, cwd: workspace.root, executable, args, env, cols: Number(input.cols), rows: Number(input.rows), release: () => lease.release() };
+  }
+});
+
+app.use("/api/workflows", (req, res, next) => {
+  const readOnly = req.method === "GET" || req.method === "HEAD";
+  const maintenanceOnly = req.method === "DELETE" || /\/(metadata|open-folder|cancel|pause)$/.test(req.path);
+  if (!readOnly && !maintenanceOnly && !pluginHost.isEnabled(ORCHESTRATION_PLUGIN_ID)) return res.status(409).json({ error: "任务编排插件当前已停用，请在设置中启用", code: "orchestration-plugin-disabled" });
+  next();
+});
 app.use("/api/codex-link", codexLink.router);
+app.get("/api/plugins", auth.requireRoles("owner", "admin"), (_req, res) => {
+  res.json({ schemaVersion: 1, items: pluginHost.publicList() });
+});
+app.patch("/api/plugins/:id", auth.requireRoles("owner", "admin"), (req, res) => {
+  try {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled 必须是布尔值" });
+    const plugin = pluginHost.setEnabled(String(req.params.id), enabled);
+    const { dataDirectory: _dataDirectory, runtimeDirectory: _runtimeDirectory, ...publicPlugin } = plugin;
+    eventHub.publish("plugins.changed", { id: publicPlugin.id, enabled: publicPlugin.enabled });
+    res.json({ plugin: publicPlugin });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
 app.get("/api/performance", auth.requireRoles("owner", "admin"), (_req, res) => res.json(performanceMonitor.snapshot()));
 app.get("/api/app-update/status", (_req, res) => res.json(appUpdateService.status()));
 app.post("/api/app-update/check", auth.requireRoles("owner", "admin"), async (_req, res) => {
@@ -7063,567 +5827,143 @@ app.post("/api/app-update/remind", auth.requireRoles("owner", "admin"), async (r
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-// Task orchestration has its own API and state machine. It never creates or
-// mutates a free-chat Session; the shared lower layer is only the CLI runner.
-function workflowDirectoryName(title: string) {
-  const normalized = title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 48).replace(/[ .]+$/g, "") || "任务编排";
-  return normalized;
-}
-
-function createWorkflowDirectory(workspace: Workspace, title: string) {
-  const base = workflowDirectoryName(title);
-  let suffix = 1;
-  let directory = path.join(workspace.root, base);
-  while (fs.existsSync(directory)) directory = path.join(workspace.root, `${base} (${++suffix})`);
-  fs.mkdirSync(path.join(directory, "artifacts"), { recursive: true });
-  fs.mkdirSync(path.join(directory, "nodes"), { recursive: true });
-  workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, directory));
-  return directory;
-}
-
-function requestedWorkflowConcurrency(value: unknown) {
-  if (value === undefined || value === null || value === "") return null;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS) throw new Error(`并行 Agent 数必须是 1-${GLOBAL_WORKFLOW_MAX_CONCURRENT_AGENTS} 的整数`);
-  return parsed;
-}
-
-app.get("/api/workflows", (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.json(workflowRepository.list(req.authUser!.id, req.query.workspaceId ? String(req.query.workspaceId) : undefined));
+// The host links tasks while the plugin retains its independent state machine.
+registerOrchestrationRoutes(app, {
+  answerWorkflowQuestion: orchestrationRuntime.answerWorkflowQuestion,
+  acquireRequest: () => pluginHost.acquire(ORCHESTRATION_PLUGIN_ID),
+  workspaceTreeIndex,
+  workflowRepository,
+  workspaceById,
+  agentAdapterRegistry,
+  providerReadiness,
+  uid,
+  workflowStateFiles,
+  workflowTargetService: workflowTargets,
+  taskContextIdForWorkflow: (workflow) => taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId)?.id || null,
+  plannerContextForWorkflow: (workflow) => {
+    const context = taskContextStore.forExecution({ kind: "workflow", id: workflow.id }, workflow.ownerUserId);
+    const handoff = latestTaskHandoffForRoot(context, workflow.executionRoot || workflow.workDirectory);
+    return handoff ? renderTaskHandoff(handoff) : "";
+  },
+  onWorkflowDeleted: (id, ownerUserId) => taskContextStore.unlink({ kind: "workflow", id }, ownerUserId),
+  prepareTaskContext: (input) => prepareWorkflowTaskContext(input, {
+    store: taskContextStore, workspaceById, sessionById,
+    executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+    workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId), targets: workflowTargets
+  }),
+  onWorkflowCreated: (workflow, taskContextId) => {
+    const source = taskContextId || (workflow.parentWorkflowId ? taskContextStore.forExecution({ kind: "workflow", id: workflow.parentWorkflowId }, workflow.ownerUserId)?.id : null);
+    const context = source
+      ? taskContextStore.link(source, { kind: "workflow", id: workflow.id, executionRoot: workflow.executionRoot || workflow.workDirectory }, workflow.ownerUserId, workflow.workspaceId)
+      : taskContextStore.ensure({ kind: "workflow", id: workflow.id, executionRoot: workflow.executionRoot || workflow.workDirectory }, workflow.ownerUserId, workflow.workspaceId, workflow.title);
+    workflow.taskContextId = context.id;
+  },
+  workflowEvent,
+  workflowRuntimeActive,
+  activeWorkflowPlanners,
+  activeWorkflowNodes,
+  workflowNodeIntents,
+  activeWorkflowIntegrations,
+  waitForWorkflowRuntimeRelease,
+  openInSystemFileManager,
+  assertExistingDirectory,
+  workflowResultPath,
+  runtimeBindingForProvider,
+  workspaceAgentConfig,
+  managedSkillManager,
+  mcpServersForWorkspace,
+  currentWorkflowProviderCapabilities,
+  WORKFLOW_PLANNER_TRANSACTION_DIR,
+  workflowPlannerRequestKey,
+  requestWorkflowPlan,
+  plannerSkillContext,
+  workflowPlannerFailureMessage,
+  retryableWorkflowPlannerFailure,
+  activeWorkflowPlannerRuns,
+  assertWorkflowExecutionReady,
+  queueWorkflowTick
 });
 
-app.post("/api/workflows", async (req, res) => {
-  try {
-    const workspace = workspaceById(String(req.body?.workspaceId || ""), req.authUser!.id);
-    const prompt = String(req.body?.prompt || "").trim();
-    const plannerEngine = normalizeProviderId(req.body?.plannerEngine || "claude");
-    const plannerProvider = agentAdapterRegistry.descriptor(plannerEngine);
-    if (!plannerProvider?.capabilities.workflow.planner || !agentAdapterRegistry.workflowPlannerRunner(plannerEngine)) return res.status(400).json({ error: "规划 Provider 未注册或不支持工作流规划" });
-    const maxConcurrentAgents = requestedWorkflowConcurrency(req.body?.maxConcurrentAgents);
-    if (!workspace) return res.status(400).json({ error: "请选择工作区" });
-    if (!prompt) return res.status(400).json({ error: "请输入完整任务" });
-    const readiness = await providerReadiness(plannerEngine, req.authUser!.id, workspace);
-    if (!readiness.ready) return res.status(409).json({ error: readiness.issues[0]?.message || "规划 Agent 尚未准备好", code: "provider-not-ready", readiness });
-    const id = uid("workflow");
-    const workDirectory = createWorkflowDirectory(workspace, prompt.split(/\r?\n/, 1)[0]);
-    const workflow = workflowRepository.create({ id, ownerUserId: req.authUser!.id, workspaceId: workspace.id, workDirectory, prompt, plannerEngine, maxConcurrentAgents });
-    workflowStateFiles.sync(workflow);
-    workflowStateFiles.appendEvent(workflow, { type: "workflow.created", payload: { workspaceId: workspace.id } });
-    workflowEvent(workflow.id, "workflow.created", req.authUser!.id, workspace.id, workflow.revision);
-    res.status(201).json(workflow);
-  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.get("/api/workflows/:id", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  res.setHeader("Cache-Control", "no-store"); res.json(workflow);
-});
-
-app.get("/api/workflows/:id/branches", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  res.setHeader("Cache-Control", "no-store");
-  res.json(workflowRepository.listBranches(workflow.originId, req.authUser!.id));
-});
-
-app.post("/api/workflows/:id/branches", async (req, res) => {
-  const source = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!source) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const workspace = workspaceById(source.workspaceId, req.authUser!.id); if (!workspace) throw new Error("工作区不存在");
-    const prompt = String(req.body?.prompt || source.originalPrompt).trim(); if (!prompt) throw new Error("初始任务不能为空");
-    const plannerEngine = normalizeProviderId(req.body?.plannerEngine || source.plannerEngine);
-    const plannerProvider = agentAdapterRegistry.descriptor(plannerEngine);
-    if (!plannerProvider?.capabilities.workflow.planner || !agentAdapterRegistry.workflowPlannerRunner(plannerEngine)) throw new Error("规划 Provider 未注册或不支持工作流规划");
-    const readiness = await providerReadiness(plannerEngine, req.authUser!.id, workspace);
-    if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "规划 Agent 尚未准备好");
-    const maxConcurrentAgents = req.body?.maxConcurrentAgents === undefined ? source.maxConcurrentAgents : requestedWorkflowConcurrency(req.body.maxConcurrentAgents);
-    const branchIndex = workflowRepository.nextBranchIndex(source.originId, req.authUser!.id);
-    const id = uid("workflow");
-    const workDirectory = createWorkflowDirectory(workspace, `${prompt.split(/\r?\n/, 1)[0]} - 方案 ${branchIndex}`);
-    const branch = workflowRepository.create({ id, ownerUserId: req.authUser!.id, workspaceId: source.workspaceId, workDirectory, prompt, plannerEngine, maxConcurrentAgents, originId: source.originId, parentWorkflowId: source.id, branchIndex, branchLabel: `方案 ${branchIndex}`, reviewNote: String(req.body?.note || "").trim() || null });
-    workflowStateFiles.sync(branch);
-    workflowStateFiles.appendEvent(branch, { type: "workflow.branch.created", payload: { originId: branch.originId, parentWorkflowId: branch.parentWorkflowId, branchIndex } });
-    workflowEvent(branch.id, "workflow.branch.created", req.authUser!.id, workspace.id, branch.revision);
-    res.status(201).json(branch);
-  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.put("/api/workflows/:id/prompt", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const updated = workflowRepository.updateOriginalPrompt(workflow.id, req.authUser!.id, Number(req.body?.revision), String(req.body?.prompt || ""));
-    workflowStateFiles.sync(updated);
-    workflowStateFiles.appendEvent(updated, { type: "workflow.prompt.changed" });
-    workflowEvent(updated.id, "workflow.prompt.changed", req.authUser!.id, updated.workspaceId, updated.revision);
-    res.json(updated);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.put("/api/workflows/:id/metadata", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "任务编排不存在" });
-  try {
-    const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
-    const folderId = req.body?.folderId === undefined ? undefined : String(req.body.folderId || "").trim() || null;
-    if (folderId && !workspace?.taskFolders?.some((folder) => folder.id === folderId)) throw new Error("目标任务文件夹不存在");
-    if (req.body?.archived && ["queued", "running", "integrating"].includes(workflow.status)) throw new Error("执行中的任务不能归档");
-    const updated = workflowRepository.updateMetadata(workflow.id, req.authUser!.id, { title: req.body?.title, pinned: req.body?.pinned, archived: req.body?.archived, folderId });
-    workflowStateFiles.syncWorkflow(updated);
-    workflowEvent(updated.id, "workflow.metadata.changed", req.authUser!.id, updated.workspaceId, updated.revision);
-    res.json(updated);
-  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.delete("/api/workflows/:id", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "任务编排不存在" });
-  const terminate = req.query.terminate === "true" || req.query.terminate === "1";
-  const policy = taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id));
-  if (policy.requiresTermination && !terminate) {
-    return res.status(409).json({ error: `${policy.reason}，请使用“取消并删除”`, code: "TASK_TERMINATION_REQUIRED", deletionPolicy: policy });
-  }
-  try {
-    let current = workflow;
-    if (policy.requiresTermination) {
-      if (["draft", "planning", "awaiting_approval", "queued", "running", "integrating", "needs_review", "paused"].includes(current.status)) {
-        current = workflowRepository.cancel(current.id, req.authUser!.id, current.revision);
-        workflowStateFiles.sync(current);
-        workflowStateFiles.appendEvent(current, { type: "workflow.canceled", payload: { reason: "delete" } });
-        workflowEvent(current.id, "workflow.canceled", req.authUser!.id, current.workspaceId, current.revision);
-      }
-      activeWorkflowPlanners.get(current.id)?.abort(new Error("任务编排正在删除"));
-      for (const [key, controller] of activeWorkflowNodes) if (key.startsWith(`${current.id}:`)) {
-        workflowNodeIntents.set(key, "cancel");
-        controller.abort(new Error("任务编排正在删除"));
-      }
-      activeWorkflowIntegrations.get(current.id)?.abort(new Error("任务编排正在删除"));
-      await waitForWorkflowRuntimeRelease(current.id);
-    }
-    const latest = workflowRepository.get(current.id, req.authUser!.id);
-    if (!latest) return res.status(204).end();
-    const latestPolicy = taskDeletionPolicy("workflow", latest.status, workflowRuntimeActive(latest.id));
-    if (latestPolicy.requiresTermination) throw new Error(latestPolicy.reason || "任务编排仍在结束");
-    workflowRepository.delete(latest.id, req.authUser!.id);
-    workflowEvent(latest.id, "workflow.deleted", req.authUser!.id, latest.workspaceId, latest.revision + 1);
-    res.status(204).end();
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/open-folder", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "任务编排不存在" });
-  try { await openInSystemFileManager(assertExistingDirectory(workflow.workDirectory)); res.json({ ok: true }); }
-  catch (error) { res.status(400).json({ error: `无法打开任务文件夹：${error instanceof Error ? error.message : String(error)}` }); }
-});
-
-app.get("/api/workflows/:id/artifacts", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "任务编排不存在" });
-  const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
-  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
-  const reportedPaths = [...new Set([workflow.finalResult, ...workflow.nodes.map((node) => node.summary)].flatMap((result) => result?.outputs.map((output) => output.path).filter((item): item is string => Boolean(item)) || []))];
-  const items = reportedPaths.map((reportedPath) => {
-    try {
-      const resolved = workflowResultPath(workflow, workspace, reportedPath, false);
-      if (!fs.existsSync(resolved.absolute)) return { path: reportedPath, relativePath: resolved.relative, exists: false, kind: "missing", size: null };
-      const stat = fs.statSync(resolved.absolute);
-      return { path: reportedPath, relativePath: resolved.relative, exists: true, kind: stat.isDirectory() ? "directory" : "file", size: stat.isFile() ? stat.size : null };
-    } catch {
-      return { path: reportedPath, relativePath: null, exists: false, kind: "invalid", size: null };
-    }
-  });
-  res.setHeader("Cache-Control", "no-store");
-  res.json({ items });
-});
-
-app.get("/api/workflows/:id/maintenance", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  res.setHeader("Cache-Control", "no-store");
-  res.json(workflowStateFiles.maintenance(workflow));
-});
-
-async function executeWorkflowPlanningRun(input: {
-  workflowId: string;
-  ownerUserId: string;
-  mode: WorkflowPlanningMode;
-  note: string | null;
-  previousPlan: WorkflowPlan | null;
-  baseWorkflow: NonNullable<ReturnType<WorkflowRepository["get"]>>;
-  maintenance: boolean;
-  controller: AbortController;
-}) {
-  const { workflowId, ownerUserId, mode, note, previousPlan, baseWorkflow, maintenance, controller } = input;
-  let transactionPath = "";
-  let transactionFinished = false;
-  try {
-    const workspace = workspaceById(baseWorkflow.workspaceId, ownerUserId); if (!workspace) throw new Error("工作区不存在");
-    let snapshot = workflowRepository.get(workflowId, ownerUserId)!;
-    const plannerBinding = await runtimeBindingForProvider(snapshot.plannerEngine);
-    const plannerRuntime = workflowRepository.bindPlannerRuntime(workflowId, ownerUserId, plannerBinding);
-    if (plannerRuntime.changed) {
-      workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("status", "运行时已更新", "规划器运行时或能力已变化，已清除旧原生会话并从持久化任务上下文重新开始"));
-      snapshot = workflowRepository.get(workflowId, ownerUserId)!;
-    }
-    workflowRepository.setPlannerSession(workflowId, ownerUserId, snapshot.plannerSessionId || `workflow-planner:${workflowId}`, snapshot.plannerEngineSessionId);
-    snapshot = workflowRepository.get(workflowId, ownerUserId)!;
-    workflowStateFiles.syncWorkflow(snapshot);
-    workflowStateFiles.appendEvent(snapshot, { type: maintenance ? "planner.maintenance.started" : "planner.started", payload: { mode } });
-    workflowEvent(workflowId, "workflow.planner.started", ownerUserId, workspace.id, snapshot.revision);
-    const policies = workspaceAgentConfig(workspace).skillPolicies;
-    const allowedSkills = managedSkillManager.listPublic()
-      .filter((skill) => !skill.builtIn && (policies[skill.name] === "auto" || policies[skill.name] === "always"))
-      .map((skill) => skill.name);
-    const availableMcpServers = mcpServersForWorkspace(workspace).map((server) => server.name);
-    const providerCapabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
-    await fsp.mkdir(WORKFLOW_PLANNER_TRANSACTION_DIR, { recursive: true });
-    transactionPath = path.join(WORKFLOW_PLANNER_TRANSACTION_DIR, `${workflowId}-${mode}.json`);
-    const openedTransaction = openWorkflowPlanTransaction(transactionPath, {
-      workflowId, mode, baseRevision: snapshot.revision, basePlanVersion: baseWorkflow.activePlanVersion,
-      previousPlan, availableSkills: allowedSkills, availableMcpServers, providerCapabilities,
-      requestKey: workflowPlannerRequestKey(baseWorkflow, mode, note, previousPlan)
-    });
-    workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("tool", openedTransaction.resumed ? "恢复规划事务" : "建立规划事务", openedTransaction.resumed ? `已恢复 ${openedTransaction.transaction.operations.length} 条草稿操作，将从断点继续` : "已创建隔离草稿，正式计划在校验提交前保持不变"));
-    workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("tool", "匹配工作区 Skill", allowedSkills.length ? `已载入 ${allowedSkills.length} 个可用 Skill 候选` : "当前任务不附加业务 Skill"));
-    workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("reasoning", "分析任务结构", `正在调用 ${baseWorkflow.plannerEngine === "claude" ? "Claude" : "Codex"} 维护任务图字段和依赖关系`));
-    snapshot = workflowRepository.get(workflowId, ownerUserId)!;
-    workflowEvent(workflowId, "workflow.planner.log", ownerUserId, workspace.id, snapshot.revision);
-    const plannerLogUpdatedAt = new Map<string, number>();
-    const planned = await requestWorkflowPlan(snapshot, workspace, allowedSkills, availableMcpServers, plannerSkillContext(workspace, policies), providerCapabilities, controller, transactionPath, (event) => {
-      const eventKey = event.sourceId ? `engine:${event.sourceId}` : "event";
-      if (event.type === "assistant") {
-        const now = Date.now();
-        const finalAssistant = (event.payload as { type?: string } | undefined)?.type === "assistant";
-        if (!finalAssistant && now - (plannerLogUpdatedAt.get(eventKey) || 0) < 250) return;
-        plannerLogUpdatedAt.set(eventKey, now);
-      }
-      workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLogFromEngineEvent(event, "planner"));
-      const current = workflowRepository.get(workflowId, ownerUserId)!;
-      workflowStateFiles.appendEvent(current, { type: "planner.engine_event", payload: { type: event.type, sourceId: event.sourceId, toolName: event.toolName, text: event.text } });
-      workflowEvent(workflowId, "workflow.planner.log", ownerUserId, workspace.id, current.revision);
-    }, mode, previousPlan);
-    if (planned.engineSessionId) workflowRepository.setPlannerSession(workflowId, ownerUserId, snapshot.plannerSessionId || `workflow-planner:${workflowId}`, planned.engineSessionId);
-    if (activeWorkflowPlanners.get(workflowId) !== controller) throw new Error("规划运行已失效");
-    if (planned.noChange) {
-      if (!maintenance) throw new Error("首次规划和全新重做不能以无修改结束");
-      const message = planned.note || "没有检测到需要修改计划的明确要求";
-      const unchanged = workflowRepository.finishMaintenanceWithoutPlan(workflowId, ownerUserId, workflowLog("message", "计划未修改", message));
-      workflowStateFiles.finishMaintenanceWithoutChange(unchanged, message);
-      workflowStateFiles.syncResults(unchanged);
-      workflowEvent(workflowId, "workflow.planner.no_change", ownerUserId, workspace.id, unchanged.revision);
-      transactionFinished = true;
-      return;
-    }
-    const transaction = readWorkflowPlanTransaction(transactionPath);
-    if (transaction.basePlanVersion !== baseWorkflow.activePlanVersion) throw new Error("规划基线版本已变化，请刷新后重新维护");
-    const plan = normalizeWorkflowPlan(planned.plan);
-    workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("tool", "校验任务图", `规划事务已提交，共 ${plan.nodes.length} 个节点，正在执行服务端复核`));
-    const errors = validateWorkflowPlan(plan, new Set(allowedSkills), new Set(availableMcpServers), providerCapabilities);
-    if (errors.length) throw new Error(`计划校验失败：${errors.join("；")}`);
-    workflowRepository.appendPlannerLog(workflowId, ownerUserId, workflowLog("message", "规划完成", `候选计划已原子提交，共 ${plan.nodes.length} 个节点，等待用户审批`));
-    const saved = maintenance
-      ? workflowRepository.saveMaintenancePlan(workflowId, ownerUserId, plan, note || undefined)
-      : workflowRepository.savePlan(workflowId, ownerUserId, plan, note || undefined);
-    if (maintenance) workflowStateFiles.finishMaintenance(saved, plan, calculateWorkflowPlanImpact(baseWorkflow, plan), planned.finalText);
-    else workflowStateFiles.sync(saved);
-    workflowStateFiles.appendEvent(saved, { type: "plan.ready", payload: { version: saved.activePlanVersion, mode, transactionId: transaction.id, digest: transaction.digest } });
-    workflowEvent(workflowId, "workflow.plan.ready", ownerUserId, workspace.id, saved.revision);
-    transactionFinished = true;
-  } catch (error) {
-    try {
-      const current = workflowRepository.get(workflowId, ownerUserId);
-      const message = workflowPlannerFailureMessage(error, controller);
-      if (current?.status === "paused" || current?.status === "canceled") {
-        if (current.status === "canceled" && transactionPath && fs.existsSync(transactionPath)) abortWorkflowPlanTransaction(transactionPath, message);
-        return;
-      }
-      const retryable = retryableWorkflowPlannerFailure(message) || controller.signal.aborted && Boolean(timeoutReason(controller.signal));
-      if (!retryable && transactionPath && fs.existsSync(transactionPath)) abortWorkflowPlanTransaction(transactionPath, message);
-      const ownsPlanningRun = activeWorkflowPlanners.get(workflowId) === controller;
-      if (!ownsPlanningRun || !current) return;
-      if (/工具权限未授权|permission (?:isn't|wasn't|hasn't been|not) granted|requires approval|not authorized|unauthori[sz]ed/i.test(message)) {
-        workflowRepository.clearPlannerEngineSession(workflowId, ownerUserId);
-      }
-      if (maintenance) workflowRepository.finishMaintenanceWithoutPlan(workflowId, ownerUserId, workflowLog("error", "规划维护失败", message));
-      else if (current.status === "planning") workflowRepository.failPlanning(workflowId, ownerUserId, workflowLog("error", "规划失败", message));
-      const failed = workflowRepository.get(workflowId, ownerUserId)!;
-      if (maintenance) workflowStateFiles.failMaintenance(failed, message);
-      else workflowStateFiles.appendEvent(failed, { type: "planner.failed", payload: { error: message, recoverableDraft: retryable } });
-      workflowStateFiles.sync(failed);
-      workflowEvent(workflowId, "workflow.planner.failed", ownerUserId, failed.workspaceId, failed.revision);
-    } catch (recoveryError) { console.error("Workflow planner failure recovery failed", recoveryError); }
-  } finally {
-    if (activeWorkflowPlanners.get(workflowId) === controller) activeWorkflowPlanners.delete(workflowId);
-    activeWorkflowPlannerRuns.delete(workflowId);
-    if (transactionFinished && transactionPath) await fsp.rm(transactionPath, { force: true }).catch(() => undefined);
-    const workspace = workspaceById(baseWorkflow.workspaceId, ownerUserId);
-    if (workspace) workspaceTreeIndex.invalidate(workspace.root, path.relative(workspace.root, baseWorkflow.workDirectory));
-  }
-}
-
-app.post("/api/workflows/:id/plan", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  const existingController = activeWorkflowPlanners.get(workflow.id);
-  if (existingController || workflow.status === "planning") {
-    return res.status(202).json({ accepted: true, alreadyRunning: true, workflow: workflowRepository.get(workflow.id, req.authUser!.id) });
-  }
-  const maintenance = req.body?.source === "maintenance";
-  try {
-    const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
+registerOrchestrationExtensionRoutes(app, {
+  acquireRequest: () => pluginHost.acquire(ORCHESTRATION_PLUGIN_ID),
+  definitions: workflowDefinitions, targets: workflowTargets,
+  workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId),
+  workflowRuntimeActive,
+  definitionEnvironment: async (workspaceId, ownerUserId) => {
+    const workspace = workspaceById(workspaceId, ownerUserId);
     if (!workspace) throw new Error("工作区不存在");
-    const readiness = await providerReadiness(workflow.plannerEngine, req.authUser!.id, workspace);
-    if (!readiness.ready) return res.status(409).json({ error: readiness.issues[0]?.message || "规划 Agent 尚未准备好", code: "provider-not-ready", readiness });
-    const mode: WorkflowPlanningMode = req.body?.mode === "fresh" ? "fresh" : req.body?.mode === "refine" ? "refine" : workflow.activePlanVersion > 0 && workflow.reviewNote ? "refine" : "initial";
-    if (mode === "refine" && !workflow.plan) throw new Error("当前没有可追加修改的完整计划");
-    const previousPlan = mode === "refine" ? workflow.plan : null;
-    const note = String(req.body?.note ?? workflow.reviewNote ?? "").trim() || null;
-    if (maintenance) {
-      if (mode !== "refine") throw new Error("规划维护只能基于当前完整计划追加修改");
-      if (!note) throw new Error("请输入需要调整或询问的内容");
-      const started = workflowRepository.startMaintenance(workflow.id, req.authUser!.id, workflowLog("status", "维护规划", "正在读取当前机器计划并判断是否需要修改"), note);
-      try { workflowStateFiles.beginMaintenance(started, note); }
-      catch (error) {
-        workflowRepository.finishMaintenanceWithoutPlan(workflow.id, req.authUser!.id, workflowLog("error", "维护启动失败", error instanceof Error ? error.message : String(error)));
-        throw error;
-      }
-    } else {
-      workflowRepository.setPlanning(workflow.id, req.authUser!.id, workflow.revision, workflowLog("status", mode === "refine" ? "追加修改计划" : mode === "fresh" ? "重新生成计划" : "开始规划", mode === "refine" ? "正在读取上一版完整计划和用户调整意见" : "正在读取初始任务并建立规划上下文"), { reviewNote: note, resetSession: mode === "fresh" });
+    const policies = workspaceAgentConfig(workspace).skillPolicies;
+    const capabilities = await currentWorkflowProviderCapabilities(ownerUserId, workspace);
+    return { availableSkills: new Set(managedSkillManager.listPublic().filter((skill) => !skill.builtIn && (policies[skill.name] === "always" || policies[skill.name] === "auto")).map((skill) => skill.name)),
+      availableMcpServers: new Set(mcpServersForWorkspace(workspace).map((server) => server.name)), providerCapabilities: capabilities,
+      plannerAvailable: (providerId) => Boolean(agentAdapterRegistry.workflowPlannerRunner(providerId) && capabilities.providers[providerId]?.available) };
+  },
+  createDefinitionWorkflow: async (input) => {
+    const workspace = workspaceById(input.workspaceId, input.ownerUserId);
+    if (!workspace) throw new Error("工作区不存在");
+    const id = uid("workflow");
+    const target = await workflowTargets.prepare({ runId: id, ownerUserId: input.ownerUserId, workspaceId: workspace.id, workspaceRoot: workspace.root, executionTarget: input.executionTarget });
+    try {
+      const workflow = workflowRepository.create({ id, ownerUserId: input.ownerUserId, workspaceId: workspace.id, ...target, prompt: input.prompt, plannerEngine: input.plannerEngine });
+      workflowRepository.setPlanning(workflow.id, input.ownerUserId, workflow.revision);
+      const planned = workflowRepository.savePlan(workflow.id, input.ownerUserId, input.plan);
+      taskContextStore.ensure({ kind: "workflow", id, executionRoot: target.executionRoot }, input.ownerUserId, workspace.id, planned.title);
+      workflowStateFiles.sync(planned);
+      workflowStateFiles.appendEvent(planned, { type: "workflow.definition.instantiated", payload: { definitionId: input.definitionId, definitionRevision: input.definitionRevision, inputs: input.inputs } });
+      workflowEvent(id, "workflow.plan.ready", input.ownerUserId, workspace.id, planned.revision);
+      workflowTargets.confirmPrepared(id, input.ownerUserId);
+      return planned;
+    } catch (error) {
+      taskContextStore.unlink({ kind: "workflow", id }, input.ownerUserId);
+      if (workflowRepository.get(id, input.ownerUserId)) workflowRepository.delete(id, input.ownerUserId);
+      await workflowTargets.rollbackPrepared(id, input.ownerUserId);
+      throw error;
     }
-    const controller = new AbortController();
-    activeWorkflowPlanners.set(workflow.id, controller);
-    activeWorkflowPlannerRuns.set(workflow.id, { mode, maintenance });
-    const snapshot = workflowRepository.get(workflow.id, req.authUser!.id)!;
-    res.status(202).json({ accepted: true, alreadyRunning: false, workflow: snapshot });
-    void executeWorkflowPlanningRun({ workflowId: workflow.id, ownerUserId: req.authUser!.id, mode, note, previousPlan, baseWorkflow: workflow, maintenance, controller });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  },
+  withWorkspaceWriteLock: async (workspaceId, ownerUserId, operation) => {
+    const workspace = workspaceById(workspaceId, ownerUserId);
+    if (!workspace) throw new Error("工作区不存在");
+    // Git integration mutates the repository HEAD and index, even when the
+    // selected workspace is a nested directory. Coordinate at repository root
+    // so sibling workspace tasks cannot write around this lock.
+    const repositoryRoot = await gitRoot(workspace.root);
+    const lease = workspaceExecutionCoordinator.tryAcquire({ root: repositoryRoot, ownerId: `integration:${uid("lease")}`, label: "整合方案", access: "write" });
+    if (!lease) throw new Error("项目仍有任务正在执行，请暂停或完成后再整合方案");
+    try { return await operation(); } finally { lease.release(); }
+  },
+  onWorkflowIntegrated: (workflow) => { workspaceTreeIndex.invalidate(workflow.workspaceRoot || workflow.workDirectory); workflowEvent(workflow.id, "workflow.worktree.integrated", workflow.ownerUserId, workflow.workspaceId, workflow.revision); }
+});
+
+registerTaskContextRoutes(app, {
+  store: taskContextStore,
+  sessionById,
+  executionRootForSession: (session) => executionWorkspaceForSession(session, session.ownerUserId)?.root,
+  workflowById: (id, ownerUserId) => workflowRepository.get(id, ownerUserId),
+  publishWorkflowResult,
+  createConversation: async (input) => {
+    const workspace = workspaceById(input.workspaceId, input.ownerUserId);
+    if (!workspace) throw new Error("工作区不存在，请先指定工作区");
+    const engine = normalizeProviderId(input.engine);
+    if (!agentAdapterRegistry.mainRunner(engine)) throw new Error("所选 Agent 不支持普通对话");
+    const now = new Date().toISOString();
+    const session: Session = { id: uid("task"), taskContextId: input.taskContextId, ownerUserId: input.ownerUserId,
+      title: input.title, scopeKind: "workspace", workspaceId: workspace.id, codexThreadId: null, engine,
+      engineSessionId: null, createdAt: now, updatedAt: now, usage: emptyUsage(), messages: [], pendingInputs: [], status: "idle", revision: 0 };
+    taskContextStore.link(input.taskContextId, { kind: "session", id: session.id, executionRoot: input.executionRoot || workspace.root }, input.ownerUserId, workspace.id);
+    if (input.handoff) appendMessage(session, { role: "assistant", text: input.handoff, eventType: "task.context.handoff", payload: {
+      taskContextId: input.taskContextId,
+      ...(input.handoffSource ? {
+        sourceKind: input.handoffSource.kind, sourceId: input.handoffSource.id, sourceRevision: input.handoffSource.sourceRevision,
+        executionRoot: input.handoffSource.executionRoot,
+        ...(input.handoffSource.kind === "workflow" ? { workflowId: input.handoffSource.id } : {})
+      } : {})
+    } });
+    state.sessions.unshift(session);
+    try { await saveState(); }
+    catch (error) { state.sessions = state.sessions.filter((item) => item.id !== session.id); taskContextStore.unlink({ kind: "session", id: session.id }, input.ownerUserId); throw error; }
+    eventHub.publish("sessions.changed", { sessionId: session.id, action: "created" }, [session.ownerUserId]);
+    return session;
   }
-});
-
-app.post("/api/workflows/:id/approve", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    await assertWorkflowExecutionReady(workflow, req.authUser!.id);
-    const approved = workflowRepository.approve(workflow.id, req.authUser!.id, Number(req.body?.revision));
-    workflowStateFiles.sync(approved);
-    workflowStateFiles.applyMaintenance(approved);
-    workflowStateFiles.appendEvent(approved, { type: "plan.approved", payload: { version: approved.activePlanVersion } });
-    workflowEvent(approved.id, "workflow.plan.approved", req.authUser!.id, approved.workspaceId, approved.revision);
-    queueWorkflowTick(approved.id, req.authUser!.id);
-    res.json(approved);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/retry-integration", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    if (workflow.status !== "needs_review" || !workflow.integrationStartedAt) throw new Error("当前工作流不在最终验收待处理状态");
-    if (activeWorkflowIntegrations.has(workflow.id)) throw new Error("最终整合正在运行");
-    if (workflow.nodes.some((node) => node.required && node.status !== "completed")) throw new Error("仍有必需执行节点未完成，不能只重试最终验收");
-    const queued = workflowRepository.prepareIntegrationRetry(workflow.id, req.authUser!.id);
-    workflowStateFiles.sync(queued);
-    workflowStateFiles.appendEvent(queued, { type: "integration.retry_requested" });
-    queueWorkflowTick(workflow.id, req.authUser!.id);
-    workflowEvent(workflow.id, "workflow.integration.retry", req.authUser!.id, workflow.workspaceId, queued.revision);
-    res.json(queued);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/pause", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const node = workflow.nodes.find((item) => item.id === req.params.nodeId);
-    if (!node) throw new Error("工作流节点不存在");
-    const key = `${workflow.id}:${node.id}`;
-    if (node.status === "running" && !activeWorkflowNodes.has(key)) throw new Error("节点运行控制器正在切换，请稍后重试");
-    const requested = workflowRepository.requestNodePause(workflow.id, req.authUser!.id, node.id);
-    if (node.status === "running") {
-      workflowNodeIntents.set(key, "pause");
-      activeWorkflowNodes.get(key)?.abort(new Error("用户请求暂停节点"));
-    } else {
-      workflowStateFiles.sync(requested);
-      workflowStateFiles.appendEvent(requested, { type: "node.paused", nodeId: node.id });
-      workflowEvent(requested.id, "workflow.node.paused", req.authUser!.id, requested.workspaceId, requested.revision, node.id);
-    }
-    res.status(202).json(requested);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/resume", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const resumed = workflowRepository.resumeNode(workflow.id, req.authUser!.id, req.params.nodeId);
-    workflowStateFiles.sync(resumed);
-    workflowStateFiles.appendEvent(resumed, { type: "node.resumed", nodeId: req.params.nodeId });
-    queueWorkflowTick(resumed.id, req.authUser!.id);
-    workflowEvent(resumed.id, "workflow.node.resumed", req.authUser!.id, resumed.workspaceId, resumed.revision, req.params.nodeId);
-    res.json(resumed);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/restart", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const node = workflow.nodes.find((item) => item.id === req.params.nodeId);
-    if (!node) throw new Error("工作流节点不存在");
-    const key = `${workflow.id}:${node.id}`;
-    if (node.status === "running") {
-      if (!activeWorkflowNodes.has(key)) throw new Error("节点运行控制器正在切换，请稍后重试");
-      const requested = workflowRepository.requestNodeRestart(workflow.id, req.authUser!.id, node.id);
-      workflowNodeIntents.set(key, "restart");
-      activeWorkflowNodes.get(key)?.abort(new Error("用户请求重新执行节点"));
-      res.status(202).json(requested);
-    } else {
-      const restarted = workflowRepository.restartNode(workflow.id, req.authUser!.id, node.id);
-      workflowStateFiles.sync(restarted);
-      workflowStateFiles.appendEvent(restarted, { type: "node.restart_requested", nodeId: node.id });
-      queueWorkflowTick(restarted.id, req.authUser!.id);
-      workflowEvent(restarted.id, "workflow.node.restart_requested", req.authUser!.id, restarted.workspaceId, restarted.revision, node.id);
-      res.json(restarted);
-    }
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/cancel", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const node = workflow.nodes.find((item) => item.id === req.params.nodeId);
-    if (!node) throw new Error("工作流节点不存在");
-    const key = `${workflow.id}:${node.id}`;
-    const canceled = workflowRepository.cancelNode(workflow.id, req.authUser!.id, node.id);
-    if (activeWorkflowNodes.has(key)) {
-      workflowNodeIntents.set(key, "cancel");
-      activeWorkflowNodes.get(key)?.abort(new Error("用户终止节点"));
-    } else {
-      workflowStateFiles.sync(canceled);
-      workflowStateFiles.appendEvent(canceled, { type: "node.canceled", nodeId: node.id });
-      workflowEvent(canceled.id, "workflow.node.canceled", req.authUser!.id, canceled.workspaceId, canceled.revision, node.id);
-      queueWorkflowTick(canceled.id, req.authUser!.id);
-    }
-    res.status(202).json(canceled);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/retry", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    if ([...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflow.id}:`))) throw new Error("仍有执行节点正在运行");
-    const queued = workflowRepository.retryNodes(workflow.id, req.authUser!.id, [req.params.nodeId]);
-    workflowStateFiles.sync(queued);
-    workflowStateFiles.appendEvent(queued, { type: "node.retry_requested", nodeId: req.params.nodeId });
-    queueWorkflowTick(queued.id, req.authUser!.id);
-    workflowEvent(queued.id, "workflow.node.retry_requested", req.authUser!.id, queued.workspaceId, queued.revision, req.params.nodeId);
-    res.json(queued);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/nodes/:nodeId/repair-result", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    if ([...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflow.id}:`))) throw new Error("仍有执行节点正在运行");
-    const queued = workflowRepository.prepareResultRepair(workflow.id, req.authUser!.id, req.params.nodeId);
-    workflowStateFiles.sync(queued);
-    workflowStateFiles.appendEvent(queued, { type: "node.result_repair_requested", nodeId: req.params.nodeId });
-    queueWorkflowTick(queued.id, req.authUser!.id);
-    workflowEvent(queued.id, "workflow.node.result_repair_requested", req.authUser!.id, queued.workspaceId, queued.revision, req.params.nodeId);
-    res.json(queued);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/retry-failed-nodes", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    if ([...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflow.id}:`))) throw new Error("仍有执行节点正在运行");
-    const queued = workflowRepository.retryNodes(workflow.id, req.authUser!.id);
-    workflowStateFiles.sync(queued);
-    workflowStateFiles.appendEvent(queued, { type: "failed_nodes.retry_requested" });
-    queueWorkflowTick(queued.id, req.authUser!.id);
-    workflowEvent(queued.id, "workflow.failed_nodes.retry_requested", req.authUser!.id, queued.workspaceId, queued.revision);
-    res.json(queued);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/revise", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try { const revised = workflowRepository.revise(workflow.id, req.authUser!.id, Number(req.body?.revision), String(req.body?.note || "")); workflowStateFiles.sync(revised); workflowStateFiles.appendEvent(revised, { type: "plan.rejected" }); workflowEvent(revised.id, "workflow.plan.rejected", req.authUser!.id, revised.workspaceId, revised.revision); res.json(revised); }
-  catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/pause", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const plannerRun = activeWorkflowPlannerRuns.get(workflow.id);
-    const paused = workflowRepository.pause(workflow.id, req.authUser!.id, workflow.revision, plannerRun || {});
-    activeWorkflowPlanners.get(workflow.id)?.abort(new Error("用户暂停工作流规划"));
-    for (const [key, controller] of activeWorkflowNodes) if (key.startsWith(`${workflow.id}:`)) {
-      workflowNodeIntents.set(key, "pause");
-      controller.abort(new Error("用户暂停整个工作流"));
-    }
-    activeWorkflowIntegrations.get(workflow.id)?.abort(new Error("用户暂停最终整合"));
-    workflowStateFiles.sync(paused);
-    workflowStateFiles.appendEvent(paused, { type: "workflow.paused", payload: { from: paused.pausedFromStatus } });
-    workflowEvent(paused.id, "workflow.paused", req.authUser!.id, paused.workspaceId, paused.revision);
-    res.status(202).json(paused);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/resume", async (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    if (activeWorkflowPlanners.has(workflow.id) || activeWorkflowIntegrations.has(workflow.id) || [...activeWorkflowNodes.keys()].some((key) => key.startsWith(`${workflow.id}:`))) throw new Error("工作流仍在安全暂停中，请稍后继续");
-    if (workflow.pausedPlanningMode) {
-      const workspace = workspaceById(workflow.workspaceId, req.authUser!.id);
-      if (!workspace) throw new Error("工作区不存在");
-      const readiness = await providerReadiness(workflow.plannerEngine, req.authUser!.id, workspace);
-      if (!readiness.ready) throw new Error(readiness.issues[0]?.message || "规划 Agent 尚未准备好");
-    } else await assertWorkflowExecutionReady(workflow, req.authUser!.id);
-    const from = workflow.pausedFromStatus;
-    const mode = workflow.pausedPlanningMode || "initial";
-    const maintenance = workflow.pausedPlanningMaintenance;
-    const resumed = workflowRepository.resume(workflow.id, req.authUser!.id, workflow.revision);
-    workflowStateFiles.sync(resumed);
-    workflowStateFiles.appendEvent(resumed, { type: "workflow.resumed", payload: { from } });
-    workflowEvent(resumed.id, "workflow.resumed", req.authUser!.id, resumed.workspaceId, resumed.revision);
-    if (workflow.pausedPlanningMode) {
-      const controller = new AbortController();
-      activeWorkflowPlanners.set(resumed.id, controller);
-      activeWorkflowPlannerRuns.set(resumed.id, { mode, maintenance });
-      const previousPlan = mode === "refine" ? resumed.plan : null;
-      void executeWorkflowPlanningRun({ workflowId: resumed.id, ownerUserId: req.authUser!.id, mode, note: resumed.reviewNote, previousPlan, baseWorkflow: resumed, maintenance, controller });
-    } else queueWorkflowTick(resumed.id, req.authUser!.id);
-    res.json(resumed);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
-});
-
-app.post("/api/workflows/:id/cancel", (req, res) => {
-  const workflow = workflowRepository.get(req.params.id, req.authUser!.id);
-  if (!workflow) return res.status(404).json({ error: "工作流不存在" });
-  try {
-    const canceled = workflowRepository.cancel(workflow.id, req.authUser!.id, workflow.revision);
-    activeWorkflowPlanners.get(workflow.id)?.abort(new Error("规划已取消"));
-    for (const [key, controller] of activeWorkflowNodes) if (key.startsWith(`${workflow.id}:`)) { workflowNodeIntents.set(key, "cancel"); controller.abort(new Error("工作流已终止")); }
-    activeWorkflowIntegrations.get(workflow.id)?.abort(new Error("最终整合已取消"));
-    workflowStateFiles.sync(canceled);
-    workflowStateFiles.appendEvent(canceled, { type: "workflow.canceled" });
-    workflowEvent(canceled.id, "workflow.canceled", req.authUser!.id, canceled.workspaceId, canceled.revision); res.json(canceled);
-  } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
 app.get("/api/events", (req, res) => {
@@ -7769,7 +6109,7 @@ app.get("/api/admin/audit", staffRead, (req, res) => {
 });
 
 app.get("/api/admin/logs", staffRead, async (_req, res) => {
-  const logPath = process.platform === "win32" ? path.join(RUNTIME_DIR, "server-err.log") : "/var/log/meta-workbench.log";
+  const logPath = [path.join(APP_PATHS.logsDir, "server-err.log"), path.join(APP_PATHS.logsDir, "desktop-backend.log")].find((candidate) => fs.existsSync(candidate)) || path.join(APP_PATHS.logsDir, "server-err.log");
   try {
     const stat = await fsp.stat(logPath);
     const bytes = Math.min(stat.size, 512 * 1024);
@@ -7959,50 +6299,10 @@ app.delete("/api/admin/skills/:name", adminOnly, async (req, res) => {
   }
 });
 
-app.post("/api/admin/skill-releases", adminOnly, express.raw({ type: "application/octet-stream", limit: "100mb" }), async (req, res) => {
-  try {
-    if (!Buffer.isBuffer(req.body)) throw new Error("请上传二进制加密包");
-    const release = await skillManager.uploadEncryptedRelease({
-      version: String(req.headers["x-skill-version"] || ""),
-      signature: String(req.headers["x-skill-signature"] || ""),
-      expectedSha256: String(req.headers["x-skill-sha256"] || "") || undefined,
-      encryptionKeyId: String(req.headers["x-skill-key-id"] || "builtin-v1"),
-      notes: decodeURIComponent(String(req.headers["x-skill-notes"] || "")),
-      uploadedBy: req.authUser!.id,
-      payload: req.body
-    });
-    auth.auditRequest(req, { action: "admin.skill_upload", targetType: "skill_release", targetId: release.id, summary: { version: release.version, sha256: release.contentSha256 } });
-    res.status(201).json({ release });
-  } catch (error) {
-    auth.auditRequest(req, { action: "admin.skill_upload", targetType: "skill_release", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-async function reloadBundledSkill() {
-  bundledSkill = await loadPlainSkill();
-}
-
-app.post("/api/admin/skill-releases/:id/activate", adminOnly, async (req, res) => {
-  try {
-    const release = await skillManager.activateRelease(String(req.params.id));
-    await reloadBundledSkill();
-    auth.auditRequest(req, { action: "admin.skill_activate", targetType: "skill_release", targetId: release.id, summary: { version: release.version } });
-    res.json({ release });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.post("/api/admin/skill-releases/:id/rollback", adminOnly, async (req, res) => {
-  try {
-    const release = await skillManager.rollback(String(req.params.id));
-    await reloadBundledSkill();
-    auth.auditRequest(req, { action: "admin.skill_rollback", targetType: "skill_release", targetId: release.id, summary: { version: release.version, rollbackFrom: release.rollbackFrom } });
-    res.json({ release });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
+// Historical releases remain readable. Collaboration is now versioned code;
+// activating a Skill must never silently claim to replace the plugin protocol.
+app.use("/api/admin/skill-releases", adminOnly, (_req, res) => {
+  res.status(410).json({ error: "旧委派 Skill 发布入口已退役，请通过工作台版本更新协作插件", code: "delegation-skill-retired" });
 });
 
 app.post("/api/admin/server/:action", adminOnly, async (req, res) => {
@@ -8027,9 +6327,10 @@ app.post("/api/admin/server/:action", adminOnly, async (req, res) => {
       }
       result = { removed };
     } else if (action === "rotate_logs") {
-      const logPath = process.platform === "win32" ? path.join(RUNTIME_DIR, "server-err.log") : "/var/log/meta-workbench.log";
-      const rotated = `${logPath}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
-      if (fs.existsSync(logPath)) { await fsp.copyFile(logPath, rotated); await fsp.truncate(logPath, 0); }
+      const logPath = path.join(APP_PATHS.logsDir, "server-err.log");
+      const existingLogPath = fs.existsSync(logPath) ? logPath : path.join(APP_PATHS.logsDir, "desktop-backend.log");
+      const rotated = `${existingLogPath}.${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      if (fs.existsSync(existingLogPath)) { await fsp.copyFile(existingLogPath, rotated); await fsp.truncate(existingLogPath, 0); }
       result = { rotated: path.basename(rotated) };
     } else if (action === "restart_app") {
       result = { restarting: true };
@@ -8059,14 +6360,20 @@ function navigationSnapshot(ownerUserId: string) {
         agentSkillOverrides: agentConfig.skillOverrides
       };
     }),
-    sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map(({ messages, ...session }) => ({
-      ...session,
-      messageCount: messages.length,
-      deletionPolicy: taskDeletionPolicy("session", session.status, activeRuns.has(session.id))
-    })),
+    sessions: state.sessions.filter((session) => session.ownerUserId === ownerUserId).map((session) => {
+      const { messages, ...summary } = session;
+      return { ...summary,
+        taskContextId: taskContextStore.ensure({ kind: "session", id: session.id }, ownerUserId, session.workspaceId, session.title).id,
+        executionRoot: executionWorkspaceForSession(session)?.root,
+        messageCount: messages.length,
+        deletionPolicy: taskDeletionPolicy("session", session.status, activeRuns.has(session.id)
+      ) };
+    }),
     workflows: workflowRepository.listNavigation(ownerUserId)
       .filter((workflow) => activeWorkspaceIds.has(workflow.workspaceId))
-      .map((workflow) => ({ ...workflow, deletionPolicy: taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id)) }))
+      .map((workflow) => ({ ...workflow,
+        taskContextId: taskContextStore.ensure({ kind: "workflow", id: workflow.id, executionRoot: workflow.workDirectory }, ownerUserId, workflow.workspaceId, workflow.title).id,
+        deletionPolicy: taskDeletionPolicy("workflow", workflow.status, workflowRuntimeActive(workflow.id)) }))
   };
 }
 
@@ -8114,6 +6421,7 @@ app.get("/api/bootstrap", async (req, res) => {
     skillFolders: skillLibrary.folders,
     skillOrganizations: skillLibrary.organizations,
     capabilityProfiles: capabilityProfilesForUser(ownerUserId),
+    plugins: pluginHost.publicList(),
     agentProviders,
     agentProviderTransports: agentAdapterRegistry.providerSnapshots(),
     providerControls,
@@ -8250,14 +6558,14 @@ function nativeProviderHome(providerId: "codex" | "claude", ownerUserId: string)
 }
 
 function nativeProviderConnection(profile: ProviderConnectionProfile) {
-  const environment = providerConnectionEnvironment(profile);
+  const environment = providerActiveEnvironment(profile.providerId, profile.authMethodId, providerConnectionEnvironment(profile));
   if (profile.providerId === "codex") return {
     baseUrl: profile.authMethodId === "openai-compatible" ? String(environment.OPENAI_BASE_URL || profile.baseUrl || "") : "",
     apiKey: ["openai-api-key", "openai-compatible"].includes(profile.authMethodId) ? String(environment.OPENAI_API_KEY || profile.apiKey || "") : ""
   };
   return {
     baseUrl: profile.authMethodId === "anthropic-compatible" ? String(environment.ANTHROPIC_BASE_URL || profile.baseUrl || "") : "https://api.anthropic.com",
-    apiKey: ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId) ? String(environment.ANTHROPIC_API_KEY || profile.apiKey || "") : ""
+    apiKey: ["anthropic-api-key", "anthropic-compatible"].includes(profile.authMethodId) ? String(environment.ANTHROPIC_AUTH_TOKEN || environment.ANTHROPIC_API_KEY || profile.apiKey || "") : ""
   };
 }
 
@@ -8333,7 +6641,10 @@ async function providerControlSnapshotFor(providerId: string, ownerUserId: strin
     runtime,
     profiles,
     selection: agentAdapterRegistry.modelAdapter(provider.id)?.getSelection() || null,
-    defaultProviderId: state.settings.defaultEngine,
+    // There is no user-facing global main-agent selection anymore. Provider
+    // cards remain independently selectable and do not advertise one as the
+    // default; the persisted value is retained only for legacy API fallback.
+    defaultProviderId: undefined,
     marketIcon: marketAgent?.icon,
     updating: Boolean(marketInstallStates.get(provider.id)?.active),
     operations: providerControlOperations(provider.id)
@@ -8797,6 +7108,185 @@ app.get("/api/agent-providers", (_req, res) => {
   res.json({ schemaVersion: 1, items: agentAdapterRegistry.list(), transports: agentAdapterRegistry.providerSnapshots() });
 });
 
+app.get("/api/custom-agents", async (req, res) => {
+  try {
+    const workspaceId = req.query.workspaceId ? String(req.query.workspaceId) : "";
+    const workspace = workspaceId ? workspaceById(workspaceId, req.authUser!.id) : undefined;
+    if (workspaceId && !workspace) return res.status(404).json({ error: "工作区不存在" });
+    const loaded = await loadCustomAgents({ projectRoot: workspace?.root || ROOT, userHome: os.homedir() });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ schemaVersion: 1, workspaceId: workspace?.id || null, ...loaded });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/hooks", auth.requireRoles("owner", "admin"), (_req, res) => {
+  res.json({ schemaVersion: 1, hooks: hookRegistry.list() });
+});
+
+function routineOwnedBy(id: string, ownerUserId: string) {
+  const routine = routineScheduler?.get(id);
+  return routine && routine.ownerUserId === ownerUserId ? routine : undefined;
+}
+function publishRoutineChanged(routine: AgentRoutine, action: string) {
+  eventHub.publish("routines.changed", { routineId: routine.id, action, status: routine.lastStatus, nextRunAt: routine.nextRunAt }, [routine.ownerUserId || ""]);
+}
+
+app.get("/api/routines", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ schemaVersion: 1, items: routineScheduler?.list().filter((routine) => routine.ownerUserId === req.authUser!.id) || [] });
+});
+
+app.post("/api/routines", async (req, res) => {
+  try {
+    const workspaceId = req.body?.workspaceId ? String(req.body.workspaceId) : undefined;
+    if (workspaceId && !workspaceById(workspaceId, req.authUser!.id)) return res.status(404).json({ error: "工作区不存在" });
+    const providerId = String(req.body?.providerId || "auto").trim().toLowerCase();
+    if (providerId !== "auto") agentAdapterRegistry.requireDescriptor(providerId);
+    const routine = routineScheduler!.create({
+      id: req.body?.id === undefined ? undefined : String(req.body.id),
+      ownerUserId: req.authUser!.id,
+      name: String(req.body?.name || ""), providerId, prompt: String(req.body?.prompt || ""), workspaceId,
+      intervalMs: req.body?.intervalMs === undefined || req.body.intervalMs === null ? null : Number(req.body.intervalMs),
+      nextRunAt: req.body?.nextRunAt === undefined ? undefined : req.body.nextRunAt,
+      enabled: req.body?.enabled !== false
+    });
+    auth.auditRequest(req, { action: "routine.create", targetType: "routine", targetId: routine.id });
+    publishRoutineChanged(routine, "created");
+    res.status(201).json(routine);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.patch("/api/routines/:id", async (req, res) => {
+  try {
+    const current = routineOwnedBy(String(req.params.id), req.authUser!.id);
+    if (!current) return res.status(404).json({ error: "例程不存在" });
+    const workspaceId = req.body?.workspaceId === undefined ? current.workspaceId : String(req.body.workspaceId || "") || undefined;
+    if (workspaceId && !workspaceById(workspaceId, req.authUser!.id)) return res.status(404).json({ error: "工作区不存在" });
+    if (req.body?.providerId !== undefined && String(req.body.providerId).toLowerCase() !== "auto") agentAdapterRegistry.requireDescriptor(String(req.body.providerId));
+    const input: UpdateRoutineInput = {
+      ...(req.body?.name !== undefined ? { name: String(req.body.name) } : {}),
+      ...(req.body?.providerId !== undefined ? { providerId: String(req.body.providerId).trim().toLowerCase() } : {}),
+      ...(req.body?.prompt !== undefined ? { prompt: String(req.body.prompt) } : {}),
+      ...(req.body?.workspaceId !== undefined ? { workspaceId } : {}),
+      ...(req.body?.intervalMs !== undefined ? { intervalMs: req.body.intervalMs === null ? null : Number(req.body.intervalMs) } : {}),
+      ...(req.body?.nextRunAt !== undefined ? { nextRunAt: req.body.nextRunAt } : {}),
+      ...(req.body?.enabled !== undefined ? { enabled: Boolean(req.body.enabled) } : {})
+    };
+    const updated = routineScheduler!.update(current.id, input);
+    publishRoutineChanged(updated, "updated");
+    res.json(updated);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/routines/:id/run", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  try { const result = await routineScheduler!.runNow(routine.id); const updated = routineScheduler!.get(routine.id); if (updated) publishRoutineChanged(updated, "run"); res.status(202).json({ routineId: routine.id, result }); }
+  catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/routines/:id/pause", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  const updated = routineScheduler!.pause(routine.id); publishRoutineChanged(updated, "paused"); res.json(updated);
+});
+
+app.post("/api/routines/:id/resume", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  const updated = routineScheduler!.resume(routine.id); publishRoutineChanged(updated, "resumed"); res.json(updated);
+});
+
+app.delete("/api/routines/:id", async (req, res) => {
+  const routine = routineOwnedBy(String(req.params.id), req.authUser!.id);
+  if (!routine) return res.status(404).json({ error: "例程不存在" });
+  routineScheduler!.delete(routine.id);
+  auth.auditRequest(req, { action: "routine.delete", targetType: "routine", targetId: routine.id });
+  publishRoutineChanged(routine, "deleted");
+  res.json({ ok: true });
+});
+
+/** Provider-neutral capability and routing endpoints power Native/Managed UI
+ * without silently changing which adapter is selected. */
+app.get("/api/agent-providers/:providerId/capabilities", async (req, res) => {
+  try {
+    const providerId = normalizeProviderId(req.params.providerId);
+    const descriptor = agentAdapterRegistry.requireDescriptor(providerId);
+    const runtime = providerId === "codex" ? await detectCodexRuntime(false, true) : providerId === "claude" ? await getClaudeRuntime(false, true) : null;
+    const transport = agentAdapterRegistry.providerSnapshot(providerId);
+    const snapshot = createAgentCapabilitySnapshot(descriptor, {
+      requestedMode: req.query.mode === "managed" ? "managed" : "native",
+      transportCapabilities: transport ? {
+        kind: transport.transport === "acp" ? "acp" : "native",
+        enhanced: Boolean(transport.enhanced),
+        standard: transport.transport === "acp" ? "acp-v1" : "native",
+        protocolVersion: transport.acp?.protocolVersion,
+        capabilities: transport.acp?.capabilities as never
+      } : undefined,
+      runtimeProbe: runtime ? {
+        available: runtime.available,
+        status: runtime.available ? "ready" : "unavailable",
+        executablePath: runtime.path,
+        version: runtime.version,
+        source: runtime.source,
+        error: runtime.available ? undefined : runtime.message,
+        details: { message: runtime.message }
+      } : undefined
+    });
+    // Registry admission follows the native runtime probe. A managed view is
+    // presentation-only and must never replace the provider's global
+    // admission snapshot for a native session.
+    if (snapshot.requestedMode === "native") agentAdapterRegistry.setCapabilitySnapshot(snapshot);
+    res.json({
+      descriptor,
+      ...snapshot,
+      featureDiagnostics: nativeFeatureDiagnostics({ providerId, available: runtime?.available ?? true, baseUrl: providerId === "codex" ? state.settings.baseUrl : state.settings.claude.baseUrl, webSearch: state.settings.webSearch })
+    });
+  } catch (error) { res.status(404).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/agent-providers/:providerId/integrations", async (req, res) => {
+  try {
+    const providerId = normalizeProviderId(req.params.providerId);
+    const snapshot = agentAdapterRegistry.capabilitySnapshot(providerId);
+    const transport = snapshot.transportCapabilities;
+    const negotiated = (transport.capabilities || {}) as Record<string, unknown>;
+    const integration = (negotiated as { integrations?: Record<string, unknown> }).integrations || {};
+    const capability = (key: string, fallback: boolean) => typeof integration[key] === "boolean" ? Boolean(integration[key]) : fallback;
+    res.json({ schemaVersion: 1, providerId, mode: snapshot.mode, runtimeProbe: snapshot.runtimeProbe, integrations: {
+      "browser.read": capability("browser.read", snapshot.effectiveCapabilities.tools.web),
+      "browser.interact": capability("browser.interact", false),
+      "computer.use": capability("computer.use", false),
+      "connector.mcp": capability("connector.mcp", snapshot.effectiveCapabilities.tools.mcp),
+      "connector.remote": capability("connector.remote", transport.kind === "acp" && Boolean(transport.capabilities))
+    }, restrictions: snapshot.restrictions });
+  } catch (error) { res.status(404).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/agent-routing/resolve", auth.requireRoles("owner", "admin"), (req, res) => {
+  try {
+    const requestedProvider = String(req.body?.providerId || "auto").trim().toLowerCase() as "auto" | AgentProviderId;
+    const policy = (recordOf(req.body?.policy) || {}) as AgentRoutingPolicy;
+    res.json({ schemaVersion: 1, ...resolveAgentRoute(requestedProvider, agentAdapterRegistry.list(), policy) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/agent-reviews/plan", auth.requireRoles("owner", "admin"), (req, res) => {
+  try {
+    const primary = normalizeProviderId(req.body?.primaryProvider || "");
+    const reviewer = req.body?.reviewerProvider ? normalizeProviderId(req.body.reviewerProvider) : undefined;
+    const pair = crossProviderReviewPair(primary, agentAdapterRegistry.list(), reviewer);
+    const trace = traceRecorder.start("review", "cross-provider-review", { provider: primary, attributes: { reviewer: pair.reviewer } });
+    traceRecorder.finish(trace.spanId, "ok");
+    res.json({ schemaVersion: 1, pair, traceId: trace.traceId, strategy: "primary-then-independent-review" });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/observability/traces/:traceId", auth.requireRoles("owner", "admin"), (req, res) => {
+  const traceId = String(req.params.traceId || "");
+  res.json({ schemaVersion: 1, traceId, spans: traceRecorder.list(traceId) });
+});
+
 app.get("/api/agent-providers/:providerId/readiness", async (req, res) => {
   try {
     const providerId = normalizeProviderId(req.params.providerId);
@@ -9014,15 +7504,14 @@ app.post("/api/runtime/claude/test", auth.requireRoles("owner", "admin"), async 
 app.put("/api/settings", auth.requireRoles("owner", "admin"), async (req, res) => {
   const input = req.body as Partial<Settings> & { clearApiKey?: boolean; claude?: Partial<ClaudeSettings> & { clearApiKey?: boolean } };
   const claudeInput: Partial<ClaudeSettings> & { clearApiKey?: boolean } = input.claude || {};
-  const defaultEngine = normalizeProviderId(input.defaultEngine || state.settings.defaultEngine);
-  const defaultProvider = agentAdapterRegistry.descriptor(defaultEngine);
-  if (!defaultProvider?.capabilities.sessions.create || !agentAdapterRegistry.mainRunner(defaultEngine)) return res.status(400).json({ error: "默认主脑 Provider 未注册或不可创建会话" });
-  const defaultControl = await providerControlSnapshotFor(defaultEngine, req.authUser!.id);
-  if (!defaultControl.operations.setDefault) return res.status(400).json({ error: `默认主脑「${defaultControl.identity.shortName}」尚未安装或连接未验证` });
+  // The UI no longer exposes a global main-agent preference. Keep the stored
+  // value only as a legacy fallback for older clients that omit `engine` when
+  // creating a session; settings saves must never validate or mutate it.
+  const { defaultEngine: _ignoredDefaultEngine, ...settingsInput } = input;
   state.settings = {
     ...state.settings,
-    ...input,
-    defaultEngine,
+    ...settingsInput,
+    defaultEngine: state.settings.defaultEngine,
     apiKey: input.clearApiKey ? "" : input.apiKey || state.settings.apiKey,
     claude: {
       ...state.settings.claude,
@@ -9239,15 +7728,16 @@ app.put("/api/workspaces/:id/agent-config", async (req, res) => {
       : req.body.capabilityProfileId !== undefined
         ? completeSkillPolicies(profile?.skillPolicies)
         : workspaceAgentConfig(workspace).skillPolicies;
-    const invalid = Object.keys(requested).filter((name) => !available.has(name));
+    const invalid = Object.keys(requested).filter((name) => name !== BUILTIN_DELEGATION_SKILL_NAME && !available.has(name));
     if (invalid.length) throw new Error(`工作区 Skill 不存在：${invalid.join(", ")}`);
     const resolved = Object.fromEntries([...available].map((name) => [name, requested[name] ?? defaults[name]])) as SkillPolicies;
     if (req.body.executionMode !== undefined && req.body.executionMode !== "native" && req.body.executionMode !== "collaborative") throw new Error("运行模式无效");
+    if (req.body.executionMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) throw new Error("协作插件当前已停用，请先启用插件");
     const currentExecutionMode = workspaceAgentConfig(workspace).executionMode;
     workspace.agentExecutionMode = req.body.executionMode === "native" || req.body.executionMode === "collaborative"
       ? req.body.executionMode
       : req.body.skillPolicies !== undefined && normalizeSkillPolicies(req.body.skillPolicies)[BUILTIN_DELEGATION_SKILL_NAME] !== undefined
-        ? executionModeFromPolicies(resolved)
+        ? executionModeFromPolicies(requested)
         : currentExecutionMode;
     workspace.agentCapabilityProfileId = profile?.id || null;
     workspace.agentSkillOverrides = skillPolicyOverrides(resolved, profile);
@@ -9425,6 +7915,73 @@ app.post("/api/workspaces/:id/git/checkout", async (req, res) => {
   catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
+function worktreeErrorResponse(res: express.Response, error: unknown) {
+  if (error instanceof WorktreeError) return res.status(400).json({ error: error.message, code: error.code, details: error.details });
+  return res.status(400).json({ error: error instanceof Error ? error.message : String(error), code: "git-worktree-failed" });
+}
+
+app.get("/api/workspaces/:id/git/worktrees", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.setHeader("Cache-Control", "no-store"); res.json(await listWorktrees(workspace.root)); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    const result = await createWorktree({
+      workspaceRoot: workspace.root,
+      worktreePath: String(req.body?.path || req.body?.worktreePath || ""),
+      branch: req.body?.branch === undefined ? undefined : String(req.body.branch),
+      ref: req.body?.ref === undefined ? undefined : String(req.body.ref),
+      detach: req.body?.detach === true,
+      force: req.body?.force === true
+    });
+    auth.auditRequest(req, { action: "workspace.git.worktree.create", targetType: "workspace", targetId: workspace.id, summary: { path: result.path, branch: req.body?.branch || null } });
+    res.status(result.status === "already_exists" ? 200 : 201).json(result);
+  } catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/bind", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.json(await bindWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""))); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/restore", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try { res.json(await restoreWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""))); }
+  catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/cleanup", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    const result = await cleanupWorktree(workspace.root, String(req.body?.path || req.body?.worktreePath || ""), req.body?.force === true);
+    auth.auditRequest(req, { action: "workspace.git.worktree.cleanup", targetType: "workspace", targetId: workspace.id, summary: { path: result.path, force: req.body?.force === true } });
+    res.json(result);
+  } catch (error) { worktreeErrorResponse(res, error); }
+});
+
+app.post("/api/workspaces/:id/git/worktrees/merge-preflight", async (req, res) => {
+  const workspace = fileScopeById(req.params.id, req.authUser!.id);
+  if (!workspace) return res.status(404).json({ error: "工作区不存在" });
+  try {
+    res.json(await preflightMerge({
+      workspaceRoot: workspace.root,
+      source: String(req.body?.source || ""),
+      target: req.body?.target === undefined ? undefined : String(req.body.target),
+      worktreePath: req.body?.worktreePath === undefined ? undefined : String(req.body.worktreePath),
+      allowDirty: req.body?.allowDirty === true
+    }));
+  } catch (error) { worktreeErrorResponse(res, error); }
+});
+
 app.post("/api/workspaces/:id/files/move", async (req, res) => {
   const workspace = fileScopeById(req.params.id, req.authUser!.id);
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
@@ -9472,7 +8029,7 @@ app.post("/api/workspaces/:id/open-folder", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
   try {
     const relativePath = String(req.body?.path || "").trim();
-    const target = relativePath ? resolveWorkspaceFile(workspace, relativePath) : existingExecutionDirectory(workspace);
+    const target = relativePath ? resolvePreviewAttachment(workspace, relativePath) : existingExecutionDirectory(workspace);
     await openInSystemFileManager(target, Boolean(relativePath && req.body?.select));
     res.json({ ok: true });
   } catch (error) {
@@ -9485,7 +8042,7 @@ app.get("/api/workspaces/:id/file", async (req, res) => {
   if (!workspace) return res.status(404).json({ error: "工作区不存在" });
   try {
     const relativePath = String(req.query.path || "");
-    const target = resolveWorkspaceFile(workspace, relativePath);
+    const target = resolvePreviewAttachment(workspace, relativePath);
     const stat = await fsp.stat(target);
     if (!stat.isFile()) throw new Error("目标不是文件");
     const extension = path.extname(target).toLowerCase();
@@ -10012,7 +8569,7 @@ async function restoreWorkspaceFromTrash(ownerUserId: string, workspaceTrashId: 
   const workspace = trash.snapshot.workspace as unknown as Workspace;
   if (workspace.id !== trash.workspaceId || workspace.ownerUserId !== ownerUserId) throw new Error("工作区恢复快照归属校验失败");
   const existing = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id === workspace.id);
-  const pathConflict = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id !== workspace.id && path.resolve(item.root).toLowerCase() === path.resolve(workspace.root).toLowerCase());
+  const pathConflict = state.workspaces.find((item) => item.ownerUserId === ownerUserId && item.id !== workspace.id && pathKey(item.root) === pathKey(workspace.root));
   if (pathConflict) throw new Error(`工作区路径已由“${pathConflict.name}”使用`);
   if (!existing) {
     state.workspaces.unshift(workspace);
@@ -10072,6 +8629,7 @@ async function permanentlyDeleteWorkspaceTrash(ownerUserId: string, workspaceTra
     }
     for (const workflowId of [...snapshot.workflowIds]) {
       if (workflowRepository.get(workflowId, ownerUserId)) workflowRepository.delete(workflowId, ownerUserId);
+      taskContextStore.unlink({ kind: "workflow", id: workflowId }, ownerUserId);
       snapshot.workflowIds = snapshot.workflowIds.filter((id) => id !== workflowId);
       sessionManagementRepository.updateWorkspaceTrashSnapshot(ownerUserId, workspaceTrashId, snapshot);
     }
@@ -10135,6 +8693,7 @@ async function permanentlyDeleteTrash(ownerUserId: string, trashId: string) {
   }
   await deleteActivityArtifactsForSession(ACTIVITY_ARTIFACTS_DIR, ownerUserId, session.id);
   await deleteSessionRecoverySnapshot(trash.snapshotPath);
+  taskContextStore.unlink({ kind: "session", id: session.id }, ownerUserId);
   sessionManagementRepository.removeTrash(ownerUserId, trashId);
   sessionManagementRepository.log(ownerUserId, session.id, "purge", true, { trashId });
   return { ok: true };
@@ -10260,7 +8819,7 @@ function nativeCountForWorkspace(ownerUserId: string, workspace: Workspace) {
   const ids = new Set<string>();
   for (const [key, cached] of sessionNativeInventoryCache) {
     if (!key.startsWith(`${ownerUserId}:`)) continue;
-    for (const item of cached.items) if (item.workspaceId === workspace.id || item.workspacePath && path.resolve(item.workspacePath).toLowerCase() === path.resolve(workspace.root).toLowerCase()) ids.add(item.id);
+    for (const item of cached.items) if (item.workspaceId === workspace.id || item.workspacePath && pathKey(item.workspacePath) === pathKey(workspace.root)) ids.add(item.id);
   }
   return ids.size;
 }
@@ -10365,8 +8924,8 @@ app.post("/api/session-management/native/codex/:threadId/adopt", async (req, res
       const existingSession = sessionById(existingBinding.sessionId, ownerUserId);
       if (existingSession) return res.json({ session: sessionWithMessageWindow(existingSession, 80), created: false });
     }
-    const normalizedCwd = thread.cwd ? path.resolve(thread.cwd).toLowerCase() : "";
-    const workspace = state.workspaces.find((item) => item.ownerUserId === ownerUserId && normalizedCwd && path.resolve(item.root).toLowerCase() === normalizedCwd);
+    const normalizedCwd = thread.cwd ? pathKey(thread.cwd) : "";
+    const workspace = state.workspaces.find((item) => item.ownerUserId === ownerUserId && normalizedCwd && pathKey(item.root) === normalizedCwd);
     if (!workspace) return res.status(409).json({ error: "该官方线程的项目尚未加入工作台，请先添加对应工作区后再接管" });
     const now = new Date().toISOString();
     const session: Session = {
@@ -10709,9 +9268,12 @@ app.get("/api/sessions", (req, res) => {
 });
 
 function sessionWithMessageWindow(session: Session, messageLimit: unknown) {
-  if (messageLimit === undefined) return session;
+  const executionRoot = executionWorkspaceForSession(session, session.ownerUserId)?.root;
+  const context = taskContextStore.ensure({ kind: "session", id: session.id, executionRoot }, session.ownerUserId, session.workspaceId, session.title);
+  const projection = { ...session, taskContextId: context.id, executionRoot };
+  if (messageLimit === undefined) return projection;
   const { messages, window } = responseMessageWindow(session.messages, undefined, messageLimit);
-  return { ...session, messages, messageWindow: window };
+  return { ...projection, messages, messageWindow: window };
 }
 
 function taskUsageSummaryForResponse(session: Session) {
@@ -10752,15 +9314,7 @@ function messageForResponse(source: Message | null | undefined, index = 0): Mess
   if (payload) {
     const serialized = JSON.stringify(payload);
     if (serialized.length > 24_000 || ["command_execution", "file_read", "file_change", "tool_call"].includes(candidate.eventType || "")) {
-      message.payload = {
-        type: payload.type,
-        name: payload.name,
-        tool_use_id: payload.tool_use_id,
-        agent_id: payload.agent_id,
-        status: payload.status,
-        exit_code: payload.exit_code,
-        truncated: true
-      };
+      message.payload = summarizeMessagePayload(payload);
     }
   }
   return message;
@@ -10824,6 +9378,49 @@ app.get("/api/activity-artifacts/:id", async (req, res) => {
     const message = error instanceof Error ? error.message : String(error);
     res.status(message === "活动工件不存在" || (error as NodeJS.ErrnoException)?.code === "ENOENT" ? 404 : 400).json({ error: message });
   }
+});
+
+// Published Artifacts are versioned, user-owned deliverables. They remain
+// local-first and separate from activity evidence, while the UI can render
+// them as interactive/revisable outputs instead of one-off log attachments.
+app.get("/api/artifacts", async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId ? String(req.query.sessionId) : undefined;
+    if (sessionId && !sessionById(sessionId, req.authUser!.id)) return res.status(404).json({ error: "任务不存在" });
+    res.json({ schemaVersion: 1, items: await listPublishedArtifacts(PUBLISHED_ARTIFACTS_DIR, req.authUser!.id, sessionId) });
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.post("/api/artifacts", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    if (!sessionById(sessionId, req.authUser!.id)) return res.status(404).json({ error: "任务不存在" });
+    const artifact = await createPublishedArtifact(PUBLISHED_ARTIFACTS_DIR, {
+      ownerUserId: req.authUser!.id, sessionId, title: String(req.body?.title || ""), description: String(req.body?.description || ""),
+      mediaType: String(req.body?.mediaType || "text/plain"), content: String(req.body?.content || "")
+    });
+    eventHub.publish("artifact.changed", { action: "created", artifactId: artifact.id, sessionId }, [req.authUser!.id]);
+    res.status(201).json(artifact);
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+});
+
+app.get("/api/artifacts/:id", async (req, res) => {
+  try { res.json(await readPublishedArtifact(PUBLISHED_ARTIFACTS_DIR, String(req.params.id || ""), req.authUser!.id)); }
+  catch (error) { const message = error instanceof Error ? error.message : String(error); res.status((error as NodeJS.ErrnoException)?.code === "ENOENT" || message.includes("不存在") ? 404 : 400).json({ error: message }); }
+});
+
+app.patch("/api/artifacts/:id", async (req, res) => {
+  try {
+    const artifact = await updatePublishedArtifact(PUBLISHED_ARTIFACTS_DIR, String(req.params.id || ""), req.authUser!.id, {
+      ...(req.body?.title !== undefined ? { title: String(req.body.title) } : {}),
+      ...(req.body?.description !== undefined ? { description: String(req.body.description) } : {}),
+      ...(req.body?.mediaType !== undefined ? { mediaType: String(req.body.mediaType) } : {}),
+      ...(req.body?.content !== undefined ? { content: String(req.body.content) } : {}),
+      ...(req.body?.published !== undefined ? { published: Boolean(req.body.published) } : {})
+    });
+    eventHub.publish("artifact.changed", { action: "updated", artifactId: artifact.id, sessionId: artifact.sessionId, version: artifact.version }, [req.authUser!.id]);
+    res.json(artifact);
+  } catch (error) { const message = error instanceof Error ? error.message : String(error); res.status((error as NodeJS.ErrnoException)?.code === "ENOENT" || message.includes("不存在") ? 404 : 400).json({ error: message }); }
 });
 
 app.get("/api/cli-runtimes", auth.requireRoles("owner", "admin"), async (_req, res) => {
@@ -11035,6 +9632,7 @@ app.put("/api/sessions/:id/metadata", async (req, res) => {
     if (req.body.executionMode !== undefined) {
       if (session.scopeKind !== "standalone") throw new Error("工作区任务请使用工作区运行配置");
       if (req.body.executionMode !== "native" && req.body.executionMode !== "collaborative") throw new Error("运行模式无效");
+      if (req.body.executionMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) throw new Error("协作插件当前已停用，请先启用插件");
       session.standaloneExecutionMode = req.body.executionMode;
     }
     if (req.body.archived !== undefined) {
@@ -11058,14 +9656,15 @@ app.post("/api/sessions/:id/open-folder", async (req, res) => {
   if (!session || !workspace) return res.status(404).json({ error: "任务或工作区不存在" });
   try {
     const kind = String(req.body?.kind || "workspace");
-    const relativeByKind: Record<string, string> = {
-      tasks: path.join(".claude-codex", "tasks"),
-      attachments: path.join(".claude-codex", "attachments", session.id),
-      results: path.join(".claude-codex", "results")
+    const pluginDirectories: Record<string, string> = {
+      tasks: path.join(APP_PATHS.pluginRuntimeDir, COLLABORATION_PLUGIN_ID, "tasks"),
+      attachments: attachmentDirectory(workspace.root, session.id),
+      results: path.join(APP_PATHS.pluginRuntimeDir, ORCHESTRATION_PLUGIN_ID, "runs")
     };
     const target = kind === "workspace"
       ? existingExecutionDirectory(workspace)
-      : existingExecutionDirectory(workspace, relativeByKind[kind] || "");
+      : pluginDirectories[kind] || existingExecutionDirectory(workspace);
+    if (kind !== "workspace") fs.mkdirSync(target, { recursive: true, mode: 0o700 });
     await openInSystemFileManager(target, false);
     res.json({ ok: true });
   } catch (error) {
@@ -11077,8 +9676,45 @@ app.get("/api/sessions/:id/agents", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const agents = await listSessionAgentThreads(session);
-  res.json(agents.map(({ logs, ...agent }) => ({ ...agent, logs: [], logCount: agent.logCount ?? logs.length })));
+  const payload = agents.map(({ logs, ...agent }) => ({
+    ...agent,
+    identityKey: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId),
+    logs: [],
+    logCount: agent.logCount ?? logs.length
+  }));
+  const etag = agentCollectionEtag(payload);
+  if (ifNoneMatch(req, etag)) return res.status(304).end();
+  res.setHeader("ETag", etag);
+  res.json(payload);
 });
+
+function agentCollectionEtag(value: unknown) {
+  // Summary responses contain no logs, so a compact fingerprint avoids work
+  // during the high-frequency list poll. Detail responses retain bounded logs;
+  // hash the complete bounded payload there so a phase/output change cannot be
+  // hidden behind a stale revision or timestamp.
+  const fingerprint = Array.isArray(value) ? value.map((agent) => agentSnapshotFingerprint(agent)) : value;
+  return `"${crypto.createHash("sha256").update(JSON.stringify(fingerprint)).digest("hex").slice(0, 24)}"`;
+}
+
+function agentSnapshotFingerprint(value: unknown) {
+  const source = recordOf(value);
+  if (!source) return value;
+  return {
+    identityKey: source.identityKey || recordOf(source.identity)?.key || source.id,
+    provider: source.provider || source.providerId || recordOf(source.identity)?.providerId,
+    revision: source.revision || 0,
+    updatedAt: source.updatedAt || "",
+    status: source.status || "",
+    logCount: source.logCount || (Array.isArray(source.logs) ? source.logs.length : 0),
+    logTailId: Array.isArray(source.logs) ? recordOf(source.logs[0])?.id || recordOf(source.logs.at(-1))?.id : undefined
+  };
+}
+
+function ifNoneMatch(req: express.Request, etag: string) {
+  const header = String(req.headers["if-none-match"] || "");
+  return header.split(",").map((item) => item.trim().replace(/^W\//i, "")).includes(etag) || header.trim() === "*";
+}
 
 function agentLogsForResponse(logs: AgentLog[], byteBudget = 750_000) {
   const result: AgentLog[] = [];
@@ -11102,16 +9738,43 @@ app.get("/api/sessions/:id/agents/:agentId", async (req, res) => {
   const session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const agents = await listSessionAgentThreads(session, req.params.agentId);
-  const agent = agents.find((item) => item.id === req.params.agentId);
+  const requestedIdentity = String(req.query.identityKey || "").trim();
+  const requestedProvider = normalizedAgentProvider(req.query.provider, "");
+  const candidates = agents.filter((item) => item.id === req.params.agentId);
+  let agent: AgentThread | undefined;
+  if (requestedIdentity) {
+    agent = candidates.find((item) => item.identity?.key === requestedIdentity || item.identityAliases?.includes(requestedIdentity));
+    if (!agent) return res.status(404).json({ error: "子 Agent 身份不存在", code: "AGENT_IDENTITY_NOT_FOUND" });
+  } else if (requestedProvider) {
+    agent = candidates.find((item) => normalizedAgentProvider(item.provider) === requestedProvider);
+    if (!agent) return res.status(404).json({ error: "子 Agent Provider 不匹配", code: "AGENT_PROVIDER_MISMATCH" });
+  } else if (candidates.length === 1) {
+    agent = candidates[0];
+  } else if (candidates.length > 1) {
+    return res.status(409).json({
+      error: "子 Agent 身份存在歧义，请提供 identityKey",
+      code: "AGENT_IDENTITY_REQUIRED",
+      candidates: candidates.map((item) => ({ id: item.id, identityKey: item.identity?.key, provider: item.provider }))
+    });
+  }
   if (!agent) return res.status(404).json({ error: "子 Agent 线程不存在" });
-  res.json({ ...agent, logCount: agent.logCount ?? agent.logs.length, logs: agentLogsForResponse(agent.logs) });
+  const payload = {
+    ...agent,
+    identityKey: agent.identity?.key || agentIdentityKey(normalizedAgentProvider(agent.provider), agent.id, agent.toolUseId),
+    logCount: agent.logCount ?? agent.logs.length,
+    logs: agentLogsForResponse(agent.logs)
+  };
+  const etag = agentCollectionEtag(payload);
+  if (ifNoneMatch(req, etag)) return res.status(304).end();
+  res.setHeader("ETag", etag);
+  res.json(payload);
 });
 
 app.delete("/api/sessions/:id", async (req, res) => {
   let session = sessionById(req.params.id, req.authUser!.id);
   if (!session) return res.status(404).json({ error: "任务不存在" });
   const terminate = req.query.terminate === "true" || req.query.terminate === "1";
-  const policy = taskDeletionPolicy("session", session.status, activeRuns.has(session.id));
+  const policy = taskDeletionPolicy("session", session.status, activeRuns.has(session.id) || nativeTerminals.get(session.id, req.authUser!.id)?.status === "running");
   if (policy.requiresTermination && !terminate) {
     return res.status(409).json({ error: `${policy.reason}，请使用“停止并删除”`, code: "TASK_TERMINATION_REQUIRED", deletionPolicy: policy });
   }
@@ -11279,6 +9942,7 @@ app.post("/api/sessions/:id/input", async (req, res) => {
     revision: 0,
     ...(clientMutationId ? { clientMutationId } : {}),
     skillPolicies: workspaceAgents.skillPolicies,
+    executionMode: workspaceAgents.executionMode,
     skillNames: requestedSkillNames,
     attachments
   };
@@ -11302,7 +9966,8 @@ app.post("/api/sessions/:id/input", async (req, res) => {
         ...(input.clientMutationId ? { clientMutationId: input.clientMutationId } : {}),
         queuedAt: input.createdAt,
         skillPolicies: normalizeSkillPolicies(input.skillPolicies, input.skillNames ?? input.skillName, input.agentMode),
-        skillNames: normalizeSkillNames(input.skillNames)
+        skillNames: normalizeSkillNames(input.skillNames),
+        executionMode: input.executionMode
       }
     });
   } else {
@@ -11395,7 +10060,7 @@ app.post("/api/sessions/:id/input/:inputId/promote", async (req, res) => {
     const skillPolicies = normalizeSkillPolicies(claimed.input.skillPolicies);
     const skillNames = normalizeSkillNames(claimed.input.skillNames);
     await saveState();
-    launchSessionRun(session, workspace, attachmentPrompt(claimed.input.text, claimed.input.attachments || []), skillPolicies, skillNames);
+    launchSessionRun(session, workspace, attachmentPrompt(claimed.input.text, claimed.input.attachments || []), skillPolicies, skillNames, resolveTurnExecutionMode(claimed.input.executionMode, skillPolicies, workspaceAgentConfig(workspace).executionMode), "human");
     return res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
   } catch (error) {
     const status = error instanceof PendingInputActionError
@@ -11462,6 +10127,10 @@ app.post("/api/sessions/:id/overwrite", async (req, res) => {
   if (targetIndex < 0) return res.status(404).json({ error: "要覆盖的用户消息不存在" });
   if (!text) return res.status(400).json({ error: "重做内容不能为空" });
   const target = session.messages[targetIndex];
+  const targetPayload = recordOf(target.payload);
+  const targetPolicies = targetPayload?.skillPolicies ? normalizeSkillPolicies(targetPayload.skillPolicies) : workspaceAgentConfig(workspace).skillPolicies;
+  const targetMode = resolveTurnExecutionMode(targetPayload?.executionMode, targetPolicies, workspaceAgentConfig(workspace).executionMode);
+  if (targetMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) return res.status(409).json({ error: "请先启用协作插件后重做这一轮" });
   await clearDelegatedStateAfter(session.id, target.createdAt);
   const now = new Date().toISOString();
   session.messages = [
@@ -11483,7 +10152,7 @@ app.post("/api/sessions/:id/overwrite", async (req, res) => {
   session.revision += 1;
   const modelPrompt = replayContextForOverwrite(session.messages, targetIndex, text, target.attachments);
   await saveState();
-  launchSessionRun(session, workspace, modelPrompt, workspaceAgentConfig(workspace).skillPolicies);
+  launchSessionRun(session, workspace, modelPrompt, targetPolicies, normalizeSkillNames(targetPayload?.skillNames), targetMode, "human");
   res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
 });
 
@@ -11491,11 +10160,18 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
   const source = sessionById(req.params.id, req.authUser!.id);
   const workspace = source && executionWorkspaceForSession(source, req.authUser!.id);
   if (!source || !workspace) return res.status(404).json({ error: "任务或工作区不存在" });
+  const sourceContext = taskContextStore.ensure({ kind: "session", id: source.id, executionRoot: workspace.root }, req.authUser!.id, source.workspaceId, source.title);
+  const sourceExecution = sourceContext?.executions.find((execution) => execution.kind === "session" && execution.id === source.id);
   const messageId = String(req.body.messageId || "");
   const editedText = String(req.body.text || "").trim();
   const targetIndex = source.messages.findIndex((message) => message.id === messageId && (message.role === "user" || message.role === "assistant"));
   if (targetIndex < 0) return res.status(404).json({ error: "要创建分支的消息不存在" });
   const targetMessage = source.messages[targetIndex];
+  const modeMessage = targetMessage.role === "user" ? targetMessage : [...source.messages.slice(0, targetIndex)].reverse().find((message: Message) => message.role === "user");
+  const modePayload = recordOf(modeMessage?.payload);
+  const branchPolicies = modePayload?.skillPolicies ? normalizeSkillPolicies(modePayload.skillPolicies) : workspaceAgentConfig(workspace).skillPolicies;
+  const branchMode = resolveTurnExecutionMode(modePayload?.executionMode, branchPolicies, workspaceAgentConfig(workspace).executionMode);
+  if (editedText && branchMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) return res.status(409).json({ error: "请先启用协作插件后从这一轮创建分支" });
   if (targetMessage.role === "user" && !editedText) return res.status(400).json({ error: "请输入修改后的消息" });
 
   const now = new Date().toISOString();
@@ -11507,11 +10183,13 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
   }));
   const branch: Session = {
     id: uid("task"),
+    taskContextId: sourceContext?.id || null,
     ownerUserId: req.authUser!.id,
     title: nextBranchTitle(source),
     scopeKind: source.scopeKind,
     workspaceId: source.workspaceId,
     standaloneSkillPolicies: source.standaloneSkillPolicies ? { ...source.standaloneSkillPolicies } : undefined,
+    standaloneExecutionMode: source.standaloneExecutionMode,
     codexThreadId: null,
     engine: source.engine,
     engineSessionId: null,
@@ -11529,13 +10207,26 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
     pinned: false,
     archivedAt: null
   };
-  let branchWorkspace = workspace;
+  // A branch follows the source task's effective root. This matters for
+  // worktree and isolated tasks: creating a conversation branch must not
+  // silently jump back to the original project directory.
+  let branchWorkspace = sourceExecution?.executionRoot ? { ...workspace, id: branch.id, root: sourceExecution.executionRoot } : workspace;
   if (branch.scopeKind === "standalone") {
     branchWorkspace = await ensureSessionExecutionRoot(branch);
     await fsp.cp(workspace.root, branchWorkspace.root, { recursive: true, force: false });
     workspaceTreeIndex.invalidate(branchWorkspace.root);
   }
-  if (editedText) appendMessage(branch, { role: "user", text: editedText, payload: { inputMode: "branch" } });
+  let branchAttachments: Attachment[] = [];
+  try {
+    for (const message of branch.messages) {
+      if (message.attachments?.length) message.attachments = await copySessionAttachments(workspace.root, source.id, branchWorkspace.root, branch.id, message.attachments);
+    }
+    if (editedText && targetMessage.role === "user" && targetMessage.attachments?.length) branchAttachments = await copySessionAttachments(workspace.root, source.id, branchWorkspace.root, branch.id, targetMessage.attachments);
+  } catch (error) {
+    await deleteSessionAttachments(branchWorkspace.root, branch.id);
+    return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+  if (editedText) appendMessage(branch, { role: "user", text: editedText, attachments: branchAttachments, payload: { inputMode: "branch", skillPolicies: branchPolicies, skillNames: normalizeSkillNames(modePayload?.skillNames), executionMode: branchMode } });
   const transcript = priorMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .slice(-24)
@@ -11545,11 +10236,17 @@ app.post("/api/sessions/:id/branch", async (req, res) => {
   const modelPrompt = [
     "这是从一个历史任务节点创建的新对话分支。请以当前工作区文件状态为事实基础，并参考下列分支点之前的对话上下文。不要执行分支点之后的旧要求。",
     transcript ? `分支前上下文：\n${transcript}` : "",
-    editedText ? `用户修改后的要求：\n${editedText}` : ""
+    editedText ? `用户修改后的要求：\n${attachmentPrompt(editedText, branchAttachments)}` : ""
   ].filter(Boolean).join("\n\n");
+  if (sourceContext) taskContextStore.link(sourceContext.id, { kind: "session", id: branch.id, executionRoot: branchWorkspace.root }, req.authUser!.id, source.workspaceId);
   state.sessions.unshift(branch);
-  await saveState();
-  if (editedText) launchSessionRun(branch, branchWorkspace, modelPrompt, workspaceAgentConfig(branchWorkspace).skillPolicies);
+  try { await saveState(); }
+  catch (error) {
+    state.sessions = state.sessions.filter((item) => item.id !== branch.id);
+    taskContextStore.unlink({ kind: "session", id: branch.id }, req.authUser!.id);
+    throw error;
+  }
+  if (editedText) launchSessionRun(branch, branchWorkspace, modelPrompt, branchPolicies, normalizeSkillNames(modePayload?.skillNames), branchMode, "human");
   res.status(201).json(sessionWithMessageWindow(branch, req.query.messageLimit));
 });
 
@@ -11562,6 +10259,7 @@ app.post("/api/sessions/:id/run", async (req, res) => {
     try { await waitForActiveRunRelease(session.id, releasingRun); }
     catch (error) { return res.status(409).json({ error: error instanceof Error ? error.message : String(error) }); }
   }
+  if (nativeTerminals.get(session.id, req.authUser!.id)?.status === "running") return res.status(409).json({ error: "此任务正在使用原生终端，请先停止原生终端" });
   if (activeRuns.has(session.id)) return res.status(409).json({ error: "任务正在运行" });
   const admission = sessionRunAdmissionError(req.authUser!.id, req.authUser!.role);
   if (admission) return res.status(admission.status).json({ error: admission.error });
@@ -11580,7 +10278,12 @@ app.post("/api/sessions/:id/run", async (req, res) => {
   const displayPrompt = prompt || "请处理以下附件。";
   const internal = req.body.internal === true;
   const workspaceAgents = workspaceAgentConfig(workspace);
-  const skillPolicies = internal ? {} : workspaceAgents.skillPolicies;
+  const interruptedPayload = internal ? recordOf([...session.messages].reverse().find((message) => message.role === "user")?.payload) : null;
+  const skillPolicies = internal ? normalizeSkillPolicies(interruptedPayload?.skillPolicies) : workspaceAgents.skillPolicies;
+  const executionMode = internal ? resolveTurnExecutionMode(interruptedPayload?.executionMode, skillPolicies, workspaceAgents.executionMode) : workspaceAgents.executionMode;
+  if (executionMode === "collaborative" && !pluginHost.isEnabled(COLLABORATION_PLUGIN_ID)) {
+    return res.status(409).json({ error: "协作插件当前已停用，请先启用插件", code: "collaboration-plugin-disabled" });
+  }
   if (!internal && isWorkbenchDelegationEnabled(session, skillPolicies)
     && readiness.control?.identity.transport === "acp"
     && !readiness.control.capabilities.tools.shell) {
@@ -11608,7 +10311,7 @@ app.post("/api/sessions/:id/run", async (req, res) => {
     }
     appendMessage(session, { role: "event", text: "任务已从断点继续", eventType: "turn.resumed" });
   } else {
-    appendMessage(session, { role: "user", text: displayPrompt, attachments, payload: { skillPolicies, skillNames: requestedSkillNames } });
+    appendMessage(session, { role: "user", text: displayPrompt, attachments, payload: { skillPolicies, skillNames: requestedSkillNames, executionMode: workspaceAgents.executionMode } });
     if (session.title === "新任务") session.title = displayPrompt.slice(0, 34);
   }
   const startedAt = new Date().toISOString();
@@ -11622,7 +10325,7 @@ app.post("/api/sessions/:id/run", async (req, res) => {
   session.revision += 1;
   await saveState();
 
-  launchSessionRun(session, workspace, modelPrompt, skillPolicies, requestedSkillNames);
+  launchSessionRun(session, workspace, modelPrompt, skillPolicies, requestedSkillNames, executionMode, internal ? "auto-continuation" : "human");
   res.status(202).json(sessionWithMessageWindow(session, req.query.messageLimit));
 });
 
@@ -11943,6 +10646,16 @@ void backupScheduler.start().catch((error) => {
   auth.audit({ action: "system.backup_scheduler", targetType: "server", success: false, errorMessage: error instanceof Error ? error.message : String(error) });
 });
 
+async function migrateStoredAttachments() {
+  for (const session of state.sessions) {
+    const workspace = executionWorkspaceForSession(session);
+    if (!workspace || !fs.existsSync(workspace.root)) continue;
+    const attachments = [...session.messages.flatMap((message) => message.attachments || []), ...session.pendingInputs.flatMap((input) => input.attachments || [])];
+    try { await migrateSessionAttachments(workspace.root, session.id, attachments); }
+    catch (error) { console.warn(`Attachment migration deferred for ${session.id}`, error); }
+  }
+}
+
 async function recoverStartupSessions() {
   const ids = [...startupRecoverySessionIds];
   startupRecoverySessionIds.clear();
@@ -11975,7 +10688,8 @@ async function recoverStartupSessions() {
     session.updatedAt = resumedAt;
     session.revision += 1;
     await saveState();
-    launchSessionRun(session, workspace, prompt, workspaceAgentConfig(workspace).skillPolicies, explicitSkillNames);
+    const recoveredPolicies = normalizeSkillPolicies(recordOf(userMessage?.payload)?.skillPolicies);
+    launchSessionRun(session, workspace, prompt, recoveredPolicies, explicitSkillNames, resolveTurnExecutionMode(recordOf(userMessage?.payload)?.executionMode, recoveredPolicies, workspaceAgentConfig(workspace).executionMode));
   }
   if (ids.length) await saveState();
 }
@@ -11984,34 +10698,18 @@ const listeningServer = app.listen(PORT, "127.0.0.1", () => {
   console.log(`Meta Code backend: http://127.0.0.1:${PORT}`);
   appUpdateService.start();
   setTimeout(() => {
-    void recoverStartupSessions().catch((error) => console.error("Startup task recovery failed", error));
+    void migrateStoredAttachments().then(() => recoverStartupSessions()).catch((error) => console.error("Startup task recovery failed", error));
     void runSessionManagementStartupChecks().catch((error) => console.error("Session management startup check failed", error));
     void cleanupExpiredSessionTrash().catch((error) => console.error("Expired session cleanup failed", error));
-    try {
-      fs.mkdirSync(WORKFLOW_PLANNER_TRANSACTION_DIR, { recursive: true });
-      for (const entry of fs.readdirSync(MCP_CONFIG_DIR, { withFileTypes: true })) {
-        if (entry.isFile() && entry.name.includes("-planner-") && entry.name.endsWith(".json")) fs.rmSync(path.join(MCP_CONFIG_DIR, entry.name), { force: true });
-      }
-      for (const workflow of workflowRepository.listAll()) {
-        if (!workflow.workDirectory || !fs.existsSync(workflow.workDirectory)) continue;
-        try {
-          const maintenance = workflowStateFiles.maintenance(workflow);
-          if (maintenance?.status === "planning" && workflow.status !== "planning") {
-            const recovered = workflowRepository.finishMaintenanceWithoutPlan(workflow.id, workflow.ownerUserId, workflowLog("error", "规划维护已中断", "工作台重启时维护事务尚未提交，原计划保持不变"));
-            workflowStateFiles.failMaintenance(recovered, "工作台重启导致本轮维护中断，请沿用原计划重新提交修改意见");
-            workflowStateFiles.syncResults(recovered);
-          } else workflowStateFiles.sync(workflow);
-        }
-        catch (error) { console.error(`Workflow protocol migration failed for ${workflow.id}`, error); }
-      }
-      for (const workflow of workflowRepository.recoverAfterRestart()) {
-        try { syncWorkflowProtocolFiles(workflow.id, workflow.ownerUserId); appendWorkflowProtocolEvent(workflow.id, workflow.ownerUserId, "workflow.recovered_after_restart"); }
-        catch (error) { console.error(`Workflow protocol recovery sync failed for ${workflow.id}`, error); }
-        queueWorkflowTick(workflow.id, workflow.ownerUserId);
-      }
-    }
-    catch (error) { console.error("Startup workflow recovery failed", error); }
+
   }, 250);
+  // Reconcile native sub-agent projections independently from the read-only
+  // drawer endpoints. A short cadence keeps lifecycle cards responsive while
+  // avoiding a full transcript scan for idle sessions.
+  nativeAgentProjectionReconciler = setInterval(() => {
+    void reconcileActiveNativeAgentProjections().catch((error) => console.warn("Native Agent projection reconcile failed:", error));
+  }, 1_500);
+  nativeAgentProjectionReconciler.unref();
 });
 httpServer = listeningServer;
 listeningServer.on("error", (error: NodeJS.ErrnoException) => {
@@ -12020,12 +10718,6 @@ listeningServer.on("error", (error: NodeJS.ErrnoException) => {
   DATA_OWNER_LEASE.release();
   process.exit(1);
 });
-
-workflowLeaseReconciler = setInterval(() => {
-  try { for (const workflow of workflowRepository.recoverExpiredLeases(new Set(activeWorkflowNodes.keys()))) { syncWorkflowProtocolFiles(workflow.id, workflow.ownerUserId); appendWorkflowProtocolEvent(workflow.id, workflow.ownerUserId, "workflow.lease_recovered"); queueWorkflowTick(workflow.id, workflow.ownerUserId); } }
-  catch (error) { console.error("Workflow lease reconciliation failed", error); }
-}, 15_000);
-workflowLeaseReconciler.unref();
 
 sessionTrashCleaner = setInterval(() => {
   void cleanupExpiredSessionTrash().catch((error) => console.error("Expired session cleanup failed", error));

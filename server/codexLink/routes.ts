@@ -4,6 +4,7 @@ import express from "express";
 import { CodexAppServerClient } from "./appServerClient.js";
 import { CodexLinkRepository } from "./repository.js";
 import type { CodexLinkBinding } from "./types.js";
+import { pathKey } from "../pathBoundary.js";
 
 type WorkspaceRef = { id: string; ownerUserId: string; root: string };
 type SessionRef = { id: string; ownerUserId: string; workspaceId: string; engine: string; codexThreadId?: string | null; status?: string };
@@ -44,7 +45,7 @@ export function createCodexLinkRouter(dependencies: CodexLinkDependencies) {
 
   const assertThreadInWorkspace = (threadCwd: string, workspace: WorkspaceRef) => {
     if (!threadCwd) throw new Error("官方线程缺少工作目录，无法确认其归属");
-    if (path.resolve(threadCwd).toLowerCase() !== path.resolve(workspace.root).toLowerCase()) {
+    if (pathKey(threadCwd) !== pathKey(workspace.root)) {
       throw new Error("该线程不属于当前工作区");
     }
   };

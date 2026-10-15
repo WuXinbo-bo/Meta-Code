@@ -1,17 +1,17 @@
-import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Activity, ChevronRight, Eye, FileCode2, Search, TerminalSquare, Wrench, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { commandActivitySummary } from "./AgentActivityEntry";
-import { ActivityRenderer } from "./ActivityRenderer";
+import { ActivityRenderer, type ActivityRendererProps } from "./ActivityRenderer";
 import { AgentPlanView } from "./AgentPlanView";
-import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPlanSnapshot, isRoutineActivityStatus, normalizeActivityLogs, type AgentPlanSnapshot, type ActivityViewLog } from "./activityModel";
+import { activityActionLabel, activityCategoryLabel, activityVisualTier, agentPlanSnapshot, isRoutineActivityStatus, normalizeActivityLogs, type ActivityCategory, type AgentPlanSnapshot, type ActivityViewLog } from "./activityModel";
 
 type ActivityItem =
   | { type: "log"; log: ActivityViewLog }
   | { type: "current"; log: ActivityViewLog }
   | { type: "group"; id: string; logs: ActivityViewLog[] }
   | { type: "summary"; id: string; category: ActivityViewLog["category"]; logs: ActivityViewLog[] }
-  | { type: "plan"; id: string; snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] };
+  | { type: "plan"; id: string; disclosureKey: string; snapshot: AgentPlanSnapshot; history: AgentPlanSnapshot[] };
 
 const COLLAPSIBLE_CATEGORIES = new Set(["command", "file", "read", "search", "tool", "mcp", "todo", "status"]);
 const SUMMARY_CATEGORIES = new Set<ActivityViewLog["category"]>(["command", "file", "read", "search", "tool", "mcp", "todo"]);
@@ -49,7 +49,7 @@ function planAwareActivities(logs: ActivityViewLog[], provider: string): Activit
     const source = item.type === "group" ? item.logs[0] : item.type === "log" ? item.log : null;
     return source ? logs.findIndex((log) => log.id === source.id) > latestIndex : false;
   });
-  const plan: ActivityItem = { type: "plan", id: `agent-plan-${latest.snapshot.id}`, snapshot: latest.snapshot, history: snapshots.slice(0, -1).map(({ snapshot }) => snapshot) };
+  const plan: ActivityItem = { type: "plan", id: `agent-plan-${latest.snapshot.id}`, disclosureKey: `todo:${snapshots[0].log.id}`, snapshot: latest.snapshot, history: snapshots.slice(0, -1).map(({ snapshot }) => snapshot) };
   items.splice(insertionIndex < 0 ? items.length : insertionIndex, 0, plan);
   return items;
 }
@@ -103,68 +103,96 @@ function settledActivityItems(logs: ActivityViewLog[]): ActivityItem[] {
       retained.push({ type: "log", log });
     }
   }
+  // A freshly opened Agent can legitimately have only one lifecycle event
+  // (for example, "工作已完成" or "正在运行"). Keep that newest event
+  // visible instead of turning a non-empty transcript into an empty timeline.
+  if (!retained.length && logs.length) {
+    retained.push({ type: "log", log: logs.at(-1)! });
+  }
   return retained;
 }
 
+function activityDisclosureKey(item: Extract<ActivityItem, { type: "group" | "summary" }>) {
+  const first = item.logs[0];
+  return `${first.category}:${first.id}`;
+}
+
+function activityItemHasFailure(item: Extract<ActivityItem, { type: "group" | "summary" }>) {
+  return item.logs.some((log) => log.phase === "failed" || log.kind === "error");
+}
+
 function liveActivityItems(logs: ActivityViewLog[], provider: string): ActivityItem[] {
-  // Only the open activity segment rotates. Earlier replies and their tool
-  // summaries remain in chronological order while a later segment streams.
+  // Keep the completed portion of every open turn. The old implementation
+  // retained only the newest operational event, which made earlier commands
+  // and file changes disappear while a later tool was running. Build the
+  // current segment with the same grouping rules as the settled timeline, then
+  // mark the newest active event as the live focus without removing its peers.
   const boundary = logs.findLastIndex((log) => log.category === "message" || log.category === "result");
   const history = settledActivityItems(logs.slice(0, boundary + 1));
-  const currentLogs = logs.slice(boundary + 1);
-  const latestOperational = [...currentLogs].reverse().find((log) => !["message", "result", "error"].includes(log.category));
-  const retained = currentLogs.filter((log) => log.category === "error" || log.kind === "error");
-  if (latestOperational && !retained.some((log) => log.id === latestOperational.id)) retained.push(latestOperational);
-  retained.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  return [...history, ...planAwareActivities(retained, provider).map((item): ActivityItem => item.type === "log" && item.log.id === latestOperational?.id
+  const currentLogs = logs.slice(boundary + 1).filter((log) => log.category !== "message" && log.category !== "result");
+  const latestOperational = [...currentLogs].reverse().find((log) => log.category !== "error");
+  const latestActive = [...currentLogs].reverse().find((log) => log.phase === "running" || log.phase === "started") || latestOperational;
+  const currentItems = planAwareActivities(currentLogs, provider);
+  return [...history, ...currentItems.map((item): ActivityItem => item.type === "log" && item.log.id === latestActive?.id
     ? { type: "current", log: item.log }
     : item)];
 }
 
-function CompletedActivitySummary({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
+function PreservedActivityRenderer({ open, onOpenChange, ...props }: ActivityRendererProps & {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Native toggle does not bubble. Capture only the entry's root disclosure,
+  // keeping nested technical-detail toggles independent of the timeline row.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const recordToggle = (event: Event) => {
+      if (event.target === root.firstElementChild && event.target instanceof HTMLDetailsElement) onOpenChange(event.target.open);
+    };
+    root.addEventListener("toggle", recordToggle, true);
+    return () => root.removeEventListener("toggle", recordToggle, true);
+  }, [onOpenChange]);
+  return <div ref={rootRef} className="activity-log-disclosure" style={{ display: "contents" }}><ActivityRenderer {...props} expanded={open} /></div>;
+}
+
+function CompletedActivitySummary({ item, status, open, onOpenChange, renderLog }: {
   item: Extract<ActivityItem, { type: "summary" }>;
   status: string;
-  provider: string;
-  providerLabel?: string;
-  providerIcon?: string;
-  providerAccent?: string;
-  messageLabel?: string;
-  renderMessage?: (text: string) => ReactNode;
-  workspaceId?: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  renderLog: (log: ActivityViewLog) => ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   const categoryLabel = activityCategoryLabel(item.category);
-  return <details className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  const failed = activityItemHasFailure(item);
+  const phase = failed ? "failed" : isLiveTimeline(status) && item.logs.some((log) => log.phase === "running" || log.phase === "started") ? "running" : "completed";
+  return <details open={open} className={`activity-summary-group activity-visual-${activityVisualTier(item.category)} category-${item.category} phase-${phase}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
-      <span className="agent-event-icon completed">{categoryIcon(item.category)}</span>
+      <span className={`agent-event-icon ${phase}`}>{categoryIcon(item.category)}</span>
       <strong>{activityGroupLabel(item.category, item.logs.length)}</strong>
       <ChevronRight className="agent-event-chevron" size={14} />
     </summary>
     {open && <div className="activity-summary-details">
-      {item.logs.map((log) => <ActivityRenderer key={log.id} log={log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />)}
+      {item.logs.map(renderLog)}
     </div>}
   </details>;
 }
 
-function CollapsedActivityGroup({ item, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId }: {
+function CollapsedActivityGroup({ item, status, open, onOpenChange, renderLog }: {
   item: Extract<ActivityItem, { type: "group" }>;
   status: string;
-  provider: string;
-  providerLabel?: string;
-  providerIcon?: string;
-  providerAccent?: string;
-  messageLabel?: string;
-  renderMessage?: (text: string) => ReactNode;
-  workspaceId?: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  renderLog: (log: ActivityViewLog) => ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
   const latest = item.logs.at(-1)!;
   const time = new Date(latest.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const summary = (latest.category === "command" ? commandActivitySummary(latest) : latest.text || "状态已更新").replace(/\s+/g, " ").trim();
-  const latestStatus = latest.phase === "failed" || latest.kind === "error" ? "failed" : latest.phase === "completed" ? "completed" : latest.phase === "running" ? "running" : status;
+  const latestStatus = activityItemHasFailure(item) ? "failed" : latest.phase === "completed" ? "completed" : latest.phase === "running" ? "running" : status;
   const categoryLabel = activityCategoryLabel(latest.category);
   const groupLabel = activityGroupLabel(latest.category, item.logs.length);
-  return <details className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details open={open} className={`agent-stream-cluster activity-visual-${activityVisualTier(latest.category)} category-${latest.category} phase-${latestStatus}`} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
     <summary title={`展开 ${item.logs.length} 条${categoryLabel}活动`}>
       <span className={`agent-event-icon ${latestStatus}`}>{categoryIcon(latest.category)}</span>
       <span className="agent-stream-copy"><strong>{groupLabel}</strong><small>{summary}</small></span>
@@ -173,27 +201,41 @@ function CollapsedActivityGroup({ item, status, provider, providerLabel, provide
       <ChevronRight className="agent-event-chevron" size={14} />
     </summary>
     {open && <div className="agent-stream-cluster-items">
-      {item.logs.map((log) => <ActivityRenderer key={log.id} log={log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />)}
+      {item.logs.map(renderLog)}
     </div>}
   </details>;
 }
 
 function minimalActivities(logs: readonly unknown[], provider: string, status: string) {
-  const normalized = normalizeActivityLogs(logs);
+  // Bootstrap lifecycle acknowledgements duplicate the task header and working
+  // indicator. Preserve them in the source logs and explicit inspection view.
+  const normalized = normalizeActivityLogs(logs).filter((log) => !isRoutineActivityStatus(log)
+    || !/会话已创建|开始运行|(?:thread|session)[._ ](?:created|started)|turn[._ ]started/i.test(`${log.title} ${log.text} ${log.rawType || ""}`));
+  const hasUsefulActivity = normalized.some((log) => !isRoutineActivityStatus(log));
   const latest = [...normalized].reverse().find((log) => !isRoutineActivityStatus(log));
   const visible: ActivityViewLog[] = [];
   for (const log of normalized) {
-    if (isRoutineActivityStatus(log)) continue;
+    // Routine status entries stay out of a busy timeline, but when they are
+    // the only available evidence they are the most useful thing to show.
+    if (hasUsefulActivity && isRoutineActivityStatus(log)) continue;
     const displayLog = log.category === "reasoning"
       ? { ...log, title: "思考", text: "", detail: undefined, transient: isLiveTimeline(status) && log.phase === "running" && latest?.id === log.id }
       : { ...log, title: activityActionLabel(log, provider) };
     if (displayLog.category === "reasoning" && visible.at(-1)?.category === "reasoning") visible[visible.length - 1] = displayLog;
     else visible.push(displayLog);
   }
-  return isLiveTimeline(status) ? liveActivityItems(visible, provider) : settledActivityItems(visible);
+  if (!isLiveTimeline(status)) return settledActivityItems(visible);
+  return liveActivityItems(visible, provider).map((item): ActivityItem => {
+    const log = item.type === "log" || item.type === "current" ? item.log : null;
+    // A single live tool uses the same compact disclosure as its completed
+    // state. Starting a command must not expose its body automatically.
+    return log && SUMMARY_CATEGORIES.has(log.category)
+      ? { type: "summary", id: `activity-summary-${log.category}-${log.id}`, category: log.category, logs: [log] }
+      : item;
+  });
 }
 
-export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, scrollRef: externalScrollRef }: {
+export function ActivityTimeline({ logs, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider = true, showFilters = true, hiddenCategories = [], scrollRef: externalScrollRef }: {
   logs: readonly unknown[];
   status: string;
   provider: string;
@@ -204,14 +246,54 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
   renderMessage?: (text: string) => ReactNode;
   workspaceId?: string;
   showProvider?: boolean;
+  showFilters?: boolean;
+  hiddenCategories?: readonly ActivityCategory[];
   scrollRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   const localScrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const items = useMemo(() => minimalActivities(logs, provider, status), [logs, provider, status]);
-  const virtualized = items.length > 80;
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [phaseFilter, setPhaseFilter] = useState("all");
+  // Presentation keys outlive group -> completed-summary transitions and
+  // virtualized row remounts. Logs and their grouping remain unchanged.
+  const [disclosures, setDisclosures] = useState<Record<string, boolean>>({});
+  const recordDisclosure = useCallback((key: string, open: boolean) => {
+    setDisclosures((current) => current[key] === open ? current : { ...current, [key]: open });
+  }, []);
+  const normalizedLogs = useMemo(() => normalizeActivityLogs(logs).filter((log) => !hiddenCategories.includes(log.category)), [logs, hiddenCategories]);
+  const hasFilters = showFilters && Boolean(query.trim() || categoryFilter !== "all" || phaseFilter !== "all");
+  const failureCount = useMemo(() => normalizedLogs.filter((log) => log.phase === "failed").length, [normalizedLogs]);
+  const categories = useMemo(() => [...new Set(normalizedLogs.map((log) => log.category))].sort(), [normalizedLogs]);
+  const filteredLogs = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return normalizedLogs.filter((log) => {
+      if (categoryFilter !== "all" && log.category !== categoryFilter) return false;
+      if (phaseFilter !== "all" && log.phase !== phaseFilter) return false;
+      if (!needle) return true;
+      return `${log.title} ${log.text} ${log.rawType || ""}`.toLocaleLowerCase().includes(needle);
+    });
+  }, [normalizedLogs, query, categoryFilter, phaseFilter]);
+  // Search is an inspection view: every match remains individually accessible,
+  // including historical live tools and reasoning/status events hidden by the
+  // concise default presentation.
+  const items = useMemo<ActivityItem[]>(() => hasFilters
+    ? filteredLogs.map((log) => ({ type: "log", log: { ...log, transient: false } }))
+    : minimalActivities(filteredLogs, provider, status), [filteredLogs, provider, status, hasFilters]);
+  const virtualized = items.length > 40;
   const [scrollMargin, setScrollMargin] = useState(0);
   const [externalScrollElement, setExternalScrollElement] = useState<HTMLDivElement | null>(null);
+  const filterKey = `${query}\u0000${categoryFilter}\u0000${phaseFilter}`;
+  const previousFilterKeyRef = useRef(filterKey);
+  useLayoutEffect(() => {
+    if (previousFilterKeyRef.current === filterKey) return;
+    previousFilterKeyRef.current = filterKey;
+    const container = externalScrollRef?.current || localScrollRef.current;
+    const list = listRef.current;
+    if (container) container.scrollTop = externalScrollRef && list
+      ? list.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+      : 0;
+  }, [filterKey, externalScrollRef]);
   // Parent refs are attached after child layout effects. Resolve an external
   // viewport after commit so an initially virtualized drawer cannot stay blank.
   useEffect(() => {
@@ -244,18 +326,39 @@ export function ActivityTimeline({ logs, status, provider, providerLabel, provid
     scrollMargin
   });
 
+  const renderLog = (log: ActivityViewLog) => {
+    const props = { log, status, provider, providerLabel, providerIcon, providerAccent, messageLabel, renderMessage, workspaceId, showProvider, showReasoning: hasFilters };
+    if (log.kind === "message") return <ActivityRenderer key={log.id} {...props} />;
+    const key = `log:${log.id}`;
+    return <PreservedActivityRenderer key={log.id} {...props} open={disclosures[key] ?? false} onOpenChange={(open) => recordDisclosure(key, open)} />;
+  };
   const renderItem = (item: ActivityItem) => item.type === "group"
-    ? <CollapsedActivityGroup key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+    ? <CollapsedActivityGroup key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? false} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "summary"
-      ? <CompletedActivitySummary key={item.id} item={item} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} />
+      ? <CompletedActivitySummary key={activityDisclosureKey(item)} item={item} status={status} open={disclosures[activityDisclosureKey(item)] ?? false} onOpenChange={(open) => recordDisclosure(activityDisclosureKey(item), open)} renderLog={renderLog} />
     : item.type === "current"
-      ? <div className="activity-live-current" key={`current-${item.log.id}`}><ActivityRenderer log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} /></div>
+      ? <div className="activity-live-current" key={`current-${item.log.id}`}>{renderLog(item.log)}</div>
     : item.type === "plan"
-      ? <AgentPlanView key={item.id} snapshot={item.snapshot} history={item.history} />
-    : <ActivityRenderer key={item.log.id} log={item.log} status={status} provider={provider} providerLabel={providerLabel} providerIcon={providerIcon} providerAccent={providerAccent} messageLabel={messageLabel} renderMessage={renderMessage} workspaceId={workspaceId} showProvider={showProvider} />;
+      ? <AgentPlanView key={item.disclosureKey} snapshot={item.snapshot} history={item.history} expanded={disclosures[item.disclosureKey] ?? false} onOpenChange={(open) => recordDisclosure(item.disclosureKey, open)} />
+    : renderLog(item.log);
 
   const rows = virtualized ? virtualizer.getVirtualItems() : [];
   return <div className="activity-timeline single-layer">
+    {showFilters && (normalizedLogs.length > 3 || hasFilters || failureCount > 0) && <div className="activity-timeline-controls" role="search" aria-label="筛选活动">
+      <Search size={13} aria-hidden="true" />
+      <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索活动" aria-label="搜索活动" />
+      <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="活动类型">
+        <option value="all">全部类型</option>
+        {categories.map((category) => <option value={category} key={category}>{activityCategoryLabel(category)}</option>)}
+      </select>
+      <select value={phaseFilter} onChange={(event) => setPhaseFilter(event.target.value)} aria-label="活动状态">
+        <option value="all">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="started">已开始</option>
+      </select>
+      {failureCount > 0 && <button className="activity-failure-filter" type="button" title="查看失败活动" aria-label={`查看 ${failureCount} 条失败活动`} aria-pressed={phaseFilter === "failed"} onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("failed"); }}>失败 {failureCount}</button>}
+      {(query || categoryFilter !== "all" || phaseFilter !== "all") && <button type="button" title="清除筛选" aria-label="清除筛选" onClick={() => { setQuery(""); setCategoryFilter("all"); setPhaseFilter("all"); }}><X size={13} /></button>}
+    </div>}
+    {hasFilters && <p className="activity-timeline-result-count" role="status">匹配 {filteredLogs.length} / {normalizedLogs.length} 条活动</p>}
+    {!items.length && hasFilters && <p className="activity-timeline-no-results" role="status">没有匹配的活动</p>}
     <div className={`activity-timeline-list ${virtualized ? "virtualized" : ""} ${externalScrollRef ? "external-scroll" : ""}`} ref={externalScrollRef ? listRef : localScrollRef}>
       {virtualized
         ? <div className="activity-virtual-content" style={{ height: `${virtualizer.getTotalSize()}px` }}>

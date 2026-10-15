@@ -67,7 +67,7 @@ export function canonicalActivityFromEngineEvent(event: NormalizedEngineEvent, o
     phase: engineEventPhase(event),
     ...(options.occurredAt ? { occurredAt: options.occurredAt } : {}),
     title: options.title || engineEventTitle(event, semanticType),
-    summary: event.text || options.title || engineEventTitle(event, semanticType),
+    summary: event.type === "assistant" ? event.text : event.text || options.title || engineEventTitle(event, semanticType),
     detail: event.detail ?? event.payload
   });
 }
